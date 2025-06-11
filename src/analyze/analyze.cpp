@@ -95,17 +95,25 @@ std::shared_ptr<Query> Analyze::do_analyze(std::shared_ptr<ast::TreeNode> parse)
             alias_map[right_ref->tab_name] = right_ref->tab_name;
         }
         // 处理target list，再target list中添加上表名，例如 a.id
+        // 普通列（非聚合函数列）需要添加到query->cols中
         for (auto &sv_sel_col : x->cols)
         {
+            std::cerr << "DEBUG: analyze.cpp - Processing col: '" << sv_sel_col->col_name << "', alias: '" << sv_sel_col->alias << "'" << std::endl;
+            // 只处理普通列，聚合函数已经在x->agg_exprs中了
             TabCol sel_col = {.tab_name = sv_sel_col->tab_name, .col_name = sv_sel_col->col_name};
             query->cols.push_back(sel_col);
         }
 
         std::vector<ColMeta> all_cols;
         get_all_cols(query->tables, all_cols);
-        if (query->cols.empty())
+        std::cerr << "DEBUG: analyze.cpp - query->cols.size() = " << query->cols.size() << std::endl;
+        std::cerr << "DEBUG: analyze.cpp - agg_exprs.size() = " << x->agg_exprs.size() << std::endl;
+        
+        // 只有当既没有普通列也没有聚合函数时，才认为是SELECT *
+        if (query->cols.empty() && x->agg_exprs.empty())
         {
             // select all columns (SELECT *)
+            std::cerr << "DEBUG: analyze.cpp - SELECT * detected" << std::endl;
             query->is_select_star = true;
             for (auto &col : all_cols)
             {
@@ -116,8 +124,10 @@ std::shared_ptr<Query> Analyze::do_analyze(std::shared_ptr<ast::TreeNode> parse)
         else
         {
             // infer table name from column name, 考虑别名
+            std::cerr << "DEBUG: analyze.cpp - Checking columns..." << std::endl;
             for (auto &sel_col : query->cols)
             {
+                std::cerr << "DEBUG: analyze.cpp - Checking column: " << sel_col.col_name << std::endl;
                 sel_col = check_column_with_alias(all_cols, sel_col, alias_map); // 列元数据校验（支持别名）
             }
         }
@@ -138,6 +148,108 @@ std::shared_ptr<Query> Analyze::do_analyze(std::shared_ptr<ast::TreeNode> parse)
 
         // 保存别名映射到Query对象（用于EXPLAIN显示）
         query->table_alias_map = alias_map;
+
+        // 处理聚合函数 - 现在从SelectStmt中直接获取聚合表达式
+        std::cerr << "DEBUG: analyze.cpp - agg_exprs.size() = " << x->agg_exprs.size() << std::endl;
+        if (!x->agg_exprs.empty()) {
+            // 有聚合函数，直接使用SelectStmt中的聚合表达式
+            std::cerr << "DEBUG: analyze.cpp - Using agg_exprs from SelectStmt" << std::endl;
+            query->agg_exprs = x->agg_exprs;
+        } else {
+            // 兼容性处理：检查列名中是否包含聚合函数（用于向后兼容）
+            for (auto &col : x->cols) {
+                // 如果列名包含聚合函数标识，说明这是从聚合表达式转换来的
+                if (col->col_name.find("COUNT") != std::string::npos ||
+                    col->col_name.find("MAX") != std::string::npos ||
+                    col->col_name.find("MIN") != std::string::npos ||
+                    col->col_name.find("SUM") != std::string::npos ||
+                    col->col_name.find("AVG") != std::string::npos) {
+                
+                // 根据列名重建聚合表达式（这是一个简化的方法）
+                // 在更完善的实现中，应该直接从语法解析器获取AggregateExpr节点
+                ast::AggType agg_type;
+                std::shared_ptr<ast::Col> agg_col = nullptr;
+                
+                if (col->col_name.find("COUNT(*)") != std::string::npos) {
+                    agg_type = ast::AGG_COUNT;
+                    agg_col = nullptr;  // COUNT(*) 不需要列
+                } else if (col->col_name.find("COUNT") != std::string::npos) {
+                    agg_type = ast::AGG_COUNT;
+                    // 提取列名
+                    size_t start = col->col_name.find('(') + 1;
+                    size_t end = col->col_name.find(')', start);
+                    if (start != std::string::npos && end != std::string::npos) {
+                        std::string col_name = col->col_name.substr(start, end - start);
+                        agg_col = std::make_shared<ast::Col>("", col_name);
+                    }
+                } else if (col->col_name.find("MAX") != std::string::npos) {
+                    agg_type = ast::AGG_MAX;
+                    // 类似地提取列名
+                } else if (col->col_name.find("MIN") != std::string::npos) {
+                    agg_type = ast::AGG_MIN;
+                } else if (col->col_name.find("SUM") != std::string::npos) {
+                    agg_type = ast::AGG_SUM;
+                } else if (col->col_name.find("AVG") != std::string::npos) {
+                    agg_type = ast::AGG_AVG;
+                }
+                
+                auto agg_expr = std::make_shared<ast::AggregateExpr>(agg_type, agg_col, col->alias);
+                query->agg_exprs.push_back(agg_expr);
+                }
+            }
+        }
+
+        // 处理GROUP BY子句
+        for (auto &group_col : x->group_by_cols) {
+            TabCol gb_col = {.tab_name = group_col->tab_name, .col_name = group_col->col_name};
+            gb_col = check_column_with_alias(all_cols, gb_col, alias_map);
+            query->group_by_cols.push_back(gb_col);
+        }
+
+        // GROUP BY语义检查：SELECT列表中的非聚合列必须出现在GROUP BY子句中
+        if (!query->group_by_cols.empty()) {
+            for (const auto& sel_col : query->cols) {
+                bool found_in_group_by = false;
+                
+                // 检查该列是否在GROUP BY子句中
+                for (const auto& group_col : query->group_by_cols) {
+                    if (sel_col.tab_name == group_col.tab_name && 
+                        sel_col.col_name == group_col.col_name) {
+                        found_in_group_by = true;
+                        break;
+                    }
+                }
+                
+                if (!found_in_group_by) {
+                    // 该列不在GROUP BY中，这在SQL语义上是错误的
+                    throw InternalError("Column '" + sel_col.col_name + 
+                                       "' must appear in the GROUP BY clause or be used in an aggregate function");
+                }
+            }
+        }
+
+        // 处理HAVING子句
+        get_clause(x->having_conds, query->having_conds);
+        // 对于HAVING子句，我们需要特殊处理聚合函数，跳过列名验证
+        // 因为聚合函数如COUNT(*)不是表的实际列
+        for (auto &cond : query->having_conds) {
+            // 检查左侧是否是聚合函数
+            bool is_aggregate_function = 
+                cond.lhs_col.col_name.find("COUNT(") != std::string::npos ||
+                cond.lhs_col.col_name.find("MAX(") != std::string::npos ||
+                cond.lhs_col.col_name.find("MIN(") != std::string::npos ||
+                cond.lhs_col.col_name.find("SUM(") != std::string::npos ||
+                cond.lhs_col.col_name.find("AVG(") != std::string::npos;
+            
+            if (!is_aggregate_function) {
+                // 只对非聚合函数的列进行验证
+                cond.lhs_col = check_column_with_alias(all_cols, cond.lhs_col, alias_map);
+                if (!cond.is_rhs_val) {
+                    cond.rhs_col = check_column_with_alias(all_cols, cond.rhs_col, alias_map);
+                }
+            }
+            // 聚合函数的列名验证将在执行阶段处理
+        }
     }
     else if (auto x = std::dynamic_pointer_cast<ast::UpdateStmt>(parse))
     {

@@ -40,6 +40,12 @@ public:
     std::map<std::string, std::string> table_alias_map;
     // 标记原始查询是否是SELECT *
     bool is_select_star = false;
+    // 聚合函数表达式列表
+    std::vector<std::shared_ptr<ast::AggregateExpr>> agg_exprs;
+    // GROUP BY列列表
+    std::vector<TabCol> group_by_cols;
+    // HAVING条件列表
+    std::vector<Condition> having_conds;
 
     Query() {}
 };

@@ -205,7 +205,10 @@ std::shared_ptr<Plan> Planner::physical_optimization(std::shared_ptr<Query> quer
     // 第三步：应用投影下推 - 在计划树中插入Project节点
     plan = apply_projection_pushdown(plan, query);
 
-    // 第四步：处理ORDER BY
+    // 第四步：处理聚合函数
+    plan = generate_aggregate_plan(query, std::move(plan));
+
+    // 第五步：处理ORDER BY
     plan = generate_sort_plan(query, std::move(plan));
 
     return plan;
@@ -474,6 +477,29 @@ std::shared_ptr<Plan> Planner::make_one_rel(std::shared_ptr<Query> query)
     // 返回完整的查询执行计划树
     // 此时所有表都已被整合到一个统一的执行计划中
     return table_join_executors;
+}
+
+/**
+ * @brief 聚合计划生成函数
+ *
+ * 该函数负责处理SQL查询中的聚合函数，在现有查询计划的基础上添加聚合操作。
+ * 它分析查询中的聚合需求，生成相应的聚合执行计划。
+ *
+ * @param query 包含查询信息的Query对象，包括聚合函数表达式和GROUP BY列
+ * @param plan 已经生成的基础查询计划（如连接计划、扫描计划等）
+ * @return std::shared_ptr<Plan> 返回包含聚合操作的完整执行计划
+ */
+std::shared_ptr<Plan> Planner::generate_aggregate_plan(std::shared_ptr<Query> query, std::shared_ptr<Plan> plan)
+{
+    // 检查是否有聚合函数
+    if (query->agg_exprs.empty()) {
+        return plan;  // 没有聚合函数，直接返回原计划
+    }
+
+    // 创建聚合计划，传递GROUP BY列信息
+    auto aggregate_plan = std::make_shared<AggregatePlan>(plan, query->agg_exprs, query->group_by_cols);
+    
+    return aggregate_plan;
 }
 
 /**
@@ -1099,6 +1125,62 @@ std::shared_ptr<Plan> Planner::apply_projection_pushdown(std::shared_ptr<Plan> p
         needed_columns.insert(col.tab_name + "." + col.col_name);
     }
 
+    // 添加聚合函数中涉及的列
+    for (const auto &agg_expr : query->agg_exprs)
+    {
+        if (agg_expr->col)  // 排除COUNT(*)
+        {
+            // 根据聚合函数中的列查找对应的表名
+            std::string col_name = agg_expr->col->col_name;
+            std::string tab_name = agg_expr->col->tab_name;
+            
+            // 如果表名为空，需要推断
+            if (tab_name.empty() && !query->tables.empty())
+            {
+                // 简化处理：对于单表查询，使用第一个表名
+                if (query->tables.size() == 1)
+                {
+                    tab_name = query->tables[0];
+                }
+                else
+                {
+                    // 多表情况下，需要在所有表中查找该列
+                    for (const auto &table : query->tables)
+                    {
+                        try
+                        {
+                            auto &table_meta = sm_manager_->db_.get_table(table);
+                            for (const auto &col_meta : table_meta.cols)
+                            {
+                                if (col_meta.name == col_name)
+                                {
+                                    tab_name = table;
+                                    break;
+                                }
+                            }
+                            if (!tab_name.empty()) break;
+                        }
+                        catch (...)
+                        {
+                            continue;
+                        }
+                    }
+                }
+            }
+            
+            if (!tab_name.empty())
+            {
+                needed_columns.insert(tab_name + "." + col_name);
+            }
+        }
+    }
+
+    // 添加GROUP BY列
+    for (const auto &group_col : query->group_by_cols)
+    {
+        needed_columns.insert(group_col.tab_name + "." + group_col.col_name);
+    }
+
     // 添加WHERE条件中涉及的列
     for (const auto &cond : query->conds)
     {
@@ -1115,10 +1197,105 @@ std::shared_ptr<Plan> Planner::apply_projection_pushdown(std::shared_ptr<Plan> p
         plan = insert_project_nodes(plan, needed_columns, query->cols);
     }
 
-    // 总是在根节点添加Project节点
-    plan = std::make_shared<ProjectionPlan>(T_Projection, std::move(plan), query->cols);
-
-    return plan;
+    // 构建需要投影的完整列列表
+    std::vector<TabCol> projection_cols;
+    
+    // 添加普通列
+    for (const auto &col : query->cols)
+    {
+        projection_cols.push_back(col);
+    }
+    
+    // 添加聚合函数需要的列（如果不在普通列中）
+    for (const auto &agg_expr : query->agg_exprs)
+    {
+        if (agg_expr->col)  // 排除COUNT(*)
+        {
+            TabCol agg_col;
+            agg_col.col_name = agg_expr->col->col_name;
+            agg_col.tab_name = agg_expr->col->tab_name;
+            
+            // 如果表名为空，需要推断
+            if (agg_col.tab_name.empty() && !query->tables.empty())
+            {
+                if (query->tables.size() == 1)
+                {
+                    agg_col.tab_name = query->tables[0];
+                }
+                else
+                {
+                    // 多表情况下，需要在所有表中查找该列
+                    for (const auto &table : query->tables)
+                    {
+                        try
+                        {
+                            auto &table_meta = sm_manager_->db_.get_table(table);
+                            for (const auto &col_meta : table_meta.cols)
+                            {
+                                if (col_meta.name == agg_col.col_name)
+                                {
+                                    agg_col.tab_name = table;
+                                    break;
+                                }
+                            }
+                            if (!agg_col.tab_name.empty()) break;
+                        }
+                        catch (...)
+                        {
+                            continue;
+                        }
+                    }
+                }
+            }
+            
+            // 检查是否已经在projection_cols中
+            bool already_exists = false;
+            for (const auto &existing_col : projection_cols)
+            {
+                if (existing_col.tab_name == agg_col.tab_name && 
+                    existing_col.col_name == agg_col.col_name)
+                {
+                    already_exists = true;
+                    break;
+                }
+            }
+            
+            if (!already_exists && !agg_col.tab_name.empty())
+            {
+                projection_cols.push_back(agg_col);
+            }
+        }
+    }
+    
+    // 添加GROUP BY列（如果不在其他列中）
+    for (const auto &group_col : query->group_by_cols)
+    {
+        bool already_exists = false;
+        for (const auto &existing_col : projection_cols)
+        {
+            if (existing_col.tab_name == group_col.tab_name && 
+                existing_col.col_name == group_col.col_name)
+            {
+                already_exists = true;
+                break;
+            }
+        }
+        
+        if (!already_exists)
+        {
+            projection_cols.push_back(group_col);
+        }
+    }
+    
+    // 只有在纯聚合查询（没有普通列和GROUP BY列）时才不添加ProjectionPlan
+    if (!query->agg_exprs.empty() && query->cols.empty() && query->group_by_cols.empty()) {
+        // 纯聚合查询，如SELECT COUNT(*) FROM table，不需要ProjectionPlan
+        return plan;
+    } else {
+        // 其他情况都需要ProjectionPlan
+        plan = std::make_shared<ProjectionPlan>(T_Projection, std::move(plan), projection_cols);
+        return plan;
+    }
 }
 
 /**

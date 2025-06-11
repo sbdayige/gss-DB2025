@@ -1,0 +1,14 @@
+| max_id |
+| 4 |
+| min_score |
+| 74.500000 |
+| avg_score |
+| 87.375000 |
+| course_num |
+| 8 |
+| row_num |
+| 8 |
+| row_num |
+| 8 |
+| sum_score |
+| 699.000000 |

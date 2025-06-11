@@ -374,6 +374,19 @@ namespace ast
     };
 
     /**
+     * @brief 聚合函数类型枚举
+     * 定义支持的聚合函数类型
+     */
+    enum AggType
+    {
+        AGG_COUNT,      // COUNT函数
+        AGG_MAX,        // MAX函数  
+        AGG_MIN,        // MIN函数
+        AGG_SUM,        // SUM函数
+        AGG_AVG         // AVG函数
+    };
+
+    /**
      * @brief 列引用AST节点
      *
      * 表示SQL中对表列的引用，支持带表名前缀和不带表名前缀两种形式
@@ -398,6 +411,29 @@ namespace ast
 
         Col(std::string tab_name_, std::string col_name_, std::string alias_)
             : tab_name(std::move(tab_name_)), col_name(std::move(col_name_)), alias(std::move(alias_)) {}
+    };
+
+    /**
+     * @brief 聚合函数AST节点
+     *
+     * 表示SQL中的聚合函数调用
+     * 例如：COUNT(*), MAX(score), SUM(id)
+     *
+     * @param agg_type 聚合函数类型
+     * @param col 聚合的列（COUNT(*)时为nullptr）
+     * @param alias 函数别名（可为空）
+     */
+    struct AggregateExpr : public Expr
+    {
+        AggType agg_type;              // 聚合函数类型
+        std::shared_ptr<Col> col;      // 聚合的列（COUNT(*)时为nullptr）
+        std::string alias;             // 函数别名
+
+        AggregateExpr(AggType agg_type_, std::shared_ptr<Col> col_)
+            : agg_type(agg_type_), col(std::move(col_)), alias("") {}
+
+        AggregateExpr(AggType agg_type_, std::shared_ptr<Col> col_, std::string alias_)
+            : agg_type(agg_type_), col(std::move(col_)), alias(std::move(alias_)) {}
     };
 
     /**
@@ -565,17 +601,35 @@ namespace ast
     };
 
     /**
+     * @brief LIMIT子句AST节点
+     *
+     * 表示SELECT语句中的LIMIT子句，用于限制返回的记录数量
+     * 例如：SELECT * FROM student LIMIT 10
+     *
+     * @param count 限制的记录数量
+     */
+    struct LimitClause : public TreeNode
+    {
+        int count; // 限制的记录数量
+
+        LimitClause(int count_) : count(count_) {}
+    };
+
+    /**
      * @brief SELECT语句AST节点
      *
-     * 表示SELECT语句的完整结构，是最复杂的SQL语句类型
-     * 例如：SELECT student.name AS sname, student.age FROM student AS s WHERE s.age > 18 ORDER BY s.age DESC
+     * 表示SELECT语句的完整结构，是最复杂的SQL语句类型，支持聚合函数和分组统计
+     * 例如：SELECT student.name, AVG(score) FROM student WHERE age > 18 GROUP BY name HAVING AVG(score) > 80 ORDER BY name LIMIT 10
      *
      * @param cols 选择列列表（空表示SELECT *）
      * @param table_refs 数据源表引用列表（包含表名和别名）
      * @param conds WHERE条件列表
      * @param jointree JOIN操作列表
+     * @param group_by_cols GROUP BY列列表
+     * @param having_conds HAVING条件列表
      * @param has_sort 是否包含ORDER BY子句
      * @param order ORDER BY子句信息
+     * @param limit_clause LIMIT子句信息
      */
     struct SelectStmt : public TreeNode
     {
@@ -584,16 +638,43 @@ namespace ast
         std::vector<std::shared_ptr<BinaryExpr>> conds;    // WHERE条件列表
         std::vector<std::shared_ptr<JoinExpr>> jointree;   // JOIN操作列表
 
+        // 聚合函数和分组统计相关
+        std::vector<std::shared_ptr<AggregateExpr>> agg_exprs; // 聚合表达式列表
+        std::vector<std::shared_ptr<Col>> group_by_cols;   // GROUP BY列列表
+        std::vector<std::shared_ptr<BinaryExpr>> having_conds; // HAVING条件列表
+
         bool has_sort;                  // 是否包含ORDER BY子句
         std::shared_ptr<OrderBy> order; // ORDER BY子句信息
+        std::shared_ptr<LimitClause> limit_clause; // LIMIT子句信息
 
-        // 新的构造函数，支持表引用
+        // 新的构造函数，支持聚合函数和分组统计
         SelectStmt(std::vector<std::shared_ptr<Col>> cols_,
                    std::vector<std::shared_ptr<TableRef>> table_refs_,
                    std::vector<std::shared_ptr<BinaryExpr>> conds_,
                    std::vector<std::shared_ptr<JoinExpr>> jointree_,
-                   std::shared_ptr<OrderBy> order_) : cols(std::move(cols_)), table_refs(std::move(table_refs_)),
-                                                      conds(std::move(conds_)), jointree(std::move(jointree_)), order(std::move(order_))
+                   std::vector<std::shared_ptr<AggregateExpr>> agg_exprs_,
+                   std::vector<std::shared_ptr<Col>> group_by_cols_,
+                   std::vector<std::shared_ptr<BinaryExpr>> having_conds_,
+                   std::shared_ptr<OrderBy> order_,
+                   std::shared_ptr<LimitClause> limit_clause_) 
+            : cols(std::move(cols_)), table_refs(std::move(table_refs_)),
+              conds(std::move(conds_)), jointree(std::move(jointree_)),
+              agg_exprs(std::move(agg_exprs_)), group_by_cols(std::move(group_by_cols_)), 
+              having_conds(std::move(having_conds_)), order(std::move(order_)), 
+              limit_clause(std::move(limit_clause_))
+        {
+            has_sort = (bool)order; // 根据order指针是否为空判断是否有排序
+        }
+
+        // 保持向后兼容的构造函数
+        SelectStmt(std::vector<std::shared_ptr<Col>> cols_,
+                   std::vector<std::shared_ptr<TableRef>> table_refs_,
+                   std::vector<std::shared_ptr<BinaryExpr>> conds_,
+                   std::vector<std::shared_ptr<JoinExpr>> jointree_,
+                   std::shared_ptr<OrderBy> order_) 
+            : cols(std::move(cols_)), table_refs(std::move(table_refs_)),
+              conds(std::move(conds_)), jointree(std::move(jointree_)), 
+              agg_exprs({}), order(std::move(order_))
         {
             has_sort = (bool)order; // 根据order指针是否为空判断是否有排序
         }
@@ -688,6 +769,12 @@ namespace ast
 
         // ===== 表达式相关 =====
         std::shared_ptr<Expr> sv_expr; // 表达式指针
+
+        // ===== 聚合函数相关 =====
+        AggType sv_agg_type;                                // 聚合函数类型
+        std::shared_ptr<AggregateExpr> sv_agg_expr;         // 聚合函数表达式
+        std::vector<std::shared_ptr<AggregateExpr>> sv_agg_exprs; // 聚合表达式列表
+        std::shared_ptr<LimitClause> sv_limit_clause;       // LIMIT子句
 
         // ===== 值相关 =====
         std::shared_ptr<Value> sv_val;               // 单个值

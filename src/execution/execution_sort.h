@@ -136,8 +136,8 @@ public:
             }
             else if (col.type == TYPE_FLOAT)
             {
-                double a_val = *(double *)a_data;
-                double b_val = *(double *)b_data;
+                float a_val = *(float *)a_data;
+                float b_val = *(float *)b_data;
                 compare_result = (a_val == b_val) ? 0 : ((a_val < b_val) ? -1 : 1);
             }
             else if (col.type == TYPE_STRING)

@@ -39,6 +39,7 @@ See the Mulan PSL v2 for more details. */
 #include "execution/executor_delete.h"
 #include "execution/executor_explain.h"
 #include "execution/execution_sort.h"
+#include "execution/executor_aggregate.h"
 #include "common/common.h"
 
 /**
@@ -167,13 +168,25 @@ public:
 
             case T_Select:
             {
-                std::shared_ptr<ProjectionPlan> p = std::dynamic_pointer_cast<ProjectionPlan>(x->subplan_);
-
                 // 递归转换子计划为执行器树
-                std::unique_ptr<AbstractExecutor> root = convert_plan_executor(p, context);
+                std::unique_ptr<AbstractExecutor> root = convert_plan_executor(x->subplan_, context);
+
+                // 检查是否是投影计划，如果是则获取投影列，否则使用执行器的列信息
+                std::vector<TabCol> sel_cols;
+                if (auto p = std::dynamic_pointer_cast<ProjectionPlan>(x->subplan_)) {
+                    sel_cols = std::move(p->sel_cols_);
+                } else {
+                    // 对于非投影计划（如聚合计划），从执行器中获取列信息
+                    if (root) {
+                        const auto& exec_cols = root->cols();
+                        for (const auto& col : exec_cols) {
+                            sel_cols.push_back({col.tab_name, col.name});
+                        }
+                    }
+                }
 
                 // 创建SELECT门户语句，包含投影列和执行器树
-                return std::make_shared<PortalStmt>(PORTAL_ONE_SELECT, std::move(p->sel_cols_), std::move(root), plan);
+                return std::make_shared<PortalStmt>(PORTAL_ONE_SELECT, std::move(sel_cols), std::move(root), plan);
             }
 
             case T_Update:
@@ -404,6 +417,48 @@ public:
             // 递归转换子计划，创建排序执行器
             return std::make_unique<SortExecutor>(convert_plan_executor(x->subplan_, context),
                                                   x->sel_col_, x->is_desc_);
+        }
+        else if (auto x = std::dynamic_pointer_cast<FilterPlan>(plan))
+        {
+            // ===============================
+            // 过滤计划转换
+            // ===============================
+            // 检查子计划是否是ScanPlan，如果是则将过滤条件合并到扫描条件中
+            if (auto scan_plan = std::dynamic_pointer_cast<ScanPlan>(x->subplan_))
+            {
+                // 合并FilterPlan的条件和ScanPlan原有的条件
+                std::vector<Condition> merged_conds = scan_plan->conds_;
+                merged_conds.insert(merged_conds.end(), x->conds_.begin(), x->conds_.end());
+                
+                // 创建SeqScanExecutor，传入合并后的条件
+                if (scan_plan->tag == T_SeqScan)
+                {
+                    return std::make_unique<SeqScanExecutor>(sm_manager_, scan_plan->tab_name_, merged_conds, context);
+                }
+                else
+                {
+                    // 对于索引扫描，也传入合并后的条件
+                    return std::make_unique<IndexScanExecutor>(sm_manager_, scan_plan->tab_name_, merged_conds, 
+                                                              scan_plan->index_col_names_, context);
+                }
+            }
+            else
+            {
+                // 对于非ScanPlan的子计划，递归转换子计划
+                // 这里需要创建一个FilterExecutor，但由于没有实现，暂时直接返回子计划
+                return convert_plan_executor(x->subplan_, context);
+            }
+        }
+        else if (auto x = std::dynamic_pointer_cast<AggregatePlan>(plan))
+        {
+            // ===============================
+            // 聚合计划转换
+            // ===============================
+            // 递归转换子计划，创建聚合执行器
+            auto subplan_executor = convert_plan_executor(x->subplan_, context);
+            
+            // 创建聚合执行器，传递GROUP BY列信息
+            return std::make_unique<AggregateExecutor>(std::move(subplan_executor), x->agg_exprs_, x->group_by_cols_);
         }
 
         // 未识别的计划类型，返回空指针

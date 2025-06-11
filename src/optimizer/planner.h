@@ -216,6 +216,18 @@ private:
     std::shared_ptr<Plan> make_one_rel(std::shared_ptr<Query> query);
 
     /**
+     * @brief 生成聚合执行计划
+     * @param query 包含聚合函数信息的查询对象
+     * @param plan 需要添加聚合操作的基础执行计划
+     * @return 添加聚合操作后的执行计划
+     * @details 处理聚合函数：
+     *          - 检查查询是否包含聚合函数(COUNT, MAX, MIN, SUM, AVG)
+     *          - 在现有计划基础上添加聚合操作符
+     *          - 支持GROUP BY和HAVING子句
+     */
+    std::shared_ptr<Plan> generate_aggregate_plan(std::shared_ptr<Query> query, std::shared_ptr<Plan> plan);
+
+    /**
      * @brief 生成排序执行计划
      * @param query 包含ORDER BY信息的查询对象
      * @param plan 需要添加排序操作的基础执行计划

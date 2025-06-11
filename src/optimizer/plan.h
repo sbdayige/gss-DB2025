@@ -80,7 +80,8 @@ typedef enum PlanTag {
     T_SortMerge,   // 排序合并连接
     T_Sort,        // 排序操作
     T_Projection,  // 投影操作
-    T_Filter       // 过滤操作
+    T_Filter,      // 过滤操作
+    T_Aggregate    // 聚合操作
 } PlanTag;
 
 /**
@@ -343,6 +344,34 @@ class OtherPlan : public Plan {
     ~OtherPlan() {}
 
     std::string tab_name_;  // 表名(适用于需要表名的操作)
+};
+
+/**
+ * @brief 聚合计划类
+ * 用于聚合函数操作的执行计划，支持COUNT、MAX、MIN、SUM、AVG等聚合操作
+ * 可以与GROUP BY子句结合使用进行分组聚合
+ */
+class AggregatePlan : public Plan {
+   public:
+    /**
+     * @brief 构造函数
+     * @param subplan 子计划，提供数据源
+     * @param agg_exprs 聚合表达式列表
+     * @param group_by_cols GROUP BY列列表
+     */
+    AggregatePlan(std::shared_ptr<Plan> subplan, 
+                  std::vector<std::shared_ptr<ast::AggregateExpr>> agg_exprs,
+                  std::vector<TabCol> group_by_cols = {}) {
+        Plan::tag = T_Aggregate;
+        subplan_ = std::move(subplan);
+        agg_exprs_ = std::move(agg_exprs);
+        group_by_cols_ = std::move(group_by_cols);
+    }
+    ~AggregatePlan() {}
+
+    std::shared_ptr<Plan> subplan_;                                     // 子计划，数据来源
+    std::vector<std::shared_ptr<ast::AggregateExpr>> agg_exprs_;       // 聚合表达式列表
+    std::vector<TabCol> group_by_cols_;                                // GROUP BY列列表
 };
 
 /**

@@ -1,0 +1,19 @@
+Rucbase> create table grade (course char(20),id int,score float);
+Rucbase> 
+Rucbase> insert into grade values('DataStructure',1,95);
+Rucbase> insert into grade values('DataStructure',2,93.5);
+Rucbase> insert into grade values('DataStructure',3,94.5);
+Rucbase> insert into grade values('ComputerNetworks',1,99);
+Rucbase> insert into grade values('ComputerNetworks',2,88.5);
+Rucbase> insert into grade values('ComputerNetworks',3,92.5);
+Rucbase> 
+Rucbase> -- SELECT 列表中不能出现没有在 GROUP BY 子句中的非聚集列
+Rucbase> select id , score from grade group by course;
+Error: Column 'id' must appear in the GROUP BY clause or be used in an aggregate function
+Rucbase> 
+Rucbase> -- WHERE 子句中不能用聚集函数作为条件表达式
+Rucbase> select id, MAX(score) as max_score from grade where MAX(score) > 90 group by id;
+syntax error
+Rucbase> 
+Rucbase> drop table grade;
+Rucbase> Bye.
