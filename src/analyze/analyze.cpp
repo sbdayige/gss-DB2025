@@ -184,13 +184,37 @@ std::shared_ptr<Query> Analyze::do_analyze(std::shared_ptr<ast::TreeNode> parse)
                     }
                 } else if (col->col_name.find("MAX") != std::string::npos) {
                     agg_type = ast::AGG_MAX;
+                    size_t start = col->col_name.find('(') + 1;
+                    size_t end = col->col_name.find(')', start);
+                    if (start != std::string::npos && end != std::string::npos) {
+                        std::string col_name = col->col_name.substr(start, end - start);
+                        agg_col = std::make_shared<ast::Col>("", col_name);
+                    }
                     // 类似地提取列名
                 } else if (col->col_name.find("MIN") != std::string::npos) {
                     agg_type = ast::AGG_MIN;
+                    size_t start = col->col_name.find('(') + 1;
+                    size_t end = col->col_name.find(')', start);
+                    if (start != std::string::npos && end != std::string::npos) {
+                        std::string col_name = col->col_name.substr(start, end - start);
+                        agg_col = std::make_shared<ast::Col>("", col_name);
+                    }
                 } else if (col->col_name.find("SUM") != std::string::npos) {
                     agg_type = ast::AGG_SUM;
+                    size_t start = col->col_name.find('(') + 1;
+                    size_t end = col->col_name.find(')', start);
+                    if (start != std::string::npos && end != std::string::npos) {
+                        std::string col_name = col->col_name.substr(start, end - start);
+                        agg_col = std::make_shared<ast::Col>("", col_name);
+                    }
                 } else if (col->col_name.find("AVG") != std::string::npos) {
                     agg_type = ast::AGG_AVG;
+                    size_t start = col->col_name.find('(') + 1;
+                    size_t end = col->col_name.find(')', start);
+                    if (start != std::string::npos && end != std::string::npos) {
+                        std::string col_name = col->col_name.substr(start, end - start);
+                        agg_col = std::make_shared<ast::Col>("", col_name);
+                    }
                 }
                 
                 auto agg_expr = std::make_shared<ast::AggregateExpr>(agg_type, agg_col, col->alias);
