@@ -125,6 +125,9 @@ private:
         bool is_count_star;                         // 是否为COUNT(*)
     };
     std::vector<AggInfo> agg_infos_;               // 聚合函数信息列表
+    
+    // HAVING子句支持
+    std::vector<Condition> having_conds_;          // HAVING条件列表
 
 public:
     /**
@@ -132,12 +135,14 @@ public:
      * @param prev 子执行器
      * @param agg_exprs 聚合表达式列表
      * @param group_by_cols GROUP BY列列表
+     * @param having_conds HAVING条件列表
      */
     AggregateExecutor(std::unique_ptr<AbstractExecutor> prev, 
                      const std::vector<std::shared_ptr<ast::AggregateExpr>>& agg_exprs,
-                     const std::vector<TabCol>& group_by_cols = {}) 
+                     const std::vector<TabCol>& group_by_cols = {},
+                     const std::vector<Condition>& having_conds = {}) 
         : prev_(std::move(prev)), executed_(false), has_result_(false), 
-          has_group_by_(!group_by_cols.empty()), group_by_cols_(group_by_cols) {
+          has_group_by_(!group_by_cols.empty()), group_by_cols_(group_by_cols), having_conds_(having_conds) {
         
         // 首先处理GROUP BY列的元数据
         if (has_group_by_) {
@@ -265,6 +270,13 @@ public:
         
         if (has_group_by_) {
             current_group_ = group_results_.begin();
+            
+            // 查找第一个满足HAVING条件的分组
+            while (current_group_ != group_results_.end() && 
+                   !checkHavingConditions(current_group_->first, current_group_->second)) {
+                ++current_group_;
+            }
+            
             has_result_ = (current_group_ != group_results_.end());
         } else {
             has_result_ = true;
@@ -274,8 +286,15 @@ public:
     void nextTuple() override {
         if (has_group_by_) {
             if (current_group_ != group_results_.end()) {
-                ++current_group_;
-                has_result_ = (current_group_ != group_results_.end());
+                do {
+                    ++current_group_;
+                    if (current_group_ == group_results_.end()) {
+                        has_result_ = false;
+                        return;
+                    }
+                } while (!checkHavingConditions(current_group_->first, current_group_->second));
+                
+                has_result_ = true;
             } else {
                 has_result_ = false;
             }
@@ -528,10 +547,12 @@ private:
      */
     template<typename T>
     void updateNumericAgg(AggValue& agg_val, const AggInfo& agg_info, T val) {
+        // 对于所有聚合函数，都需要增加记录计数
+        agg_val.count++;
+        
         switch (agg_info.type) {
             case ast::AGG_COUNT:
                 // COUNT should not be handled here, but add case to avoid warnings
-                agg_val.count++;
                 break;
                 
             case ast::AGG_MAX:
@@ -560,13 +581,11 @@ private:
                 
             case ast::AGG_SUM:
                 agg_val.sum += static_cast<double>(val);
-                agg_val.count++;
                 agg_val.initialized = true;
                 break;
                 
             case ast::AGG_AVG:
                 agg_val.sum += static_cast<double>(val);
-                agg_val.count++;
                 agg_val.initialized = true;
                 break;
         }
@@ -637,5 +656,236 @@ private:
                 return "AVG(" + agg_info.col_name + ")";
         }
         return "AGG";
+    }
+    
+    /**
+     * @brief 检查分组是否满足HAVING条件
+     * @param group_key 分组键
+     * @param agg_values 聚合值
+     * @return true如果满足所有HAVING条件，false否则
+     */
+    bool checkHavingConditions(const GroupKey& group_key, const std::vector<AggValue>& agg_values) {
+        if (having_conds_.empty()) {
+            return true;  // 没有HAVING条件，直接通过
+        }
+        
+        for (const auto& cond : having_conds_) {
+            if (!evaluateHavingCondition(cond, group_key, agg_values)) {
+                return false;  // 任何一个条件不满足就返回false
+            }
+        }
+        
+        return true;  // 所有条件都满足
+    }
+    
+    /**
+     * @brief 评估单个HAVING条件
+     * @param cond HAVING条件
+     * @param group_key 分组键
+     * @param agg_values 聚合值
+     * @return true如果条件满足，false否则
+     */
+    bool evaluateHavingCondition(const Condition& cond, const GroupKey& group_key, const std::vector<AggValue>& agg_values) {
+        // 获取左侧操作数的值
+        Value left_val = getConditionLeftValue(cond, group_key, agg_values);
+        
+        // 获取右侧操作数的值
+        Value right_val;
+        if (cond.is_rhs_val) {
+            right_val = cond.rhs_val;
+        } else {
+            // 为右侧列创建一个临时条件对象
+            Condition rhs_cond;
+            rhs_cond.lhs_col = cond.rhs_col;
+            rhs_cond.op = cond.op;
+            rhs_cond.is_rhs_val = true;
+            rhs_cond.rhs_val = Value();
+            
+            right_val = getConditionLeftValue(rhs_cond, group_key, agg_values);
+        }
+        
+        // 执行比较操作
+        return compareValues(left_val, right_val, cond.op);
+    }
+    
+    /**
+     * @brief 获取条件左侧操作数的值（聚合函数或分组列）
+     * @param cond 条件
+     * @param group_key 分组键  
+     * @param agg_values 聚合值
+     * @return 计算得到的值
+     */
+    Value getConditionLeftValue(const Condition& cond, const GroupKey& group_key, const std::vector<AggValue>& agg_values) {
+        const std::string& col_name = cond.lhs_col.col_name;
+        
+        // 首先检查是否是分组列
+        for (size_t i = 0; i < group_by_col_metas_.size(); ++i) {
+            if (group_by_col_metas_[i].name == col_name) {
+                return group_key.values[i];
+            }
+        }
+        
+        // 检查是否是聚合函数
+        if (col_name.find("COUNT(") != std::string::npos || 
+            col_name.find("MAX(") != std::string::npos ||
+            col_name.find("MIN(") != std::string::npos ||
+            col_name.find("SUM(") != std::string::npos ||
+            col_name.find("AVG(") != std::string::npos) {
+            
+            // 首先尝试在SELECT列表的聚合函数中查找
+            for (size_t i = 0; i < agg_infos_.size(); ++i) {
+                std::string agg_name = getDefaultAggName(agg_infos_[i]);
+                if (col_name == agg_name) {
+                    return getAggregateValue(agg_values[i], agg_infos_[i]);
+                }
+            }
+            
+            // 处理HAVING条件中的特殊聚合函数（不在SELECT列表中）
+            Value result = handleSpecialAggregateFunction(col_name, agg_values);
+            if (result.type != TYPE_STRING || !result.str_val.empty()) { // 如果不是空字符串，说明找到了
+                return result;
+            }
+        }
+        
+        // 如果找不到对应的列，返回默认值
+        Value result;
+        result.set_int(0);
+        return result;
+    }
+    
+    /**
+     * @brief 从聚合值中提取结果
+     */
+    Value getAggregateValue(const AggValue& agg_val, const AggInfo& agg_info) {
+        Value result;
+        
+        switch (agg_info.type) {
+            case ast::AGG_COUNT:
+                result.set_int(agg_val.count);
+                break;
+            case ast::AGG_MAX:
+            case ast::AGG_MIN:
+                if (!agg_val.initialized) {
+                    result.set_int(0);
+                } else if (agg_info.col_meta.type == TYPE_INT) {
+                    result.set_int(agg_val.int_val);
+                } else if (agg_info.col_meta.type == TYPE_FLOAT) {
+                    result.set_float(agg_val.float_val);
+                }
+                break;
+            case ast::AGG_SUM:
+                if (agg_info.col_meta.type == TYPE_INT) {
+                    result.set_int(static_cast<int>(agg_val.sum));
+                } else if (agg_info.col_meta.type == TYPE_FLOAT) {
+                    result.set_float(static_cast<float>(agg_val.sum));
+                }
+                break;
+            case ast::AGG_AVG:
+                if (agg_val.count > 0) {
+                    result.set_float(static_cast<float>(agg_val.sum / agg_val.count));
+                } else {
+                    result.set_float(0.0f);
+                }
+                break;
+        }
+        return result;
+    }
+    
+    /**
+     * @brief 处理HAVING条件中的特殊聚合函数（不在SELECT列表中的）
+     */
+    Value handleSpecialAggregateFunction(const std::string& col_name, const std::vector<AggValue>& agg_values) {
+        Value result;
+        
+        // 处理COUNT(*)函数
+        if (col_name == "COUNT(*)" || col_name == "count(*)") {
+            // 对于GROUP BY查询，COUNT(*)等于该分组中的记录数
+            // 这个值可以从任何一个聚合值的count字段获取，因为所有聚合值的count都应该相同
+            if (!agg_values.empty()) {
+                result.set_int(agg_values[0].count);
+            } else {
+                // 如果没有聚合值但有分组，说明这个分组至少有1条记录
+                result.set_int(1);
+            }
+            return result;
+        }
+        
+        // 处理COUNT(column)函数 - 简化处理，当前与COUNT(*)相同
+        if (col_name.find("COUNT(") == 0 && col_name.back() == ')') {
+            if (!agg_values.empty()) {
+                result.set_int(agg_values[0].count);
+            } else {
+                result.set_int(1);
+            }
+            return result;
+        }
+        
+        // 如果无法识别，返回空字符串作为未找到的标识
+        result.set_str("");
+        return result;
+    }
+    
+    /**
+     * @brief 比较两个值
+     * @param left 左值
+     * @param right 右值
+     * @param op 比较操作符
+     * @return 比较结果
+     */
+    bool compareValues(const Value& left, const Value& right, CompOp op) {
+        // 确保两个值类型兼容
+        if (left.type != right.type) {
+            // 简化处理：如果类型不同，尝试转换为浮点数比较
+            double left_val = (left.type == TYPE_INT) ? left.int_val : 
+                              (left.type == TYPE_FLOAT) ? left.float_val : 0.0;
+            double right_val = (right.type == TYPE_INT) ? right.int_val : 
+                               (right.type == TYPE_FLOAT) ? right.float_val : 0.0;
+            
+            switch (op) {
+                case OP_EQ: return std::abs(left_val - right_val) < 1e-9;
+                case OP_NE: return std::abs(left_val - right_val) >= 1e-9;
+                case OP_LT: return left_val < right_val;
+                case OP_GT: return left_val > right_val;
+                case OP_LE: return left_val <= right_val;
+                case OP_GE: return left_val >= right_val;
+            }
+        } else {
+            // 相同类型的比较
+            switch (left.type) {
+                case TYPE_INT:
+                    switch (op) {
+                        case OP_EQ: return left.int_val == right.int_val;
+                        case OP_NE: return left.int_val != right.int_val;
+                        case OP_LT: return left.int_val < right.int_val;
+                        case OP_GT: return left.int_val > right.int_val;
+                        case OP_LE: return left.int_val <= right.int_val;
+                        case OP_GE: return left.int_val >= right.int_val;
+                    }
+                    break;
+                case TYPE_FLOAT:
+                    switch (op) {
+                        case OP_EQ: return std::abs(left.float_val - right.float_val) < 1e-9;
+                        case OP_NE: return std::abs(left.float_val - right.float_val) >= 1e-9;
+                        case OP_LT: return left.float_val < right.float_val;
+                        case OP_GT: return left.float_val > right.float_val;
+                        case OP_LE: return left.float_val <= right.float_val;
+                        case OP_GE: return left.float_val >= right.float_val;
+                    }
+                    break;
+                case TYPE_STRING:
+                    int cmp = left.str_val.compare(right.str_val);
+                    switch (op) {
+                        case OP_EQ: return cmp == 0;
+                        case OP_NE: return cmp != 0;
+                        case OP_LT: return cmp < 0;
+                        case OP_GT: return cmp > 0;
+                        case OP_LE: return cmp <= 0;
+                        case OP_GE: return cmp >= 0;
+                    }
+                    break;
+            }
+        }
+        
+        return false;
     }
 }; 

@@ -496,8 +496,8 @@ std::shared_ptr<Plan> Planner::generate_aggregate_plan(std::shared_ptr<Query> qu
         return plan;  // 没有聚合函数，直接返回原计划
     }
 
-    // 创建聚合计划，传递GROUP BY列信息
-    auto aggregate_plan = std::make_shared<AggregatePlan>(plan, query->agg_exprs, query->group_by_cols);
+    // 创建聚合计划，传递GROUP BY列信息和HAVING条件
+    auto aggregate_plan = std::make_shared<AggregatePlan>(plan, query->agg_exprs, query->group_by_cols, query->having_conds);
     
     return aggregate_plan;
 }

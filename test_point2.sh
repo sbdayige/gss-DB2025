@@ -32,15 +32,15 @@ insert into grade values('C++',1,92);
 insert into grade values('C++',2,89);
 insert into grade values('C++',3,89.5);
 
-select id,MAX(score) as max_score,MIN(score) as min_score,SUM(score) as sum_score from grade group by id;
+select id,max(score) as max_score,min(score) as min_score,sum(score) as sum_score from grade group by id;
 
-select id,MAX(score) as max_score from grade group by id having COUNT(*) > 3;
+select id,max(score) as max_score from grade group by id having count(*) > 3;
 
 insert into grade values ('ParallelCompute',1,100);
 
-select id,MAX(score) as max_score from grade group by id having COUNT(*) > 3;
+select id,max(score) as max_score from grade group by id having count(*) > 3;
 
-select id,MAX(score) as max_score,MIN(score) as min_score from grade group by id having COUNT(*) > 1 and MIN(score) > 88;
+select id,max(score) as max_score,min(score) as min_score from grade group by id having count(*) > 1 and min(score) > 88;
 
 select course ,COUNT(*) as row_num , COUNT(id) as student_num , MAX(score) as top_score, MIN(score) as lowest_score from grade group by course;
 

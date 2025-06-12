@@ -349,7 +349,7 @@ class OtherPlan : public Plan {
 /**
  * @brief 聚合计划类
  * 用于聚合函数操作的执行计划，支持COUNT、MAX、MIN、SUM、AVG等聚合操作
- * 可以与GROUP BY子句结合使用进行分组聚合
+ * 可以与GROUP BY子句结合使用进行分组聚合，支持HAVING子句过滤
  */
 class AggregatePlan : public Plan {
    public:
@@ -358,20 +358,24 @@ class AggregatePlan : public Plan {
      * @param subplan 子计划，提供数据源
      * @param agg_exprs 聚合表达式列表
      * @param group_by_cols GROUP BY列列表
+     * @param having_conds HAVING条件列表
      */
     AggregatePlan(std::shared_ptr<Plan> subplan, 
                   std::vector<std::shared_ptr<ast::AggregateExpr>> agg_exprs,
-                  std::vector<TabCol> group_by_cols = {}) {
+                  std::vector<TabCol> group_by_cols = {},
+                  std::vector<Condition> having_conds = {}) {
         Plan::tag = T_Aggregate;
         subplan_ = std::move(subplan);
         agg_exprs_ = std::move(agg_exprs);
         group_by_cols_ = std::move(group_by_cols);
+        having_conds_ = std::move(having_conds);
     }
     ~AggregatePlan() {}
 
     std::shared_ptr<Plan> subplan_;                                     // 子计划，数据来源
     std::vector<std::shared_ptr<ast::AggregateExpr>> agg_exprs_;       // 聚合表达式列表
     std::vector<TabCol> group_by_cols_;                                // GROUP BY列列表
+    std::vector<Condition> having_conds_;                             // HAVING条件列表
 };
 
 /**
