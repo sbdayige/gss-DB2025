@@ -114,7 +114,8 @@ private:
     };
     
     std::map<GroupKey, std::vector<AggValue>> group_results_;  // 分组聚合结果
-    std::map<GroupKey, std::vector<AggValue>>::iterator current_group_;  // 当前分组迭代器
+    std::vector<GroupKey> group_keys_in_order_;  // 按插入顺序存储的分组键
+    size_t current_group_index_;  // 当前分组索引
     
     // 聚合函数信息
     struct AggInfo {
@@ -142,7 +143,8 @@ public:
                      const std::vector<TabCol>& group_by_cols = {},
                      const std::vector<Condition>& having_conds = {}) 
         : prev_(std::move(prev)), executed_(false), has_result_(false), 
-          has_group_by_(!group_by_cols.empty()), group_by_cols_(group_by_cols), having_conds_(having_conds) {
+          has_group_by_(!group_by_cols.empty()), group_by_cols_(group_by_cols), having_conds_(having_conds),
+          current_group_index_(0) {
         
         // 首先处理GROUP BY列的元数据
         if (has_group_by_) {
@@ -269,15 +271,19 @@ public:
         }
         
         if (has_group_by_) {
-            current_group_ = group_results_.begin();
+            current_group_index_ = 0;
             
             // 查找第一个满足HAVING条件的分组
-            while (current_group_ != group_results_.end() && 
-                   !checkHavingConditions(current_group_->first, current_group_->second)) {
-                ++current_group_;
+            while (current_group_index_ < group_keys_in_order_.size()) {
+                const auto& group_key = group_keys_in_order_[current_group_index_];
+                const auto& agg_values = group_results_[group_key];
+                if (checkHavingConditions(group_key, agg_values)) {
+                    break;
+                }
+                ++current_group_index_;
             }
             
-            has_result_ = (current_group_ != group_results_.end());
+            has_result_ = (current_group_index_ < group_keys_in_order_.size());
         } else {
             has_result_ = true;
         }
@@ -285,16 +291,20 @@ public:
 
     void nextTuple() override {
         if (has_group_by_) {
-            if (current_group_ != group_results_.end()) {
-                do {
-                    ++current_group_;
-                    if (current_group_ == group_results_.end()) {
-                        has_result_ = false;
-                        return;
-                    }
-                } while (!checkHavingConditions(current_group_->first, current_group_->second));
+            if (current_group_index_ < group_keys_in_order_.size()) {
+                ++current_group_index_;
                 
-                has_result_ = true;
+                // 查找下一个满足HAVING条件的分组
+                while (current_group_index_ < group_keys_in_order_.size()) {
+                    const auto& group_key = group_keys_in_order_[current_group_index_];
+                    const auto& agg_values = group_results_[group_key];
+                    if (checkHavingConditions(group_key, agg_values)) {
+                        break;
+                    }
+                    ++current_group_index_;
+                }
+                
+                has_result_ = (current_group_index_ < group_keys_in_order_.size());
             } else {
                 has_result_ = false;
             }
@@ -334,15 +344,18 @@ public:
      * @brief 构建GROUP BY结果记录
      */
     std::unique_ptr<RmRecord> buildGroupByResult() {
-        if (current_group_ == group_results_.end()) {
+        if (current_group_index_ >= group_keys_in_order_.size()) {
             return nullptr;
         }
         
         auto result = std::make_unique<RmRecord>(len_);
         size_t offset = 0;
         
+        // 获取当前分组的键和值
+        const auto& group_key = group_keys_in_order_[current_group_index_];
+        const auto& agg_values = group_results_[group_key];
+        
         // 写入GROUP BY列的值
-        const auto& group_key = current_group_->first;
         for (size_t i = 0; i < group_key.values.size(); ++i) {
             const auto& val = group_key.values[i];
             const auto& col_meta = group_by_col_metas_[i];
@@ -364,7 +377,6 @@ public:
         }
         
         // 写入聚合结果
-        const auto& agg_values = current_group_->second;
         for (size_t i = 0; i < agg_infos_.size(); ++i) {
             size_t col_idx = group_by_col_metas_.size() + i;
             writeAggResult(agg_values[i], agg_infos_[i], cols_[col_idx], result.get());
@@ -445,6 +457,8 @@ private:
                         initAggValue(agg_values[i], agg_infos_[i]);
                     }
                     group_results_[group_key] = agg_values;
+                    // 记录这个分组的插入顺序
+                    group_keys_in_order_.push_back(group_key);
                 }
                 
                 // 更新该分组的聚合值
