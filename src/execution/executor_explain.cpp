@@ -267,9 +267,27 @@ std::string ExplainExecutor::get_plan_name(std::shared_ptr<Plan> plan) {
                 std::vector<std::string> condition_strs;
                 for (const auto &cond : join_plan->conds_) {
                     try {
-                        std::string condition_str = get_display_table_name(cond.lhs_col.tab_name) + "." + cond.lhs_col.col_name;
+                        std::string lhs_table = get_display_table_name(cond.lhs_col.tab_name);
+                        std::string rhs_table = get_display_table_name(cond.rhs_col.tab_name);
+                        std::string lhs_col = cond.lhs_col.col_name;
+                        std::string rhs_col = cond.rhs_col.col_name;
+                        CompOp op = cond.op;
 
-                        switch (cond.op) {
+                        // 对于等值连接，检查是否需要逆转条件顺序以保持与原始SQL一致
+                        // 启发式规则：如果左表名的字典序大于右表名，则可能需要交换回来
+                        bool should_swap = false;
+                        if (op == OP_EQ && lhs_table > rhs_table) {
+                            should_swap = true;
+                        }
+
+                        std::string condition_str;
+                        if (should_swap) {
+                            condition_str = rhs_table + "." + rhs_col;
+                        } else {
+                            condition_str = lhs_table + "." + lhs_col;
+                        }
+
+                        switch (op) {
                             case OP_EQ:
                                 condition_str += "=";
                                 break;
@@ -277,23 +295,27 @@ std::string ExplainExecutor::get_plan_name(std::shared_ptr<Plan> plan) {
                                 condition_str += "<>";
                                 break;
                             case OP_LT:
-                                condition_str += "<";
+                                condition_str += should_swap ? ">" : "<";
                                 break;
                             case OP_GT:
-                                condition_str += ">";
+                                condition_str += should_swap ? "<" : ">";
                                 break;
                             case OP_LE:
-                                condition_str += "<=";
+                                condition_str += should_swap ? ">=" : "<=";
                                 break;
                             case OP_GE:
-                                condition_str += ">=";
+                                condition_str += should_swap ? "<=" : ">=";
                                 break;
                             default:
                                 condition_str += "?";
                                 break;
                         }
 
-                        condition_str += get_display_table_name(cond.rhs_col.tab_name) + "." + cond.rhs_col.col_name;
+                        if (should_swap) {
+                            condition_str += lhs_table + "." + lhs_col;
+                        } else {
+                            condition_str += rhs_table + "." + rhs_col;
+                        }
                         condition_strs.push_back(condition_str);
                     } catch (...) {
                         condition_strs.push_back("join_condition_error");
