@@ -177,6 +177,11 @@ class Planner {
     std::shared_ptr<Plan> insert_filter_nodes(std::shared_ptr<Plan> plan, std::vector<Condition> &conditions);
 
     /**
+     * @brief 在最优位置插入Filter节点（Project节点之下）
+     */
+    std::shared_ptr<Plan> insert_filter_at_optimal_position(std::shared_ptr<Plan> plan, const std::vector<Condition> &conditions);
+
+    /**
      * @brief 在计划树中插入Project节点
      */
     std::shared_ptr<Plan> insert_project_nodes(std::shared_ptr<Plan> plan,

@@ -156,11 +156,8 @@ class Portal {
 
                 case T_Select: {
                     std::shared_ptr<ProjectionPlan> p = std::dynamic_pointer_cast<ProjectionPlan>(x->subplan_);
-                    std::cerr << "debug2" << std::endl;
                     // 递归转换子计划为执行器树
                     std::unique_ptr<AbstractExecutor> root = convert_plan_executor(p, context);
-
-                    std::cerr << "debug1" << std::endl;
                     // 创建SELECT门户语句，包含投影列和执行器树
                     return std::make_shared<PortalStmt>(PORTAL_ONE_SELECT, std::move(p->sel_cols_), std::move(root), plan);
                 }

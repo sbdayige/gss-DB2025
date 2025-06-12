@@ -47,6 +47,8 @@ class FilterExecutor : public AbstractExecutor {
      */
     void beginTuple() override {
         child_->beginTuple();
+        // 初始化条件值的raw数据
+        init_condition_values();
         // 移动到第一个满足条件的记录
         while (!child_->is_end()) {
             auto rec = child_->Next();
@@ -102,17 +104,71 @@ class FilterExecutor : public AbstractExecutor {
     /**
      * @brief 获取列元数据
      */
-    const std::vector<ColMeta> &cols() const override {
+    const std::vector<ColMeta>& cols() const override {
         return child_->cols();
     }
 
     /**
      * @brief 获取当前记录的位置标识符
      */
-    Rid &rid() override {
+    Rid& rid() override {
         return child_->rid();
     }
 
+   private:
+    /**
+     * @brief 初始化条件值的raw数据
+     * 处理类型不匹配的情况，确保条件值能够正确比较
+     */
+    void init_condition_values() {
+        const auto& rec_cols = child_->cols();
+        for (auto& cond : conds_) {
+            if (cond.is_rhs_val) {
+                // 找到左侧列的元数据
+                auto lhs_col = get_col(rec_cols, cond.lhs_col);
+
+                // 如果类型不匹配但可以转换，进行类型转换
+                if (cond.rhs_val.type != lhs_col->type) {
+                    if (can_cast_type(cond.rhs_val.type, lhs_col->type)) {
+                        cast_condition_value(cond.rhs_val, lhs_col->type);
+                    }
+                }
+
+                // 初始化raw数据
+                if (cond.rhs_val.raw == nullptr) {
+                    cond.rhs_val.init_raw(lhs_col->len);
+                }
+            }
+        }
+    }
+
+    /**
+     * @brief 检查是否可以进行类型转换
+     */
+    bool can_cast_type(ColType from, ColType to) {
+        if (from == to) return true;
+        if (from == TYPE_INT && to == TYPE_FLOAT) return true;
+        if (from == TYPE_FLOAT && to == TYPE_INT) return true;
+        return false;
+    }
+
+    /**
+     * @brief 转换条件值的类型
+     */
+    void cast_condition_value(Value& val, ColType to) {
+        if (val.type == TYPE_INT && to == TYPE_FLOAT) {
+            int int_val = val.int_val;
+            val.type = TYPE_FLOAT;
+            val.float_val = static_cast<float>(int_val);
+        } else if (val.type == TYPE_FLOAT && to == TYPE_INT) {
+            float float_val = val.float_val;
+            val.type = TYPE_INT;
+            val.int_val = static_cast<int>(float_val);
+        }
+        // 如果类型相同或无法转换，保持原样
+    }
+
+   public:
     /**
      * @brief 获取执行器类型名称
      */

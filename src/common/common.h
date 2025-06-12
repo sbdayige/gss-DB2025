@@ -12,12 +12,14 @@ See the Mulan PSL v2 for more details. */
 
 #include <cassert>
 #include <cstring>
+#include <iomanip>
 #include <memory>
+#include <sstream>
 #include <string>
 #include <vector>
+
 #include "defs.h"
 #include "record/rm_defs.h"
-
 
 struct TabCol {
     std::string tab_name;
@@ -70,9 +72,31 @@ struct Value {
             memcpy(raw->data, str_val.c_str(), str_val.size());
         }
     }
+
+    std::string toString() const {
+        switch (type) {
+            case TYPE_INT:
+                return std::to_string(int_val);
+            case TYPE_FLOAT: {
+                // 检查是否为整数值（没有小数部分）
+                std::ostringstream oss;
+                oss << std::fixed << std::setprecision(6) << float_val;
+                return oss.str();
+            }
+            case TYPE_STRING:
+                return "'" + str_val + "'";
+            default:
+                return "unknown";
+        }
+    }
 };
 
-enum CompOp { OP_EQ, OP_NE, OP_LT, OP_GT, OP_LE, OP_GE };
+enum CompOp { OP_EQ,
+              OP_NE,
+              OP_LT,
+              OP_GT,
+              OP_LE,
+              OP_GE };
 
 struct Condition {
     TabCol lhs_col;   // left-hand side column

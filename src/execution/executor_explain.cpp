@@ -11,6 +11,7 @@ See the Mulan PSL v2 for more details. */
 #include "executor_explain.h"
 
 #include <algorithm>
+#include <iomanip>
 #include <iostream>
 #include <set>
 #include <sstream>
@@ -174,21 +175,7 @@ std::string ExplainExecutor::get_plan_name(std::shared_ptr<Plan> plan) {
                         }
 
                         if (cond.is_rhs_val) {
-                            if (cond.rhs_val.type == TYPE_INT) {
-                                condition_str += std::to_string(cond.rhs_val.int_val);
-                            } else if (cond.rhs_val.type == TYPE_FLOAT) {
-                                // 检查浮点数是否实际上是整数值
-                                float float_val = cond.rhs_val.float_val;
-                                if (float_val == (int)float_val) {
-                                    // 如果是整数值，按整数格式输出
-                                    condition_str += std::to_string((int)float_val);
-                                } else {
-                                    // 如果是真正的浮点数，保留浮点数格式
-                                    condition_str += std::to_string(float_val);
-                                }
-                            } else if (cond.rhs_val.type == TYPE_STRING) {
-                                condition_str += "'" + std::string(cond.rhs_val.str_val) + "'";
-                            }
+                            condition_str += cond.rhs_val.toString();
                         } else {
                             condition_str += get_display_table_name(cond.rhs_col.tab_name) + "." + cond.rhs_col.col_name;
                         }
@@ -272,9 +259,6 @@ std::string ExplainExecutor::get_plan_name(std::shared_ptr<Plan> plan) {
                         std::string lhs_col = cond.lhs_col.col_name;
                         std::string rhs_col = cond.rhs_col.col_name;
                         CompOp op = cond.op;
-
-                        // 对于等值连接，检查是否需要逆转条件顺序以保持与原始SQL一致
-                        // 启发式规则：如果左表名的字典序大于右表名，则可能需要交换回来
                         bool should_swap = false;
                         if (op == OP_EQ && lhs_table > rhs_table) {
                             should_swap = true;

@@ -175,7 +175,7 @@ std::shared_ptr<Plan> Planner::physical_optimization(std::shared_ptr<Query> quer
 
     std::shared_ptr<Plan> plan = make_one_rel(query);
 
-    // 第二步：应用谓词下推 - 在计划树中插入Filter节点
+    // 第二步：应用谓词下推 - 将WHERE条件下推到合适位置
     plan = apply_predicate_pushdown(plan, query);
 
     // 第三步：应用投影下推 - 在计划树中插入Project节点
@@ -1046,10 +1046,10 @@ std::shared_ptr<Plan> Planner::push_filters_down(std::shared_ptr<Plan> plan, std
 
         // 将单表条件下推到相应的子树
         if (!left_conditions.empty()) {
-            join_plan->left_ = std::make_shared<FilterPlan>(T_Filter, join_plan->left_, left_conditions);
+            join_plan->left_ = insert_filter_at_optimal_position(join_plan->left_, left_conditions);
         }
         if (!right_conditions.empty()) {
-            join_plan->right_ = std::make_shared<FilterPlan>(T_Filter, join_plan->right_, right_conditions);
+            join_plan->right_ = insert_filter_at_optimal_position(join_plan->right_, right_conditions);
         }
 
         // 清除已经下推的条件
@@ -1153,6 +1153,26 @@ std::shared_ptr<Plan> Planner::insert_filter_nodes(std::shared_ptr<Plan> plan, s
 }
 
 /**
+ * @brief 在最优位置插入Filter节点（Project节点之下）
+ */
+std::shared_ptr<Plan> Planner::insert_filter_at_optimal_position(std::shared_ptr<Plan> plan, const std::vector<Condition> &conditions) {
+    if (!plan || conditions.empty())
+        return plan;
+
+    // 如果是Project节点，递归到其子计划中插入Filter
+    if (auto project_plan = std::dynamic_pointer_cast<ProjectionPlan>(plan)) {
+        project_plan->subplan_ = insert_filter_at_optimal_position(project_plan->subplan_, conditions);
+        return plan;
+    }
+    // 如果是其他类型的节点，直接在其上方创建Filter节点
+    else {
+        return std::make_shared<FilterPlan>(T_Filter, plan, conditions);
+    }
+
+    return plan;
+}
+
+/**
  * @brief 在计划树中插入Project节点
  */
 std::shared_ptr<Plan> Planner::insert_project_nodes(std::shared_ptr<Plan> plan,
@@ -1167,15 +1187,25 @@ std::shared_ptr<Plan> Planner::insert_project_nodes(std::shared_ptr<Plan> plan,
         join_plan->left_ = insert_project_nodes(join_plan->left_, needed_columns, select_cols);
         join_plan->right_ = insert_project_nodes(join_plan->right_, needed_columns, select_cols);
         return plan;
-    } else if (auto filter_plan = std::dynamic_pointer_cast<FilterPlan>(plan)) {
-        // 对于Filter节点，递归处理子计划
-        filter_plan->subplan_ = insert_project_nodes(filter_plan->subplan_, needed_columns, select_cols);
-        return plan;
     } else if (auto scan_plan = std::dynamic_pointer_cast<ScanPlan>(plan)) {
-        // 对于Scan节点，需要分析该表需要输出哪些列
-        // 收集该表相关的所有列
-        std::vector<TabCol> table_needed_cols;
+        // 对于Scan节点：
+        // 1. 先检查该表在Scan节点中是否已有Filter条件
+        // 2. 如果有，先添加Filter节点
+        // 3. 然后添加Project节点（如果需要）
+
         std::string table_name = scan_plan->tab_name_;
+        std::shared_ptr<Plan> current_plan = plan;
+
+        // 第一步：检查Scan节点中是否有该表的Filter条件
+        if (!scan_plan->conds_.empty()) {
+            // 在Scan节点上方添加Filter节点
+            std::vector<Condition> table_conditions = scan_plan->conds_;
+            scan_plan->conds_.clear();  // 清除Scan中的原始条件
+            current_plan = std::make_shared<FilterPlan>(T_Filter, current_plan, table_conditions);
+        }
+
+        // 第二步：添加Project节点（如果需要的话）
+        std::vector<TabCol> table_needed_cols;
 
         // 从需要的列中筛选出属于当前表的列
         for (const auto &needed_col : needed_columns) {
@@ -1194,27 +1224,22 @@ std::shared_ptr<Plan> Planner::insert_project_nodes(std::shared_ptr<Plan> plan,
             }
         }
 
-        // 检查是否需要该表的所有列
-        // 如果需要的列数等于表的总列数，就不需要添加投影节点
+        // 检查是否需要添加投影节点
         if (!table_needed_cols.empty()) {
-            // 从系统管理器获取表的所有列
             try {
                 const auto &all_table_cols = sm_manager_->db_.get_table(table_name).cols;
 
-                // 如果需要的列数等于表的总列数，说明需要所有列，不添加投影节点
-                if (table_needed_cols.size() == all_table_cols.size()) {
-                    return plan;  // 不添加投影节点
+                // 如果需要的列数不等于表的总列数，添加投影节点
+                if (table_needed_cols.size() != all_table_cols.size()) {
+                    current_plan = std::make_shared<ProjectionPlan>(T_Projection, current_plan, table_needed_cols);
                 }
-
-                // 否则添加投影节点
-                return std::make_shared<ProjectionPlan>(T_Projection, plan, table_needed_cols);
             } catch (const std::exception &e) {
                 // 如果获取表信息失败，仍然添加投影节点以保证安全性
-                return std::make_shared<ProjectionPlan>(T_Projection, plan, table_needed_cols);
+                current_plan = std::make_shared<ProjectionPlan>(T_Projection, current_plan, table_needed_cols);
             }
         }
 
-        return plan;
+        return current_plan;
     }
 
     return plan;
