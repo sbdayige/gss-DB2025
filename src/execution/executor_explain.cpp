@@ -267,50 +267,33 @@ std::string ExplainExecutor::get_plan_name(std::shared_ptr<Plan> plan) {
                 std::vector<std::string> condition_strs;
                 for (const auto &cond : join_plan->conds_) {
                     try {
-                        // 尝试恢复更自然的表名顺序，优先显示按字母顺序在前的表
-                        std::string left_table = get_display_table_name(cond.lhs_col.tab_name);
-                        std::string right_table = get_display_table_name(cond.rhs_col.tab_name);
-                        std::string left_column = cond.lhs_col.col_name;
-                        std::string right_column = cond.rhs_col.col_name;
-                        CompOp op = cond.op;
+                        std::string condition_str = get_display_table_name(cond.lhs_col.tab_name) + "." + cond.lhs_col.col_name;
 
-                        // 如果右表名按字母顺序在前，交换显示顺序（但不改变实际逻辑）
-                        if (right_table < left_table) {
-                            std::swap(left_table, right_table);
-                            std::swap(left_column, right_column);
-                            // 交换操作符
-                            std::map<CompOp, CompOp> swap_op = {
-                                {OP_EQ, OP_EQ}, {OP_NE, OP_NE}, {OP_LT, OP_GT}, {OP_GT, OP_LT}, {OP_LE, OP_GE}, {OP_GE, OP_LE}};
-                            op = swap_op.at(op);
-                        }
-
-                        std::string condition_str = left_table + "." + left_column;
-
-                        switch (op) {
+                        switch (cond.op) {
                             case OP_EQ:
-                                condition_str += " = ";
+                                condition_str += "=";
                                 break;
                             case OP_NE:
-                                condition_str += " <> ";
+                                condition_str += "<>";
                                 break;
                             case OP_LT:
-                                condition_str += " < ";
+                                condition_str += "<";
                                 break;
                             case OP_GT:
-                                condition_str += " > ";
+                                condition_str += ">";
                                 break;
                             case OP_LE:
-                                condition_str += " <= ";
+                                condition_str += "<=";
                                 break;
                             case OP_GE:
-                                condition_str += " >= ";
+                                condition_str += ">=";
                                 break;
                             default:
-                                condition_str += " ? ";
+                                condition_str += "?";
                                 break;
                         }
 
-                        condition_str += right_table + "." + right_column;
+                        condition_str += get_display_table_name(cond.rhs_col.tab_name) + "." + cond.rhs_col.col_name;
                         condition_strs.push_back(condition_str);
                     } catch (...) {
                         condition_strs.push_back("join_condition_error");

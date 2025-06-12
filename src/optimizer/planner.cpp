@@ -862,15 +862,15 @@ size_t Planner::estimate_table_cardinality(const std::string &table_name) {
             // 表文件未打开，使用默认估计值
             return 1000;
         }
-        
+
         auto &file_handle = sm_manager_->fhs_[table_name];
         auto file_hdr = file_handle->get_file_hdr();
-        
+
         // 使用页面数量和每页记录数来粗略估算
         // 假设页面利用率为70%
-        size_t estimated_pages = file_hdr.num_pages > 1 ? file_hdr.num_pages - 1 : 0; // 减去文件头页面
+        size_t estimated_pages = file_hdr.num_pages > 1 ? file_hdr.num_pages - 1 : 0;  // 减去文件头页面
         size_t estimated_records = estimated_pages * file_hdr.num_records_per_page * 0.7;
-        
+
         return estimated_records > 0 ? estimated_records : 1;  // 至少返回1避免除零错误
     } catch (...) {
         // 如果出现任何错误，返回默认值
