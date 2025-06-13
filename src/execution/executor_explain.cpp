@@ -472,14 +472,44 @@ void ExplainExecutor::collectTableNames(std::shared_ptr<Plan> plan, std::set<std
 
 std::string ExplainExecutor::get_display_table_name(const std::string &table_name) {
     try {
+        std::cerr << "DEBUG: get_display_table_name called with table_name: " << table_name << std::endl;
+        std::cerr << "DEBUG: table_alias_map_ contents:" << std::endl;
+        for (const auto &pair : table_alias_map_) {
+            std::cerr << "  " << pair.first << " -> " << pair.second << std::endl;
+        }
+
         // table_alias_map_: alias -> table_name
-        // 需要通过table_name找alias
+        // 需要通过table_name找alias，但优先返回真正的别名（不等于表名的）
+        std::string first_match;
+        std::string real_alias;
+        
         for (const auto &pair : table_alias_map_) {
             if (pair.second == table_name) {
-                return pair.first;  // 返回别名
+                if (first_match.empty()) {
+                    first_match = pair.first;
+                }
+                // 如果别名不等于表名，说明这是真正的别名
+                if (pair.first != table_name) {
+                    real_alias = pair.first;
+                    break;
+                }
             }
         }
+        
+        // 优先返回真正的别名
+        if (!real_alias.empty()) {
+            std::cerr << "DEBUG: Found real alias " << real_alias << " for table " << table_name << std::endl;
+            return real_alias;
+        }
+        
+        // 如果没有真正的别名，返回第一个匹配项
+        if (!first_match.empty()) {
+            std::cerr << "DEBUG: Found alias " << first_match << " for table " << table_name << std::endl;
+            return first_match;
+        }
+        
         // 如果没有找到别名，返回原表名
+        std::cerr << "DEBUG: No alias found for table " << table_name << ", returning original name" << std::endl;
         return table_name;
     } catch (...) {
         return table_name;  // 如果出错，返回原表名
