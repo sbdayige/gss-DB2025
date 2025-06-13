@@ -189,6 +189,23 @@ class Planner {
     bool is_select_all(std::shared_ptr<ast::SelectStmt> select_stmt);
 
     /**
+     * @brief 估算两个表连接的结果大小
+     */
+    size_t estimate_join_result_size(const std::string &table1, const std::string &table2,
+                                     const std::unordered_map<std::string, size_t> &cardinality_map,
+                                     const std::unordered_map<std::string, std::set<std::string>> &join_graph,
+                                     const std::vector<Condition> &conditions);
+
+    /**
+     * @brief 估算中间结果与新表连接的结果大小
+     */
+    size_t estimate_join_with_intermediate_result(size_t intermediate_size, const std::string &new_table,
+                                                  const std::unordered_map<std::string, size_t> &cardinality_map,
+                                                  const std::unordered_map<std::string, std::set<std::string>> &join_graph,
+                                                  const std::vector<Condition> &conditions,
+                                                  const std::set<std::string> &used_tables);
+
+    /**
      * @brief 物理优化阶段
      * @param query 逻辑优化后的查询对象
      * @param context 查询执行上下文

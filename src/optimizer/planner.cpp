@@ -213,7 +213,7 @@ std::shared_ptr<Plan> Planner::make_one_rel(std::shared_ptr<Query> query) {
             }
         }
 
-        std::cerr << "DEBUG: Creating scan plan for table " << tables[i] 
+        std::cerr << "DEBUG: Creating scan plan for table " << tables[i]
                   << " with " << curr_conds.size() << " WHERE conditions" << std::endl;
 
         // 获取表的实际记录数量用于调试
@@ -234,7 +234,7 @@ std::shared_ptr<Plan> Planner::make_one_rel(std::shared_ptr<Query> query) {
         } else {
             // 有可用索引：使用索引扫描（Index Scan）
             // 将WHERE条件传递给ScanPlan，让执行器处理Filter节点生成
-            std::cerr << "DEBUG: Using index scan for table " << tables[i] 
+            std::cerr << "DEBUG: Using index scan for table " << tables[i]
                       << " on columns: ";
             for (size_t j = 0; j < index_col_names.size(); ++j) {
                 if (j > 0) std::cerr << ", ";
@@ -281,135 +281,67 @@ std::shared_ptr<Plan> Planner::make_one_rel(std::shared_ptr<Query> query) {
 
     if (conds.size() >= 1) {
         // ===========================================
-        // 第2.1阶段：处理第一个连接条件，建立初始连接树
+        // 第2.1阶段：按优化后的表顺序构建连接树
         // ===========================================
 
-        // 已连接表名列表，用于跟踪哪些表已经参与了连接操作
-        std::vector<std::string> joined_tables(tables.size());
-        auto it = conds.begin();
+        std::cerr << "DEBUG: Building join tree in optimized order..." << std::endl;
+        
+        // 首先构建第一个表的计划
+        table_join_executors = table_scan_executors[0];
+        scantbl[0] = 1;  // 标记第一个表已使用
+        
+        std::cerr << "DEBUG: Starting with table " << tables[0] << std::endl;
 
-        // 处理第一个连接条件：选择两个表进行连接，建立连接树的根节点
-        while (it != conds.end()) {
-            std::shared_ptr<Plan> left, right;
+        // 按照优化后的顺序逐个加入剩余的表
+        for (size_t i = 1; i < tables.size(); i++) {
+            std::string next_table = tables[i];
+            std::cerr << "DEBUG: Adding table " << next_table << " to join tree" << std::endl;
+            
+            // 查找与当前已连接的表集合之间的连接条件
+            std::vector<Condition> applicable_conds;
+            for (const auto &cond : conds) {
+                // 检查这个连接条件是否涉及当前要加入的表
+                bool involves_next_table = (cond.lhs_col.tab_name == next_table || cond.rhs_col.tab_name == next_table);
+                // 检查这个连接条件是否涉及已连接的表
+                bool involves_joined_table = false;
+                for (size_t j = 0; j < i; j++) {
+                    if (cond.lhs_col.tab_name == tables[j] || cond.rhs_col.tab_name == tables[j]) {
+                        involves_joined_table = true;
+                        break;
+                    }
+                }
+                
+                if (involves_next_table && involves_joined_table) {
+                    applicable_conds.push_back(cond);
+                }
+            }
+            
+            std::cerr << "DEBUG: Found " << applicable_conds.size() << " applicable join conditions" << std::endl;
+            
+            // 获取下一个表的扫描计划
+            std::shared_ptr<Plan> right_plan = table_scan_executors[i];
+            scantbl[i] = 1;  // 标记该表已使用
 
-            // 从扫描计划列表中获取连接条件涉及的左表和右表
-            // pop_scan会标记表为已使用，并更新joined_tables列表
-            left = pop_scan(scantbl, it->lhs_col.tab_name, joined_tables, table_scan_executors);
-            right = pop_scan(scantbl, it->rhs_col.tab_name, joined_tables, table_scan_executors);
-
-            // 将当前条件封装为连接条件
-            std::vector<Condition> join_conds{*it};
-
-            // ===========================================
-            // 连接算法选择策略
-            // ===========================================
-            // 根据系统配置选择最适合的连接算法
-
+            
+            // 创建连接节点
             if (enable_nestedloop_join && enable_sortmerge_join) {
                 // 两种算法都启用时，默认选择嵌套循环连接
-                // Nested Loop Join适用于小表连接或没有排序要求的场景
-                table_join_executors = std::make_shared<JoinPlan>(T_NestLoop, std::move(left), std::move(right), join_conds);
+                table_join_executors = std::make_shared<JoinPlan>(T_NestLoop, std::move(table_join_executors), 
+                                                                 std::move(right_plan), applicable_conds);
             } else if (enable_nestedloop_join) {
                 // 仅启用嵌套循环连接
-                // 算法简单，适用于小数据集或内存受限的环境
-                table_join_executors = std::make_shared<JoinPlan>(T_NestLoop, std::move(left), std::move(right), join_conds);
+                table_join_executors = std::make_shared<JoinPlan>(T_NestLoop, std::move(table_join_executors), 
+                                                                 std::move(right_plan), applicable_conds);
             } else if (enable_sortmerge_join) {
                 // 仅启用排序合并连接
-                // 适用于大数据集，特别是连接列已排序的情况
-                table_join_executors = std::make_shared<JoinPlan>(T_SortMerge, std::move(left), std::move(right), join_conds);
+                table_join_executors = std::make_shared<JoinPlan>(T_SortMerge, std::move(table_join_executors), 
+                                                                 std::move(right_plan), applicable_conds);
             } else {
                 // 配置错误：没有启用任何连接算法
                 throw RMDBError("No join executor selected!");
             }
-
-            // 移除已处理的连接条件，避免重复处理
-            it = conds.erase(it);
-            break;  // 只处理第一个条件，建立初始连接树
-        }
-
-        // ===========================================
-        // 第2.2阶段：处理剩余连接条件，扩展连接树
-        // ===========================================
-
-        // 继续处理剩余的连接条件，将更多表加入到连接树中
-        it = conds.begin();
-        while (it != conds.end()) {
-            // 初始化新表连接计划指针
-            std::shared_ptr<Plan> left_need_to_join_executors = nullptr;
-            std::shared_ptr<Plan> right_need_to_join_executors = nullptr;
-            bool isneedreverse = false;  // 标记是否需要交换操作数
-
-            // 检查连接条件的左表是否已在连接树中
-            if (std::find(joined_tables.begin(), joined_tables.end(), it->lhs_col.tab_name) == joined_tables.end()) {
-                // 左表未参与连接，从扫描计划中获取
-                left_need_to_join_executors = pop_scan(scantbl, it->lhs_col.tab_name, joined_tables, table_scan_executors);
-            }
-
-            // 检查连接条件的右表是否已在连接树中
-            if (std::find(joined_tables.begin(), joined_tables.end(), it->rhs_col.tab_name) == joined_tables.end()) {
-                // 右表未参与连接，从扫描计划中获取
-                right_need_to_join_executors = pop_scan(scantbl, it->rhs_col.tab_name, joined_tables, table_scan_executors);
-                isneedreverse = true;  // 标记可能需要交换操作数以保持左深树结构
-            }
-
-            // ===========================================
-            // 连接情况分类处理
-            // ===========================================
-
-            if (left_need_to_join_executors != nullptr && right_need_to_join_executors != nullptr) {
-                // 情况1：两个新表之间的连接
-                // 先将两个新表连接，然后将结果与已有连接树合并
-
-                std::vector<Condition> join_conds{*it};
-
-                // 创建新表之间的连接节点
-                std::shared_ptr<Plan> temp_join_executors = std::make_shared<JoinPlan>(T_NestLoop,
-                                                                                       std::move(left_need_to_join_executors),
-                                                                                       std::move(right_need_to_join_executors),
-                                                                                       join_conds);
-
-                // 将新的连接节点与已有连接树合并（无额外连接条件，相当于笛卡尔积）
-                // 修改：将已有连接树作为左子树，新连接节点作为右子树
-                table_join_executors = std::make_shared<JoinPlan>(T_NestLoop, std::move(table_join_executors),
-                                                                  std::move(temp_join_executors),
-                                                                  std::vector<Condition>());
-            } else if (left_need_to_join_executors != nullptr || right_need_to_join_executors != nullptr) {
-                // 情况2：一个新表与已有连接树的连接
-
-                if (isneedreverse) {
-                    // 需要交换操作数以维持左深连接树的结构
-                    // 同时需要相应地调整比较操作符
-                    std::map<CompOp, CompOp> swap_op = {
-                        {OP_EQ, OP_EQ},  // 等于操作符交换后不变
-                        {OP_NE, OP_NE},  // 不等于操作符交换后不变
-                        {OP_LT, OP_GT},  // 小于 <-> 大于
-                        {OP_GT, OP_LT},  // 大于 <-> 小于
-                        {OP_LE, OP_GE},  // 小于等于 <-> 大于等于
-                        {OP_GE, OP_LE},  // 大于等于 <-> 小于等于
-                    };
-
-                    // 交换连接条件的左右操作数
-                    std::swap(it->lhs_col, it->rhs_col);
-                    it->op = swap_op.at(it->op);
-
-                    // 将右表计划移动到左表计划
-                    left_need_to_join_executors = std::move(right_need_to_join_executors);
-                }
-
-                std::vector<Condition> join_conds{*it};
-
-                // 将新表与已有连接树连接，构建左深连接树
-                // 修改：将已有连接树作为左子树，新表作为右子树
-                table_join_executors = std::make_shared<JoinPlan>(T_NestLoop, std::move(table_join_executors),
-                                                                  std::move(left_need_to_join_executors), join_conds);
-            } else {
-                // 情况3：连接条件涉及的两个表都已在连接树中
-                // 执行条件下推优化，将条件推送到连接树的适当位置
-                push_conds(std::move(&(*it)), table_join_executors);
-            }
-
-            // 移除已处理的连接条件
-            it = conds.erase(it);
+            
+            std::cerr << "DEBUG: Created join node for table " << next_table << std::endl;
         }
     } else {
         // ===========================================
@@ -874,14 +806,14 @@ std::shared_ptr<Query> Planner::join_order_optimization(std::shared_ptr<Query> q
     // 实现贪心连接顺序优化算法
     std::cerr << "DEBUG: Starting greedy join order optimization..." << std::endl;
     std::vector<std::string> optimized_tables = greedy_join_order_optimization(table_stats, query->conds);
-    
+
     std::cerr << "DEBUG: Optimized table order: ";
     for (size_t i = 0; i < optimized_tables.size(); ++i) {
         if (i > 0) std::cerr << " -> ";
         std::cerr << optimized_tables[i];
     }
     std::cerr << std::endl;
-    
+
     query->tables = std::move(optimized_tables);
 
     return query;
@@ -913,13 +845,11 @@ size_t Planner::estimate_table_cardinality(const std::string &table_name) {
                 auto page_handle = file_handle->fetch_page_handle(page_no);
                 // 使用page_hdr成员变量而不是get_page_hdr()方法
                 actual_records += page_handle.page_hdr->num_records;
-                // 注意：fetch_page_handle可能会pin页面，但RmFileHandle没有提供public的unpin方法
-                // 这里暂时不进行unpin，依赖buffer pool的LRU策略自动管理
             }
-            
+
             std::cerr << "DEBUG: Table " << table_name << " actual record count by scanning: " << actual_records << std::endl;
             return actual_records > 0 ? actual_records : 1;
-            
+
         } catch (const std::exception &e) {
             // 如果扫描失败，回退到估算方法
             std::cerr << "DEBUG: Failed to scan table " << table_name << " (" << e.what() << "), using estimation method" << std::endl;
@@ -930,7 +860,7 @@ size_t Planner::estimate_table_cardinality(const std::string &table_name) {
 
         // 回退到原来的估算方法，但调整估算策略
         size_t estimated_pages = file_hdr.num_pages > 1 ? file_hdr.num_pages - 1 : 0;  // 减去文件头页面
-        
+
         // 使用更保守的估算：假设页面利用率为30%而不是70%
         size_t estimated_records = estimated_pages * file_hdr.num_records_per_page * 0.3;
 
@@ -1000,22 +930,38 @@ std::vector<std::string> Planner::greedy_join_order_optimization(
 
     result.push_back(sorted_stats[0].first);
     used_tables.insert(sorted_stats[0].first);
+    size_t current_result_size = cardinality_map[sorted_stats[0].first];
+
+    std::cerr << "DEBUG: Greedy join order - starting with table " << sorted_stats[0].first
+              << " (cardinality: " << current_result_size << ")" << std::endl;
 
     if (sorted_stats.size() > 1) {
         result.push_back(sorted_stats[1].first);
         used_tables.insert(sorted_stats[1].first);
+
+        // 估算初始两表连接的结果大小
+        current_result_size = estimate_join_result_size(
+            sorted_stats[0].first, sorted_stats[1].first,
+            cardinality_map, join_graph, conditions);
+
+        std::cerr << "DEBUG: Added table " << sorted_stats[1].first
+                  << " (cardinality: " << cardinality_map[sorted_stats[1].first]
+                  << "), intermediate result size: " << current_result_size << std::endl;
     }
 
-    // 第二步：贪心地添加剩余的表
+    // 第二步：贪心地添加剩余的表，每次选择使中间结果最小的表
     while (used_tables.size() < table_stats.size()) {
         std::string best_table;
-        size_t min_cost = SIZE_MAX;
+        size_t min_result_size = SIZE_MAX;
+
+        std::cerr << "DEBUG: Choosing next table from " << (table_stats.size() - used_tables.size())
+                  << " remaining tables..." << std::endl;
 
         for (const auto &stat : table_stats) {
             const std::string &table = stat.first;
             if (used_tables.count(table)) continue;  // 已经使用过的表
 
-            // 检查这个表是否与已选择的表有连接条件
+            // 检查这个表是否与已选择的表集合有连接条件
             bool has_join_condition = false;
             for (const std::string &used_table : used_tables) {
                 if (join_graph[table].count(used_table)) {
@@ -1024,27 +970,24 @@ std::vector<std::string> Planner::greedy_join_order_optimization(
                 }
             }
 
-            // 如果没有连接条件但还有其他表有连接条件，暂时跳过
-            if (!has_join_condition) {
-                bool other_tables_have_joins = false;
-                for (const auto &other_stat : table_stats) {
-                    if (used_tables.count(other_stat.first) || other_stat.first == table) continue;
-                    for (const std::string &used_table : used_tables) {
-                        if (join_graph[other_stat.first].count(used_table)) {
-                            other_tables_have_joins = true;
-                            break;
-                        }
-                    }
-                    if (other_tables_have_joins) break;
-                }
-                if (other_tables_have_joins) continue;
+            // 估算加入这个表后的中间结果大小
+            size_t estimated_result_size;
+            if (has_join_condition) {
+                // 有连接条件：使用连接选择性估算
+                estimated_result_size = estimate_join_with_intermediate_result(
+                    current_result_size, table, cardinality_map, join_graph, conditions, used_tables);
+            } else {
+                // 没有连接条件：笛卡尔积
+                estimated_result_size = current_result_size * cardinality_map[table];
+                std::cerr << "DEBUG: Table " << table << " has no join conditions, cartesian product size: "
+                          << estimated_result_size << std::endl;
             }
 
-            // 估算添加这个表的成本（简化版：直接使用表的基数）
-            size_t cost = cardinality_map[table];
+            std::cerr << "DEBUG: Table " << table << " (cardinality: " << cardinality_map[table]
+                      << ") would result in intermediate size: " << estimated_result_size << std::endl;
 
-            if (cost < min_cost) {
-                min_cost = cost;
+            if (estimated_result_size < min_result_size) {
+                min_result_size = estimated_result_size;
                 best_table = table;
             }
         }
@@ -1052,12 +995,17 @@ std::vector<std::string> Planner::greedy_join_order_optimization(
         if (!best_table.empty()) {
             result.push_back(best_table);
             used_tables.insert(best_table);
+            current_result_size = min_result_size;
+
+            std::cerr << "DEBUG: Selected table " << best_table
+                      << ", new intermediate result size: " << current_result_size << std::endl;
         } else {
             // 如果没有找到最佳表，选择剩余表中基数最小的
             for (const auto &stat : sorted_stats) {
                 if (!used_tables.count(stat.first)) {
                     result.push_back(stat.first);
                     used_tables.insert(stat.first);
+                    std::cerr << "DEBUG: Fallback selected table " << stat.first << std::endl;
                     break;
                 }
             }
@@ -1065,6 +1013,94 @@ std::vector<std::string> Planner::greedy_join_order_optimization(
     }
 
     return result;
+}
+
+/**
+ * @brief 估算两个表连接的结果大小
+ * @param table1 第一个表名
+ * @param table2 第二个表名
+ * @param cardinality_map 表基数映射
+ * @param join_graph 连接图
+ * @param conditions 连接条件列表
+ * @return 估算的连接结果大小
+ */
+size_t Planner::estimate_join_result_size(const std::string &table1, const std::string &table2,
+                                          const std::unordered_map<std::string, size_t> &cardinality_map,
+                                          const std::unordered_map<std::string, std::set<std::string>> &join_graph,
+                                          const std::vector<Condition> &conditions) {
+    size_t card1 = cardinality_map.at(table1);
+    size_t card2 = cardinality_map.at(table2);
+
+    // 检查是否有连接条件
+    auto it1 = join_graph.find(table1);
+    bool has_join_condition = (it1 != join_graph.end() && it1->second.count(table2) > 0);
+
+    if (has_join_condition) {
+        // 有连接条件：使用简化的选择性估算
+        // 默认假设等值连接的选择性为 1/max(card1, card2)
+        // 这是一个常用的启发式规则
+        size_t max_card = std::max(card1, card2);
+        size_t result_size = (card1 * card2) / max_card;
+
+        std::cerr << "DEBUG: Join " << table1 << "(" << card1 << ") with " << table2 << "(" << card2
+                  << ") has join condition, estimated result: " << result_size << std::endl;
+
+        return std::max(result_size, (size_t)1);  // 至少返回1
+    } else {
+        // 没有连接条件：笛卡尔积
+        size_t result_size = card1 * card2;
+        std::cerr << "DEBUG: Cartesian product " << table1 << "(" << card1 << ") x " << table2 << "(" << card2
+                  << ") = " << result_size << std::endl;
+        return result_size;
+    }
+}
+
+/**
+ * @brief 估算中间结果与新表连接的结果大小
+ * @param intermediate_size 当前中间结果的大小
+ * @param new_table 要加入的新表
+ * @param cardinality_map 表基数映射
+ * @param join_graph 连接图
+ * @param conditions 连接条件列表
+ * @param used_tables 已使用的表集合
+ * @return 估算的连接结果大小
+ */
+size_t Planner::estimate_join_with_intermediate_result(size_t intermediate_size, const std::string &new_table,
+                                                       const std::unordered_map<std::string, size_t> &cardinality_map,
+                                                       const std::unordered_map<std::string, std::set<std::string>> &join_graph,
+                                                       const std::vector<Condition> &conditions,
+                                                       const std::set<std::string> &used_tables) {
+    size_t new_table_card = cardinality_map.at(new_table);
+
+    // 检查新表与已使用表集合是否有连接条件
+    bool has_join_condition = false;
+    auto it = join_graph.find(new_table);
+    if (it != join_graph.end()) {
+        for (const std::string &used_table : used_tables) {
+            if (it->second.count(used_table) > 0) {
+                has_join_condition = true;
+                break;
+            }
+        }
+    }
+
+    if (has_join_condition) {
+        // 有连接条件：使用启发式选择性估算
+        // 假设连接选择性为 1/max(intermediate_size, new_table_card)
+        size_t max_size = std::max(intermediate_size, new_table_card);
+        size_t result_size = (intermediate_size * new_table_card) / max_size;
+
+        std::cerr << "DEBUG: Join intermediate result(" << intermediate_size << ") with " << new_table
+                  << "(" << new_table_card << ") has join condition, estimated result: " << result_size << std::endl;
+
+        return std::max(result_size, (size_t)1);  // 至少返回1
+    } else {
+        // 没有连接条件：笛卡尔积
+        size_t result_size = intermediate_size * new_table_card;
+        std::cerr << "DEBUG: Cartesian product intermediate(" << intermediate_size << ") x " << new_table
+                  << "(" << new_table_card << ") = " << result_size << std::endl;
+        return result_size;
+    }
 }
 
 /**
@@ -1153,7 +1189,7 @@ std::shared_ptr<Plan> Planner::insert_project_nodes(std::shared_ptr<Plan> plan,
             }
         }
 
-        std::cerr << "DEBUG: For table " << table_name << ", found " << table_needed_cols.size() 
+        std::cerr << "DEBUG: For table " << table_name << ", found " << table_needed_cols.size()
                   << " SELECT columns" << std::endl;
 
         // 添加JOIN条件中需要的列（但不包括WHERE过滤条件中的列）
@@ -1173,7 +1209,7 @@ std::shared_ptr<Plan> Planner::insert_project_nodes(std::shared_ptr<Plan> plan,
             }
         }
 
-        std::cerr << "DEBUG: For table " << table_name << ", found " << join_columns.size() 
+        std::cerr << "DEBUG: For table " << table_name << ", found " << join_columns.size()
                   << " JOIN columns" << std::endl;
 
         for (const auto &join_col : join_columns) {
