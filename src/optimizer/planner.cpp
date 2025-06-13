@@ -208,8 +208,18 @@ std::shared_ptr<Plan> Planner::make_one_rel(std::shared_ptr<Query> query) {
         // 从全局条件中提取当前表的单表条件用于索引选择
         std::vector<Condition> curr_conds;
         for (const auto &cond : query->conds) {
-            if (cond.lhs_col.tab_name == tables[i] && cond.is_rhs_val) {
-                curr_conds.push_back(cond);
+            // 单表条件包括：
+            // 1. 表.列 = 值 (cond.is_rhs_val = true)
+            // 2. 表.列 = 表.列 (同一个表的两个列比较)
+            if (cond.lhs_col.tab_name == tables[i]) {
+                if (cond.is_rhs_val) {
+                    // 情况1: 表.列 = 值
+                    curr_conds.push_back(cond);
+                } else if (cond.rhs_col.tab_name == tables[i]) {
+                    // 情况2: 表.列1 = 表.列2 (同一个表的列比较)
+                    curr_conds.push_back(cond);
+                }
+                // 其他情况是连接条件，不在这里处理
             }
         }
 
@@ -285,18 +295,18 @@ std::shared_ptr<Plan> Planner::make_one_rel(std::shared_ptr<Query> query) {
         // ===========================================
 
         std::cerr << "DEBUG: Building join tree in optimized order..." << std::endl;
-        
+
         // 首先构建第一个表的计划
         table_join_executors = table_scan_executors[0];
         scantbl[0] = 1;  // 标记第一个表已使用
-        
+
         std::cerr << "DEBUG: Starting with table " << tables[0] << std::endl;
 
         // 按照优化后的顺序逐个加入剩余的表
         for (size_t i = 1; i < tables.size(); i++) {
             std::string next_table = tables[i];
             std::cerr << "DEBUG: Adding table " << next_table << " to join tree" << std::endl;
-            
+
             // 查找与当前已连接的表集合之间的连接条件
             std::vector<Condition> applicable_conds;
             for (const auto &cond : conds) {
@@ -310,37 +320,36 @@ std::shared_ptr<Plan> Planner::make_one_rel(std::shared_ptr<Query> query) {
                         break;
                     }
                 }
-                
+
                 if (involves_next_table && involves_joined_table) {
                     applicable_conds.push_back(cond);
                 }
             }
-            
+
             std::cerr << "DEBUG: Found " << applicable_conds.size() << " applicable join conditions" << std::endl;
-            
+
             // 获取下一个表的扫描计划
             std::shared_ptr<Plan> right_plan = table_scan_executors[i];
             scantbl[i] = 1;  // 标记该表已使用
 
-            
             // 创建连接节点
             if (enable_nestedloop_join && enable_sortmerge_join) {
                 // 两种算法都启用时，默认选择嵌套循环连接
-                table_join_executors = std::make_shared<JoinPlan>(T_NestLoop, std::move(table_join_executors), 
-                                                                 std::move(right_plan), applicable_conds);
+                table_join_executors = std::make_shared<JoinPlan>(T_NestLoop, std::move(table_join_executors),
+                                                                  std::move(right_plan), applicable_conds);
             } else if (enable_nestedloop_join) {
                 // 仅启用嵌套循环连接
-                table_join_executors = std::make_shared<JoinPlan>(T_NestLoop, std::move(table_join_executors), 
-                                                                 std::move(right_plan), applicable_conds);
+                table_join_executors = std::make_shared<JoinPlan>(T_NestLoop, std::move(table_join_executors),
+                                                                  std::move(right_plan), applicable_conds);
             } else if (enable_sortmerge_join) {
                 // 仅启用排序合并连接
-                table_join_executors = std::make_shared<JoinPlan>(T_SortMerge, std::move(table_join_executors), 
-                                                                 std::move(right_plan), applicable_conds);
+                table_join_executors = std::make_shared<JoinPlan>(T_SortMerge, std::move(table_join_executors),
+                                                                  std::move(right_plan), applicable_conds);
             } else {
                 // 配置错误：没有启用任何连接算法
                 throw RMDBError("No join executor selected!");
             }
-            
+
             std::cerr << "DEBUG: Created join node for table " << next_table << std::endl;
         }
     } else {
@@ -1239,29 +1248,11 @@ std::shared_ptr<Plan> Planner::insert_project_nodes(std::shared_ptr<Plan> plan,
             }
         }
 
-        // 除了SELECT *之外，所有Scan节点都应该有Project节点
-        // 如果table_needed_cols为空，添加该表的所有列
-        if (table_needed_cols.empty()) {
-            std::cerr << "DEBUG: table_needed_cols is empty for table " << table_name << ", adding all columns" << std::endl;
-            try {
-                const auto &all_table_cols = sm_manager_->db_.get_table(table_name).cols;
-                std::cerr << "DEBUG: Table " << table_name << " has " << all_table_cols.size() << " total columns" << std::endl;
-                for (const auto &col_meta : all_table_cols) {
-                    TabCol tab_col;
-                    tab_col.tab_name = table_name;
-                    tab_col.col_name = col_meta.name;
-                    table_needed_cols.push_back(tab_col);
-                }
-            } catch (const std::exception &e) {
-                std::cerr << "DEBUG: Exception getting table info for " << table_name << ": " << e.what() << std::endl;
-            }
-        }
+        // 对于不在SELECT子句中且不参与JOIN的表，不需要Project节点
+        // 只有在表真正需要列时才添加Project节点
 
-        // 为所有Scan节点添加Project节点（除了SELECT *情况已在上层处理）
-        if (!table_needed_cols.empty()) {
-            std::cerr << "DEBUG: Adding Project node for table " << table_name << " with " << table_needed_cols.size() << " columns" << std::endl;
-            current_plan = std::make_shared<ProjectionPlan>(T_Projection, current_plan, table_needed_cols);
-        }
+        std::cerr << "DEBUG: Adding Project node for table " << table_name << " with " << table_needed_cols.size() << " columns" << std::endl;
+        current_plan = std::make_shared<ProjectionPlan>(T_Projection, current_plan, table_needed_cols);
 
         return current_plan;
     }

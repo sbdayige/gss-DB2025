@@ -469,23 +469,23 @@ joinList:
     ;
 
 joinExpr:
-        joinType JOIN tableRef ON condition
+        joinType JOIN tableRef ON whereClause
     {
         // 这里需要获取左表名，暂时使用空字符串
         $$ = std::make_shared<JoinExpr>(
             "",           // 左表名，在语义分析阶段确定
             $3,           // 右表引用（包含别名）
-            std::vector<std::shared_ptr<BinaryExpr>>{$5}, // 连接条件
+            $5,           // 连接条件列表（支持AND连接）
             $1            // JOIN类型
         );
     }
-    |   JOIN tableRef ON condition
+    |   JOIN tableRef ON whereClause
     {
         // 默认为INNER JOIN
         $$ = std::make_shared<JoinExpr>(
             "",           // 左表名，在语义分析阶段确定
             $2,           // 右表引用（包含别名）
-            std::vector<std::shared_ptr<BinaryExpr>>{$4}, // 连接条件
+            $4,           // 连接条件列表（支持AND连接）
             INNER_JOIN    // 默认为内连接
         );
     }

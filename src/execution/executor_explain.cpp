@@ -296,10 +296,6 @@ std::string ExplainExecutor::get_plan_name(std::shared_ptr<Plan> plan) {
                     return "Project(columns=[*])";
                 }
 
-                if (proj_plan->sel_cols_.empty()) {
-                    return "Project(columns=[*])";
-                }
-
                 std::vector<std::string> col_names;
                 for (const auto &col : proj_plan->sel_cols_) {
                     try {
@@ -482,7 +478,7 @@ std::string ExplainExecutor::get_display_table_name(const std::string &table_nam
         // 需要通过table_name找alias，但优先返回真正的别名（不等于表名的）
         std::string first_match;
         std::string real_alias;
-        
+
         for (const auto &pair : table_alias_map_) {
             if (pair.second == table_name) {
                 if (first_match.empty()) {
@@ -495,19 +491,19 @@ std::string ExplainExecutor::get_display_table_name(const std::string &table_nam
                 }
             }
         }
-        
+
         // 优先返回真正的别名
         if (!real_alias.empty()) {
             std::cerr << "DEBUG: Found real alias " << real_alias << " for table " << table_name << std::endl;
             return real_alias;
         }
-        
+
         // 如果没有真正的别名，返回第一个匹配项
         if (!first_match.empty()) {
             std::cerr << "DEBUG: Found alias " << first_match << " for table " << table_name << std::endl;
             return first_match;
         }
-        
+
         // 如果没有找到别名，返回原表名
         std::cerr << "DEBUG: No alias found for table " << table_name << ", returning original name" << std::endl;
         return table_name;
