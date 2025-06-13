@@ -213,6 +213,13 @@ std::shared_ptr<Plan> Planner::make_one_rel(std::shared_ptr<Query> query) {
             }
         }
 
+        std::cerr << "DEBUG: Creating scan plan for table " << tables[i] 
+                  << " with " << curr_conds.size() << " WHERE conditions" << std::endl;
+
+        // 获取表的实际记录数量用于调试
+        size_t table_cardinality = estimate_table_cardinality(tables[i]);
+        std::cerr << "DEBUG: Table " << tables[i] << " estimated record count: " << table_cardinality << std::endl;
+
         // 检查当前表是否有可用的索引来优化查询
         std::vector<std::string> index_col_names;
         bool index_exist = get_index_cols(tables[i], curr_conds, index_col_names);
@@ -220,12 +227,20 @@ std::shared_ptr<Plan> Planner::make_one_rel(std::shared_ptr<Query> query) {
         if (index_exist == false) {
             // 没有可用索引：使用顺序扫描（Sequential Scan）
             // 将WHERE条件传递给ScanPlan，让执行器处理Filter节点生成
+            std::cerr << "DEBUG: Using sequential scan for table " << tables[i] << std::endl;
             index_col_names.clear();
             table_scan_executors[i] =
                 std::make_shared<ScanPlan>(T_SeqScan, sm_manager_, tables[i], curr_conds, index_col_names);
         } else {
             // 有可用索引：使用索引扫描（Index Scan）
             // 将WHERE条件传递给ScanPlan，让执行器处理Filter节点生成
+            std::cerr << "DEBUG: Using index scan for table " << tables[i] 
+                      << " on columns: ";
+            for (size_t j = 0; j < index_col_names.size(); ++j) {
+                if (j > 0) std::cerr << ", ";
+                std::cerr << index_col_names[j];
+            }
+            std::cerr << std::endl;
             table_scan_executors[i] =
                 std::make_shared<ScanPlan>(T_IndexScan, sm_manager_, tables[i], curr_conds, index_col_names);
         }
@@ -841,19 +856,32 @@ std::shared_ptr<Query> Planner::join_order_optimization(std::shared_ptr<Query> q
     // 收集每个表的统计信息（基数估计）
     std::vector<std::pair<std::string, size_t>> table_stats;
 
+    std::cerr << "DEBUG: Collecting table statistics for join order optimization..." << std::endl;
+
     for (const auto &table_name : query->tables) {
         try {
             // 获取表的实际行数估计
             size_t estimated_cardinality = estimate_table_cardinality(table_name);
             table_stats.emplace_back(table_name, estimated_cardinality);
+            std::cerr << "DEBUG: Table " << table_name << " has estimated cardinality: " << estimated_cardinality << std::endl;
         } catch (...) {
             // 如果无法获取表信息，使用默认值
+            std::cerr << "DEBUG: Failed to get cardinality for table " << table_name << ", using default: 1000" << std::endl;
             table_stats.emplace_back(table_name, 1000);
         }
     }
 
     // 实现贪心连接顺序优化算法
+    std::cerr << "DEBUG: Starting greedy join order optimization..." << std::endl;
     std::vector<std::string> optimized_tables = greedy_join_order_optimization(table_stats, query->conds);
+    
+    std::cerr << "DEBUG: Optimized table order: ";
+    for (size_t i = 0; i < optimized_tables.size(); ++i) {
+        if (i > 0) std::cerr << " -> ";
+        std::cerr << optimized_tables[i];
+    }
+    std::cerr << std::endl;
+    
     query->tables = std::move(optimized_tables);
 
     return query;
@@ -870,20 +898,56 @@ size_t Planner::estimate_table_cardinality(const std::string &table_name) {
         // 获取表的文件句柄
         if (sm_manager_->fhs_.find(table_name) == sm_manager_->fhs_.end()) {
             // 表文件未打开，使用默认估计值
+            std::cerr << "DEBUG: Table " << table_name << " file not opened, using default cardinality: 1000" << std::endl;
             return 1000;
         }
 
         auto &file_handle = sm_manager_->fhs_[table_name];
         auto file_hdr = file_handle->get_file_hdr();
 
-        // 使用页面数量和每页记录数来粗略估算
-        // 假设页面利用率为70%
+        // 尝试通过实际扫描获取更准确的记录数
+        size_t actual_records = 0;
+        try {
+            // 遍历所有数据页面，统计实际记录数
+            for (int page_no = 1; page_no < file_hdr.num_pages; ++page_no) {
+                auto page_handle = file_handle->fetch_page_handle(page_no);
+                // 使用page_hdr成员变量而不是get_page_hdr()方法
+                actual_records += page_handle.page_hdr->num_records;
+                // 注意：fetch_page_handle可能会pin页面，但RmFileHandle没有提供public的unpin方法
+                // 这里暂时不进行unpin，依赖buffer pool的LRU策略自动管理
+            }
+            
+            std::cerr << "DEBUG: Table " << table_name << " actual record count by scanning: " << actual_records << std::endl;
+            return actual_records > 0 ? actual_records : 1;
+            
+        } catch (const std::exception &e) {
+            // 如果扫描失败，回退到估算方法
+            std::cerr << "DEBUG: Failed to scan table " << table_name << " (" << e.what() << "), using estimation method" << std::endl;
+        } catch (...) {
+            // 如果扫描失败，回退到估算方法
+            std::cerr << "DEBUG: Failed to scan table " << table_name << ", using estimation method" << std::endl;
+        }
+
+        // 回退到原来的估算方法，但调整估算策略
         size_t estimated_pages = file_hdr.num_pages > 1 ? file_hdr.num_pages - 1 : 0;  // 减去文件头页面
-        size_t estimated_records = estimated_pages * file_hdr.num_records_per_page * 0.7;
+        
+        // 使用更保守的估算：假设页面利用率为30%而不是70%
+        size_t estimated_records = estimated_pages * file_hdr.num_records_per_page * 0.3;
+
+        std::cerr << "DEBUG: Table " << table_name << " cardinality estimation (fallback):" << std::endl;
+        std::cerr << "  - Total pages: " << file_hdr.num_pages << std::endl;
+        std::cerr << "  - Data pages: " << estimated_pages << std::endl;
+        std::cerr << "  - Records per page: " << file_hdr.num_records_per_page << std::endl;
+        std::cerr << "  - Estimated records (30% utilization): " << estimated_records << std::endl;
 
         return estimated_records > 0 ? estimated_records : 1;  // 至少返回1避免除零错误
+    } catch (const std::exception &e) {
+        // 如果出现任何错误，返回默认值
+        std::cerr << "DEBUG: Exception estimating cardinality for table " << table_name << ": " << e.what() << std::endl;
+        return 1000;
     } catch (...) {
         // 如果出现任何错误，返回默认值
+        std::cerr << "DEBUG: Unknown exception estimating cardinality for table " << table_name << std::endl;
         return 1000;
     }
 }
@@ -1089,6 +1153,9 @@ std::shared_ptr<Plan> Planner::insert_project_nodes(std::shared_ptr<Plan> plan,
             }
         }
 
+        std::cerr << "DEBUG: For table " << table_name << ", found " << table_needed_cols.size() 
+                  << " SELECT columns" << std::endl;
+
         // 添加JOIN条件中需要的列（但不包括WHERE过滤条件中的列）
         // 检查是否有JOIN操作，如果有，需要添加JOIN条件中涉及的列
         std::set<std::string> join_columns;
@@ -1105,6 +1172,9 @@ std::shared_ptr<Plan> Planner::insert_project_nodes(std::shared_ptr<Plan> plan,
                 }
             }
         }
+
+        std::cerr << "DEBUG: For table " << table_name << ", found " << join_columns.size() 
+                  << " JOIN columns" << std::endl;
 
         for (const auto &join_col : join_columns) {
             size_t dot_pos = join_col.find('.');
@@ -1139,6 +1209,7 @@ std::shared_ptr<Plan> Planner::insert_project_nodes(std::shared_ptr<Plan> plan,
             std::cerr << "DEBUG: table_needed_cols is empty for table " << table_name << ", adding all columns" << std::endl;
             try {
                 const auto &all_table_cols = sm_manager_->db_.get_table(table_name).cols;
+                std::cerr << "DEBUG: Table " << table_name << " has " << all_table_cols.size() << " total columns" << std::endl;
                 for (const auto &col_meta : all_table_cols) {
                     TabCol tab_col;
                     tab_col.tab_name = table_name;
