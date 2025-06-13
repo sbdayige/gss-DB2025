@@ -172,15 +172,12 @@ std::shared_ptr<Query> Planner::logical_optimization(std::shared_ptr<Query> quer
 
 std::shared_ptr<Plan> Planner::physical_optimization(std::shared_ptr<Query> query, Context *context) {
     // 第一步：构建基本的扫描和连接计划
-
     std::shared_ptr<Plan> plan = make_one_rel(query);
 
-    // 第二步：应用谓词下推 - 将WHERE条件下推到合适位置
-    plan = apply_predicate_pushdown(plan, query);
-
-    // 第三步：应用投影下推 - 在计划树中插入Project节点
+    // 第二步：应用投影下推 - 在计划树中插入Project节点
     plan = apply_projection_pushdown(plan, query);
-    // 第四步：处理ORDER BY
+
+    // 第三步：处理ORDER BY
     plan = generate_sort_plan(query, std::move(plan));
     return plan;
 }
@@ -208,9 +205,13 @@ std::shared_ptr<Plan> Planner::make_one_rel(std::shared_ptr<Query> query) {
 
     // 为每个表单独生成扫描计划，包括条件下推和访问路径选择
     for (size_t i = 0; i < tables.size(); i++) {
-        // 从全局条件中提取当前表的单表条件（条件下推的第一步）
-        // pop_conds会移除已处理的条件，避免重复处理
-        auto curr_conds = pop_conds(query->conds, tables[i]);
+        // 从全局条件中提取当前表的单表条件用于索引选择
+        std::vector<Condition> curr_conds;
+        for (const auto &cond : query->conds) {
+            if (cond.lhs_col.tab_name == tables[i] && cond.is_rhs_val) {
+                curr_conds.push_back(cond);
+            }
+        }
 
         // 检查当前表是否有可用的索引来优化查询
         std::vector<std::string> index_col_names;
@@ -218,13 +219,13 @@ std::shared_ptr<Plan> Planner::make_one_rel(std::shared_ptr<Query> query) {
 
         if (index_exist == false) {
             // 没有可用索引：使用顺序扫描（Sequential Scan）
-            // 适用于小表或没有合适索引的情况
+            // 将WHERE条件传递给ScanPlan，让执行器处理Filter节点生成
             index_col_names.clear();
             table_scan_executors[i] =
                 std::make_shared<ScanPlan>(T_SeqScan, sm_manager_, tables[i], curr_conds, index_col_names);
         } else {
             // 有可用索引：使用索引扫描（Index Scan）
-            // 通过索引快速定位满足条件的记录，显著提升查询性能
+            // 将WHERE条件传递给ScanPlan，让执行器处理Filter节点生成
             table_scan_executors[i] =
                 std::make_shared<ScanPlan>(T_IndexScan, sm_manager_, tables[i], curr_conds, index_col_names);
         }
@@ -243,8 +244,17 @@ std::shared_ptr<Plan> Planner::make_one_rel(std::shared_ptr<Query> query) {
     // 第二阶段：多表连接计划构建
     // ===========================================
 
-    // 获取剩余的连接条件（单表条件已在第一阶段被pop_conds移除）
-    auto conds = std::move(query->conds);
+    // 获取剩余的连接条件（单表条件已在第一阶段处理）
+    // 将连接条件和WHERE条件分开处理
+    std::vector<Condition> join_conds;
+    for (const auto &cond : query->conds) {
+        if (!cond.is_rhs_val) {  // 连接条件：左右都是列
+            join_conds.push_back(cond);
+        }
+        // WHERE条件（is_rhs_val = true）留给apply_predicate_pushdown处理
+    }
+
+    auto conds = std::move(join_conds);  // 只处理连接条件
     std::shared_ptr<Plan> table_join_executors;
 
     // 创建表使用状态跟踪数组：-1表示未使用，1表示已使用
@@ -253,9 +263,6 @@ std::shared_ptr<Plan> Planner::make_one_rel(std::shared_ptr<Query> query) {
     for (size_t i = 0; i < tables.size(); i++) {
         scantbl[i] = -1;
     }
-
-    // 注释说明：未来可扩展支持JOIN语法树，目前基于WHERE条件进行连接
-    // 假设在ast中已经添加了jointree，这里需要修改的逻辑是，先处理jointree，然后再考虑剩下的部分
 
     if (conds.size() >= 1) {
         // ===========================================
@@ -347,8 +354,9 @@ std::shared_ptr<Plan> Planner::make_one_rel(std::shared_ptr<Query> query) {
                                                                                        join_conds);
 
                 // 将新的连接节点与已有连接树合并（无额外连接条件，相当于笛卡尔积）
-                table_join_executors = std::make_shared<JoinPlan>(T_NestLoop, std::move(temp_join_executors),
-                                                                  std::move(table_join_executors),
+                // 修改：将已有连接树作为左子树，新连接节点作为右子树
+                table_join_executors = std::make_shared<JoinPlan>(T_NestLoop, std::move(table_join_executors),
+                                                                  std::move(temp_join_executors),
                                                                   std::vector<Condition>());
             } else if (left_need_to_join_executors != nullptr || right_need_to_join_executors != nullptr) {
                 // 情况2：一个新表与已有连接树的连接
@@ -376,8 +384,9 @@ std::shared_ptr<Plan> Planner::make_one_rel(std::shared_ptr<Query> query) {
                 std::vector<Condition> join_conds{*it};
 
                 // 将新表与已有连接树连接，构建左深连接树
-                table_join_executors = std::make_shared<JoinPlan>(T_NestLoop, std::move(left_need_to_join_executors),
-                                                                  std::move(table_join_executors), join_conds);
+                // 修改：将已有连接树作为左子树，新表作为右子树
+                table_join_executors = std::make_shared<JoinPlan>(T_NestLoop, std::move(table_join_executors),
+                                                                  std::move(left_need_to_join_executors), join_conds);
             } else {
                 // 情况3：连接条件涉及的两个表都已在连接树中
                 // 执行条件下推优化，将条件推送到连接树的适当位置
@@ -412,8 +421,9 @@ std::shared_ptr<Plan> Planner::make_one_rel(std::shared_ptr<Query> query) {
         {
             // 通过笛卡尔积将剩余表加入连接树
             // 注意：这可能导致大量的中间结果，影响查询性能
-            table_join_executors = std::make_shared<JoinPlan>(T_NestLoop, std::move(table_scan_executors[i]),
-                                                              std::move(table_join_executors), std::vector<Condition>());
+            // 修改：将已有连接树作为左子树，新表作为右子树，以符合期望的输出顺序
+            table_join_executors = std::make_shared<JoinPlan>(T_NestLoop, std::move(table_join_executors),
+                                                              std::move(table_scan_executors[i]), std::vector<Condition>());
         }
     }
 
@@ -994,93 +1004,6 @@ std::vector<std::string> Planner::greedy_join_order_optimization(
 }
 
 /**
- * @brief 在物理计划中应用谓词下推
- * @param plan 基础计划树
- * @param query 查询对象，包含谓词信息
- * @return 插入Filter节点后的计划树
- */
-std::shared_ptr<Plan> Planner::apply_predicate_pushdown(std::shared_ptr<Plan> plan, std::shared_ptr<Query> query) {
-    if (!plan || !query)
-        return plan;
-
-    // 递归地对计划树进行谓词下推
-    return push_filters_down(plan, query);
-}
-
-/**
- * @brief 递归地将Filter节点下推到计划树的合适位置
- */
-std::shared_ptr<Plan> Planner::push_filters_down(std::shared_ptr<Plan> plan, std::shared_ptr<Query> query) {
-    if (!plan)
-        return plan;
-
-    // 根据计划类型处理
-    if (auto join_plan = std::dynamic_pointer_cast<JoinPlan>(plan)) {
-        // 递归处理左右子树
-        join_plan->left_ = push_filters_down(join_plan->left_, query);
-        join_plan->right_ = push_filters_down(join_plan->right_, query);
-
-        // 收集可以下推的WHERE条件
-        std::vector<Condition> all_conditions;
-        extract_conditions_from_plan(plan, all_conditions);
-
-        // 分离单表条件和连接条件
-        std::vector<Condition> left_conditions, right_conditions;
-        std::set<std::string> left_tables, right_tables;
-
-        // 收集左右子树的表名
-        collect_table_names_from_plan(join_plan->left_, left_tables);
-        collect_table_names_from_plan(join_plan->right_, right_tables);
-
-        // 分离条件
-        for (const auto &cond : all_conditions) {
-            if (cond.is_rhs_val) {
-                // 单表条件，检查属于哪个子树
-                if (left_tables.count(cond.lhs_col.tab_name)) {
-                    left_conditions.push_back(cond);
-                } else if (right_tables.count(cond.lhs_col.tab_name)) {
-                    right_conditions.push_back(cond);
-                }
-            }
-        }
-
-        // 将单表条件下推到相应的子树
-        if (!left_conditions.empty()) {
-            join_plan->left_ = insert_filter_at_optimal_position(join_plan->left_, left_conditions);
-        }
-        if (!right_conditions.empty()) {
-            join_plan->right_ = insert_filter_at_optimal_position(join_plan->right_, right_conditions);
-        }
-
-        // 清除已经下推的条件
-        clear_conditions_from_plan(plan);
-
-        return plan;
-    } else if (auto scan_plan = std::dynamic_pointer_cast<ScanPlan>(plan)) {
-        // 对于Scan节点，将该表的条件包装为Filter
-        std::vector<Condition> table_conditions;
-        for (const auto &cond : scan_plan->conds_) {
-            if (cond.is_rhs_val && cond.lhs_col.tab_name == scan_plan->tab_name_) {
-                table_conditions.push_back(cond);
-            }
-        }
-
-        if (!table_conditions.empty()) {
-            // 清除Scan中的条件
-            scan_plan->conds_.clear();
-            scan_plan->fed_conds_.clear();
-
-            // 创建Filter节点包装Scan
-            return std::make_shared<FilterPlan>(T_Filter, plan, table_conditions);
-        }
-
-        return plan;
-    }
-
-    return plan;
-}
-
-/**
  * @brief 在物理计划中应用投影下推
  * @param plan 基础计划树
  * @param query 查询对象，包含投影信息
@@ -1114,60 +1037,24 @@ std::shared_ptr<Plan> Planner::apply_projection_pushdown(std::shared_ptr<Plan> p
     // 添加JOIN条件中涉及的列（从计划树中收集）
     collect_join_columns_from_plan(plan, needed_columns);
 
-    // 根据要求：只有SELECT *查询不需要在Scan节点上方添加Project节点
-    // 对于其他所有情况（包括单表和多表），都需要在Scan节点上方添加Project节点
-    if (!query->is_select_star) {
+    // 根据要求：
+    // - SELECT *：只在根节点添加Project节点
+    // - 其他情况：在Scan节点上方添加Project节点，并在根节点添加最终的Project节点
+    if (query->is_select_star) {
+        // SELECT *：只在根节点添加Project节点
+        plan = std::make_shared<ProjectionPlan>(T_Projection, std::move(plan), query->cols);
+    } else {
+        // 其他情况：在Scan节点上方添加Project节点
         plan = insert_project_nodes(plan, needed_columns, query->cols);
-    }
-
-    // 总是在根节点添加Project节点
-    plan = std::make_shared<ProjectionPlan>(T_Projection, std::move(plan), query->cols);
-
-    return plan;
-}
-
-/**
- * @brief 在计划树中插入Filter节点
- */
-std::shared_ptr<Plan> Planner::insert_filter_nodes(std::shared_ptr<Plan> plan, std::vector<Condition> &conditions) {
-    if (!plan || conditions.empty())
-        return plan;
-
-    // 将条件按照能够下推的程度分类
-    std::vector<Condition> applicable_conditions;
-
-    for (auto it = conditions.begin(); it != conditions.end();) {
-        if (can_push_condition_to_plan(*it, plan)) {
-            applicable_conditions.push_back(*it);
-            it = conditions.erase(it);
-        } else {
-            ++it;
+        
+        // 为多表查询在根节点添加最终的Project节点来选择输出列
+        std::set<std::string> plan_tables;
+        collect_table_names_from_plan(plan, plan_tables);
+        
+        if (plan_tables.size() > 1) {
+            // 多表查询需要根节点Project来选择最终输出列
+            plan = std::make_shared<ProjectionPlan>(T_Projection, std::move(plan), query->cols);
         }
-    }
-
-    if (!applicable_conditions.empty()) {
-        // 创建Filter节点
-        plan = std::make_shared<FilterPlan>(T_Filter, plan, applicable_conditions);
-    }
-
-    return plan;
-}
-
-/**
- * @brief 在最优位置插入Filter节点（Project节点之下）
- */
-std::shared_ptr<Plan> Planner::insert_filter_at_optimal_position(std::shared_ptr<Plan> plan, const std::vector<Condition> &conditions) {
-    if (!plan || conditions.empty())
-        return plan;
-
-    // 如果是Project节点，递归到其子计划中插入Filter
-    if (auto project_plan = std::dynamic_pointer_cast<ProjectionPlan>(plan)) {
-        project_plan->subplan_ = insert_filter_at_optimal_position(project_plan->subplan_, conditions);
-        return plan;
-    }
-    // 如果是其他类型的节点，直接在其上方创建Filter节点
-    else {
-        return std::make_shared<FilterPlan>(T_Filter, plan, conditions);
     }
 
     return plan;
@@ -1189,45 +1076,68 @@ std::shared_ptr<Plan> Planner::insert_project_nodes(std::shared_ptr<Plan> plan,
         join_plan->right_ = insert_project_nodes(join_plan->right_, needed_columns, select_cols);
         return plan;
     } else if (auto scan_plan = std::dynamic_pointer_cast<ScanPlan>(plan)) {
-        // 对于Scan节点：
-        // 1. 先检查该表在Scan节点中是否已有Filter条件
-        // 2. 如果有，先添加Filter节点
-        // 3. 然后添加Project节点（如果需要）
-
+        // 对于Scan节点，只添加Project节点（不处理Filter）
         std::string table_name = scan_plan->tab_name_;
         std::shared_ptr<Plan> current_plan = plan;
 
-        // 第一步：检查Scan节点中是否有该表的Filter条件
-        if (!scan_plan->conds_.empty()) {
-            // 在Scan节点上方添加Filter节点
-            std::vector<Condition> table_conditions = scan_plan->conds_;
-            scan_plan->conds_.clear();  // 清除Scan中的原始条件
-            current_plan = std::make_shared<FilterPlan>(T_Filter, current_plan, table_conditions);
-        }
-
-        // 第二步：添加Project节点（如果需要的话）
+        // 为每个Scan节点添加Project节点（除了SELECT *）
         std::vector<TabCol> table_needed_cols;
 
-        // 从需要的列中筛选出属于当前表的列
+        // 从SELECT子句和WHERE条件中筛选出属于当前表的列
+        for (const auto &col : select_cols) {
+            if (col.tab_name == table_name) {
+                table_needed_cols.push_back(col);
+            }
+        }
+
+        // 从WHERE条件中添加该表的列
         for (const auto &needed_col : needed_columns) {
             size_t dot_pos = needed_col.find('.');
             if (dot_pos != std::string::npos) {
                 std::string tab_name = needed_col.substr(0, dot_pos);
                 std::string col_name = needed_col.substr(dot_pos + 1);
 
-                // 如果这一列属于当前表
                 if (tab_name == table_name) {
                     TabCol tab_col;
                     tab_col.tab_name = tab_name;
                     tab_col.col_name = col_name;
-                    table_needed_cols.push_back(tab_col);
+
+                    // 避免重复添加
+                    bool already_exists = false;
+                    for (const auto &existing_col : table_needed_cols) {
+                        if (existing_col.tab_name == tab_col.tab_name &&
+                            existing_col.col_name == tab_col.col_name) {
+                            already_exists = true;
+                            break;
+                        }
+                    }
+                    if (!already_exists) {
+                        table_needed_cols.push_back(tab_col);
+                    }
                 }
             }
         }
 
-        // 根据要求：除了SELECT *之外，所有Scan节点都应该有Project节点
-        // 即使选择了表的所有列，只要不是SELECT *语法，也要添加Project节点
+        // 除了SELECT *之外，所有Scan节点都应该有Project节点
+        // 如果table_needed_cols为空，添加该表的所有列
+        if (table_needed_cols.empty()) {
+            std::cerr << "DEBUG: table_needed_cols is empty for table " << table_name << ", adding all columns" << std::endl;
+            try {
+                const auto &all_table_cols = sm_manager_->db_.get_table(table_name).cols;
+                for (const auto &col_meta : all_table_cols) {
+                    TabCol tab_col;
+                    tab_col.tab_name = table_name;
+                    tab_col.col_name = col_meta.name;
+                    table_needed_cols.push_back(tab_col);
+                }
+            } catch (const std::exception &e) {
+                std::cerr << "DEBUG: Exception getting table info for " << table_name << ": " << e.what() << std::endl;
+            }
+        }
+
+        // 为所有Scan节点添加Project节点（除了SELECT *情况已在上层处理）
         if (!table_needed_cols.empty()) {
+            std::cerr << "DEBUG: Adding Project node for table " << table_name << " with " << table_needed_cols.size() << " columns" << std::endl;
             current_plan = std::make_shared<ProjectionPlan>(T_Projection, current_plan, table_needed_cols);
         }
 
@@ -1377,9 +1287,6 @@ void Planner::collect_join_columns_from_plan(std::shared_ptr<Plan> plan, std::se
     } else if (auto proj_plan = std::dynamic_pointer_cast<ProjectionPlan>(plan)) {
         // 递归处理ProjectionPlan的子节点
         collect_join_columns_from_plan(proj_plan->subplan_, join_columns);
-    } else if (auto filter_plan = std::dynamic_pointer_cast<FilterPlan>(plan)) {
-        // 递归处理FilterPlan的子节点
-        collect_join_columns_from_plan(filter_plan->subplan_, join_columns);
     }
     // ScanPlan不包含JOIN条件，无需处理
 }
@@ -1396,8 +1303,6 @@ void Planner::collect_table_names_from_plan(std::shared_ptr<Plan> plan, std::set
     } else if (auto join_plan = std::dynamic_pointer_cast<JoinPlan>(plan)) {
         collect_table_names_from_plan(join_plan->left_, table_names);
         collect_table_names_from_plan(join_plan->right_, table_names);
-    } else if (auto filter_plan = std::dynamic_pointer_cast<FilterPlan>(plan)) {
-        collect_table_names_from_plan(filter_plan->subplan_, table_names);
     } else if (auto proj_plan = std::dynamic_pointer_cast<ProjectionPlan>(plan)) {
         collect_table_names_from_plan(proj_plan->subplan_, table_names);
     }

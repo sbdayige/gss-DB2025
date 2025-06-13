@@ -93,24 +93,114 @@ void ExplainExecutor::build_plan_tree_string(std::shared_ptr<Plan> plan, int ind
             if (filter_plan->subplan_)
                 child_plans.push_back(filter_plan->subplan_);
         } else if (auto join_plan = std::dynamic_pointer_cast<JoinPlan>(plan)) {
+            // 对于Join节点，需要特殊处理以确保正确的排序
+            std::vector<std::shared_ptr<Plan>> join_children;
             if (join_plan->left_)
-                child_plans.push_back(join_plan->left_);
+                join_children.push_back(join_plan->left_);
             if (join_plan->right_)
-                child_plans.push_back(join_plan->right_);
+                join_children.push_back(join_plan->right_);
+
+            // 添加到主child_plans列表中，稍后统一排序
+            for (auto &child : join_children) {
+                child_plans.push_back(child);
+            }
         } else if (auto sort_plan = std::dynamic_pointer_cast<SortPlan>(plan)) {
             if (sort_plan->subplan_)
                 child_plans.push_back(sort_plan->subplan_);
+        } else if (auto scan_plan = std::dynamic_pointer_cast<ScanPlan>(plan)) {
+            // 对于ScanPlan，如果有条件，需要先显示Filter节点
+            if (!scan_plan->conds_.empty()) {
+                // 为了在EXPLAIN中显示Filter节点，我们需要在当前位置显示Filter，
+                // 然后在下一层显示Scan
+
+                // 先显示当前的Filter信息
+                plan_output_ = plan_output_.substr(0, plan_output_.size() - get_plan_name(plan).size() - 1);  // 删除刚添加的Scan节点
+
+                // 显示Filter节点
+                plan_output_ += "Filter(condition=[";
+                std::vector<std::string> condition_strs;
+                for (const auto &cond : scan_plan->conds_) {
+                    std::string condition_str = get_display_table_name(cond.lhs_col.tab_name) + "." + cond.lhs_col.col_name;
+
+                    switch (cond.op) {
+                        case OP_EQ:
+                            condition_str += "=";
+                            break;
+                        case OP_NE:
+                            condition_str += "<>";
+                            break;
+                        case OP_LT:
+                            condition_str += "<";
+                            break;
+                        case OP_GT:
+                            condition_str += ">";
+                            break;
+                        case OP_LE:
+                            condition_str += "<=";
+                            break;
+                        case OP_GE:
+                            condition_str += ">=";
+                            break;
+                    }
+
+                    if (cond.is_rhs_val) {
+                        condition_str += cond.rhs_val.toString();
+                    } else {
+                        condition_str += get_display_table_name(cond.rhs_col.tab_name) + "." + cond.rhs_col.col_name;
+                    }
+                    condition_strs.push_back(condition_str);
+                }
+
+                // 显示所有条件，用AND连接
+                std::string all_conditions = "";
+                for (size_t i = 0; i < condition_strs.size(); ++i) {
+                    if (i > 0)
+                        all_conditions += ",";
+                    all_conditions += condition_strs[i];
+                }
+                plan_output_ += all_conditions;
+                plan_output_ += "])\n";
+
+                // 然后显示Scan节点
+                for (int i = 0; i < indent + 1; ++i) {
+                    plan_output_ += "\t";
+                }
+                plan_output_ += "Scan(table=" + scan_plan->tab_name_ + ")\n";
+                return;  // 直接返回，不需要处理子计划
+            }
         }
 
-        // 按节点名称排序
-        std::sort(child_plans.begin(), child_plans.end(),
-                  [this](const std::shared_ptr<Plan> &a, const std::shared_ptr<Plan> &b) {
-                      try {
-                          return get_plan_name(a) < get_plan_name(b);
-                      } catch (...) {
-                          return false;  // 如果比较出错，保持原顺序
-                      }
-                  });
+        // 对子计划进行排序：Filter → Join → Project → Scan
+        std::sort(child_plans.begin(), child_plans.end(), [](const std::shared_ptr<Plan> &a, const std::shared_ptr<Plan> &b) {
+            auto get_priority = [](std::shared_ptr<Plan> plan) -> int {
+                if (!plan) return 999;
+
+                // 检查是否是有条件的Scan，如果是，将其视为Filter
+                if (auto scan_plan = std::dynamic_pointer_cast<ScanPlan>(plan)) {
+                    if (!scan_plan->conds_.empty()) {
+                        return 1;  // 有条件的Scan视为Filter，优先级最高
+                    } else {
+                        return 4;  // 普通Scan优先级最低
+                    }
+                }
+
+                switch (plan->tag) {
+                    case T_Filter:
+                        return 1;  // Filter优先级最高
+                    case T_NestLoop:
+                    case T_SortMerge:
+                        return 2;  // Join优先级第二
+                    case T_Projection:
+                        return 3;  // Project优先级第三
+                    case T_SeqScan:
+                    case T_IndexScan:
+                        return 4;  // Scan优先级最低
+                    default:
+                        return 5;  // 其他类型排在最后
+                }
+            };
+            return get_priority(a) < get_priority(b);
+        });
 
         // 递归构建子计划字符串
         for (auto &child : child_plans) {
@@ -215,10 +305,10 @@ std::string ExplainExecutor::get_plan_name(std::shared_ptr<Plan> plan) {
                     try {
                         col_names.push_back(get_display_table_name(col.tab_name) + "." + col.col_name);
                     } catch (...) {
-                        col_names.push_back("column_error");
                     }
                 }
 
+                // 按照"表名.列名"升序排序
                 std::sort(col_names.begin(), col_names.end());
 
                 std::string cols_str = "";

@@ -9,14 +9,15 @@ MERCHANTABILITY OR FIT FOR A PARTICULAR PURPOSE.
 See the Mulan PSL v2 for more details. */
 
 #pragma once
+#include <map>
+#include <set>
+
 #include "execution_defs.h"
 #include "execution_manager.h"
 #include "executor_abstract.h"
 #include "index/ix.h"
-#include "system/sm.h"
 #include "optimizer/plan.h"
-#include <set>
-#include <map>
+#include "system/sm.h"
 
 /**
  * @brief EXPLAIN操作的执行器类
@@ -30,16 +31,15 @@ See the Mulan PSL v2 for more details. */
  * 3. 按照特定的格式要求生成树状结构
  * 4. 支持四种基本的计划节点类型：Scan、Filter、Project、Join
  */
-class ExplainExecutor : public AbstractExecutor
-{
-private:
-    std::shared_ptr<Plan> plan_;                         ///< 要解释的查询计划
-    Context *context_;                                   ///< 查询执行上下文
-    std::string plan_output_;                            ///< 格式化后的计划输出
-    bool has_executed_;                                  ///< 是否已经执行过
-    mutable std::vector<ColMeta> explain_cols_;          ///< EXPLAIN输出的列元数据
-    std::map<std::string, std::string> table_alias_map_; ///< 实际表名到别名的映射（用于显示）
-    bool is_select_star_;                                ///< 是否为SELECT *查询
+class ExplainExecutor : public AbstractExecutor {
+   private:
+    std::shared_ptr<Plan> plan_;                          ///< 要解释的查询计划
+    Context *context_;                                    ///< 查询执行上下文
+    std::string plan_output_;                             ///< 格式化后的计划输出
+    bool has_executed_;                                   ///< 是否已经执行过
+    mutable std::vector<ColMeta> explain_cols_;           ///< EXPLAIN输出的列元数据
+    std::map<std::string, std::string> table_alias_map_;  ///< 实际表名到别名的映射（用于显示）
+    bool is_select_star_;                                 ///< 是否为SELECT *查询
 
     /**
      * @brief 递归格式化查询计划树
@@ -84,7 +84,7 @@ private:
      */
     std::string get_display_table_name(const std::string &table_name);
 
-public:
+   public:
     /**
      * @brief 构造函数
      * @param plan 要解释的查询计划

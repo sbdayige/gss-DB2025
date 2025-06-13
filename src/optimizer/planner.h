@@ -144,19 +144,6 @@ class Planner {
         const std::vector<Condition> &conditions);
 
     /**
-     * @brief 在物理计划中应用谓词下推
-     * @param plan 基础计划树
-     * @param query 查询对象，包含谓词信息
-     * @return 插入Filter节点后的计划树
-     */
-    std::shared_ptr<Plan> apply_predicate_pushdown(std::shared_ptr<Plan> plan, std::shared_ptr<Query> query);
-
-    /**
-     * @brief 递归地将Filter节点下推到计划树的合适位置
-     */
-    std::shared_ptr<Plan> push_filters_down(std::shared_ptr<Plan> plan, std::shared_ptr<Query> query);
-
-    /**
      * @brief 从计划树中收集表名
      */
     void collect_table_names_from_plan(std::shared_ptr<Plan> plan, std::set<std::string> &table_names);
@@ -170,16 +157,6 @@ class Planner {
     std::shared_ptr<Plan> apply_projection_pushdown(std::shared_ptr<Plan> plan, std::shared_ptr<Query> query);
 
     // ========== 优化辅助方法 ==========
-
-    /**
-     * @brief 在计划树中插入Filter节点
-     */
-    std::shared_ptr<Plan> insert_filter_nodes(std::shared_ptr<Plan> plan, std::vector<Condition> &conditions);
-
-    /**
-     * @brief 在最优位置插入Filter节点（Project节点之下）
-     */
-    std::shared_ptr<Plan> insert_filter_at_optimal_position(std::shared_ptr<Plan> plan, const std::vector<Condition> &conditions);
 
     /**
      * @brief 在计划树中插入Project节点
