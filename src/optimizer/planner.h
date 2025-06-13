@@ -163,7 +163,8 @@ class Planner {
      */
     std::shared_ptr<Plan> insert_project_nodes(std::shared_ptr<Plan> plan,
                                                const std::set<std::string> &needed_columns,
-                                               const std::vector<TabCol> &select_cols);
+                                               const std::vector<TabCol> &select_cols,
+                                               std::shared_ptr<Query> query);
 
     /**
      * @brief 检查条件是否可以下推到指定计划

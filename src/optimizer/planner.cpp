@@ -1033,8 +1033,6 @@ std::shared_ptr<Plan> Planner::apply_projection_pushdown(std::shared_ptr<Plan> p
             needed_columns.insert(cond.rhs_col.tab_name + "." + cond.rhs_col.col_name);
         }
     }
-
-    // 添加JOIN条件中涉及的列（从计划树中收集）
     collect_join_columns_from_plan(plan, needed_columns);
 
     // 根据要求：
@@ -1045,12 +1043,12 @@ std::shared_ptr<Plan> Planner::apply_projection_pushdown(std::shared_ptr<Plan> p
         plan = std::make_shared<ProjectionPlan>(T_Projection, std::move(plan), query->cols);
     } else {
         // 其他情况：在Scan节点上方添加Project节点
-        plan = insert_project_nodes(plan, needed_columns, query->cols);
-        
+        plan = insert_project_nodes(plan, needed_columns, query->cols, query);
+
         // 为多表查询在根节点添加最终的Project节点来选择输出列
         std::set<std::string> plan_tables;
         collect_table_names_from_plan(plan, plan_tables);
-        
+
         if (plan_tables.size() > 1) {
             // 多表查询需要根节点Project来选择最终输出列
             plan = std::make_shared<ProjectionPlan>(T_Projection, std::move(plan), query->cols);
@@ -1065,15 +1063,16 @@ std::shared_ptr<Plan> Planner::apply_projection_pushdown(std::shared_ptr<Plan> p
  */
 std::shared_ptr<Plan> Planner::insert_project_nodes(std::shared_ptr<Plan> plan,
                                                     const std::set<std::string> &needed_columns,
-                                                    const std::vector<TabCol> &select_cols) {
+                                                    const std::vector<TabCol> &select_cols,
+                                                    std::shared_ptr<Query> query) {
     if (!plan)
         return plan;
 
     // 根据计划类型决定如何插入Project节点
     if (auto join_plan = std::dynamic_pointer_cast<JoinPlan>(plan)) {
         // 对于Join节点，递归处理左右子树
-        join_plan->left_ = insert_project_nodes(join_plan->left_, needed_columns, select_cols);
-        join_plan->right_ = insert_project_nodes(join_plan->right_, needed_columns, select_cols);
+        join_plan->left_ = insert_project_nodes(join_plan->left_, needed_columns, select_cols, query);
+        join_plan->right_ = insert_project_nodes(join_plan->right_, needed_columns, select_cols, query);
         return plan;
     } else if (auto scan_plan = std::dynamic_pointer_cast<ScanPlan>(plan)) {
         // 对于Scan节点，只添加Project节点（不处理Filter）
@@ -1083,19 +1082,35 @@ std::shared_ptr<Plan> Planner::insert_project_nodes(std::shared_ptr<Plan> plan,
         // 为每个Scan节点添加Project节点（除了SELECT *）
         std::vector<TabCol> table_needed_cols;
 
-        // 从SELECT子句和WHERE条件中筛选出属于当前表的列
+        // 只添加SELECT子句中属于当前表的列
         for (const auto &col : select_cols) {
             if (col.tab_name == table_name) {
                 table_needed_cols.push_back(col);
             }
         }
 
-        // 从WHERE条件中添加该表的列
-        for (const auto &needed_col : needed_columns) {
-            size_t dot_pos = needed_col.find('.');
+        // 添加JOIN条件中需要的列（但不包括WHERE过滤条件中的列）
+        // 检查是否有JOIN操作，如果有，需要添加JOIN条件中涉及的列
+        std::set<std::string> join_columns;
+
+        // 从query的条件中收集JOIN条件涉及的列
+        for (const auto &cond : query->conds) {
+            if (!cond.is_rhs_val) {  // JOIN条件：两边都是列
+                // 添加该条件涉及的列
+                if (cond.lhs_col.tab_name == table_name) {
+                    join_columns.insert(cond.lhs_col.tab_name + "." + cond.lhs_col.col_name);
+                }
+                if (cond.rhs_col.tab_name == table_name) {
+                    join_columns.insert(cond.rhs_col.tab_name + "." + cond.rhs_col.col_name);
+                }
+            }
+        }
+
+        for (const auto &join_col : join_columns) {
+            size_t dot_pos = join_col.find('.');
             if (dot_pos != std::string::npos) {
-                std::string tab_name = needed_col.substr(0, dot_pos);
-                std::string col_name = needed_col.substr(dot_pos + 1);
+                std::string tab_name = join_col.substr(0, dot_pos);
+                std::string col_name = join_col.substr(dot_pos + 1);
 
                 if (tab_name == table_name) {
                     TabCol tab_col;
