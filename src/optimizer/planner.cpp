@@ -1114,8 +1114,9 @@ std::shared_ptr<Plan> Planner::apply_projection_pushdown(std::shared_ptr<Plan> p
     // 添加JOIN条件中涉及的列（从计划树中收集）
     collect_join_columns_from_plan(plan, needed_columns);
 
-    // 对于多表连接，在相关Scan节点上方添加Project节点进行投影下推
-    if (query->tables.size() > 1 && !query->is_select_star && query->cols.size() > 0) {
+    // 根据要求：只有SELECT *查询不需要在Scan节点上方添加Project节点
+    // 对于其他所有情况（包括单表和多表），都需要在Scan节点上方添加Project节点
+    if (!query->is_select_star) {
         plan = insert_project_nodes(plan, needed_columns, query->cols);
     }
 
@@ -1224,19 +1225,10 @@ std::shared_ptr<Plan> Planner::insert_project_nodes(std::shared_ptr<Plan> plan,
             }
         }
 
-        // 检查是否需要添加投影节点
+        // 根据要求：除了SELECT *之外，所有Scan节点都应该有Project节点
+        // 即使选择了表的所有列，只要不是SELECT *语法，也要添加Project节点
         if (!table_needed_cols.empty()) {
-            try {
-                const auto &all_table_cols = sm_manager_->db_.get_table(table_name).cols;
-
-                // 如果需要的列数不等于表的总列数，添加投影节点
-                if (table_needed_cols.size() != all_table_cols.size()) {
-                    current_plan = std::make_shared<ProjectionPlan>(T_Projection, current_plan, table_needed_cols);
-                }
-            } catch (const std::exception &e) {
-                // 如果获取表信息失败，仍然添加投影节点以保证安全性
-                current_plan = std::make_shared<ProjectionPlan>(T_Projection, current_plan, table_needed_cols);
-            }
+            current_plan = std::make_shared<ProjectionPlan>(T_Projection, current_plan, table_needed_cols);
         }
 
         return current_plan;
