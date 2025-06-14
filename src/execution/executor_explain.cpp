@@ -22,12 +22,6 @@ See the Mulan PSL v2 for more details. */
 void ExplainExecutor::beginTuple() {
     if (!has_executed_) {
         try {
-            // 检查是否为SELECT *查询，如果是则触发断言
-            if (is_select_star_) {
-                std::cerr << "ERROR: EXPLAIN detected SELECT * query. Aborting..." << std::endl;
-                assert(!is_select_star_ && "SELECT * queries are not allowed in EXPLAIN!");
-            }
-
             // 构建查询计划树字符串
             plan_output_.clear();
             build_plan_tree_string(plan_);
@@ -134,7 +128,7 @@ void ExplainExecutor::build_plan_tree_string(std::shared_ptr<Plan> plan, int ind
                             condition_str += "=";
                             break;
                         case OP_NE:
-                            condition_str += "<>";
+                            condition_str += "!=";
                             break;
                         case OP_LT:
                             condition_str += "<";
@@ -252,7 +246,7 @@ std::string ExplainExecutor::get_plan_name(std::shared_ptr<Plan> plan) {
                                 condition_str += "=";
                                 break;
                             case OP_NE:
-                                condition_str += "<>";
+                                condition_str += "!=";
                                 break;
                             case OP_LT:
                                 condition_str += "<";
@@ -369,7 +363,7 @@ std::string ExplainExecutor::get_plan_name(std::shared_ptr<Plan> plan) {
                                 condition_str += "=";
                                 break;
                             case OP_NE:
-                                condition_str += "<>";
+                                condition_str += "!=";
                                 break;
                             case OP_LT:
                                 condition_str += should_swap ? ">" : "<";
