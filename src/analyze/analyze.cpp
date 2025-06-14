@@ -294,8 +294,6 @@ void Analyze::check_clause(const std::vector<std::string> &tab_names, std::vecto
         }
         // 检查类型兼容性 - 使用can_cast_type函数
         if (lhs_type != rhs_type && !can_cast_type(rhs_type, lhs_type) && !can_cast_type(lhs_type, rhs_type)) {
-            std::cerr << "Type compatibility error: lhs type = " << coltype2str(lhs_type)
-                      << ", rhs type = " << coltype2str(rhs_type) << std::endl;
             throw IncompatibleTypeError(coltype2str(lhs_type), coltype2str(rhs_type));
         }
     }

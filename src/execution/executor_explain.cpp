@@ -151,6 +151,9 @@ void ExplainExecutor::build_plan_tree_string(std::shared_ptr<Plan> plan, int ind
                     condition_strs.push_back(condition_str);
                 }
 
+                // 对条件按字典序排序
+                std::sort(condition_strs.begin(), condition_strs.end());
+
                 // 显示所有条件，用AND连接
                 std::string all_conditions = "";
                 for (size_t i = 0; i < condition_strs.size(); ++i) {
@@ -171,7 +174,8 @@ void ExplainExecutor::build_plan_tree_string(std::shared_ptr<Plan> plan, int ind
         }
 
         // 对子计划进行排序：Filter → Join → Project → Scan
-        std::sort(child_plans.begin(), child_plans.end(), [](const std::shared_ptr<Plan> &a, const std::shared_ptr<Plan> &b) {
+        // 同一优先级内按照计划名称字典序排序
+        std::sort(child_plans.begin(), child_plans.end(), [this](const std::shared_ptr<Plan> &a, const std::shared_ptr<Plan> &b) {
             auto get_priority = [](std::shared_ptr<Plan> plan) -> int {
                 if (!plan) return 999;
 
@@ -199,7 +203,19 @@ void ExplainExecutor::build_plan_tree_string(std::shared_ptr<Plan> plan, int ind
                         return 5;  // 其他类型排在最后
                 }
             };
-            return get_priority(a) < get_priority(b);
+
+            int priority_a = get_priority(a);
+            int priority_b = get_priority(b);
+
+            // 首先按优先级排序
+            if (priority_a != priority_b) {
+                return priority_a < priority_b;
+            }
+
+            // 优先级相同时，按计划名称字典序排序
+            std::string name_a = get_plan_name(a);
+            std::string name_b = get_plan_name(b);
+            return name_a < name_b;
         });
 
         // 递归构建子计划字符串
@@ -226,8 +242,56 @@ std::string ExplainExecutor::get_plan_name(std::shared_ptr<Plan> plan) {
                 if (!scan_plan) {
                     return "Scan(table=Unknown)";
                 }
-                // Scan节点显示真实表名，不使用别名
-                return "Scan(table=" + scan_plan->tab_name_ + ")";
+                
+                // 如果Scan节点有条件，返回Filter的名称用于排序
+                if (!scan_plan->conds_.empty()) {
+                    std::vector<std::string> condition_strs;
+                    for (const auto &cond : scan_plan->conds_) {
+                        std::string condition_str = get_display_table_name(cond.lhs_col.tab_name) + "." + cond.lhs_col.col_name;
+
+                        switch (cond.op) {
+                            case OP_EQ:
+                                condition_str += "=";
+                                break;
+                            case OP_NE:
+                                condition_str += "!=";
+                                break;
+                            case OP_LT:
+                                condition_str += "<";
+                                break;
+                            case OP_GT:
+                                condition_str += ">";
+                                break;
+                            case OP_LE:
+                                condition_str += "<=";
+                                break;
+                            case OP_GE:
+                                condition_str += ">=";
+                                break;
+                        }
+
+                        if (cond.is_rhs_val) {
+                            condition_str += cond.rhs_val.toString();
+                        } else {
+                            condition_str += get_display_table_name(cond.rhs_col.tab_name) + "." + cond.rhs_col.col_name;
+                        }
+                        condition_strs.push_back(condition_str);
+                    }
+                    
+                    // 排序条件字符串
+                    std::sort(condition_strs.begin(), condition_strs.end());
+
+                    std::string all_conditions = "";
+                    for (size_t i = 0; i < condition_strs.size(); ++i) {
+                        if (i > 0)
+                            all_conditions += ",";
+                        all_conditions += condition_strs[i];
+                    }
+                    return "Filter(condition=[" + all_conditions + "])";
+                } else {
+                    // Scan节点显示真实表名，不使用别名
+                    return "Scan(table=" + scan_plan->tab_name_ + ")";
+                }
             }
             case T_Filter: {
                 auto filter_plan = std::dynamic_pointer_cast<FilterPlan>(plan);
