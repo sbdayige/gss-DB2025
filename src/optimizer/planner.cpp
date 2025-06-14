@@ -223,12 +223,8 @@ std::shared_ptr<Plan> Planner::make_one_rel(std::shared_ptr<Query> query) {
             }
         }
 
-        std::cerr << "DEBUG: Creating scan plan for table " << tables[i]
-                  << " with " << curr_conds.size() << " WHERE conditions" << std::endl;
-
-        // 获取表的实际记录数量用于调试
+        // 获取表的实际记录数量用于优化
         size_t table_cardinality = estimate_table_cardinality(tables[i]);
-        std::cerr << "DEBUG: Table " << tables[i] << " estimated record count: " << table_cardinality << std::endl;
 
         // 检查当前表是否有可用的索引来优化查询
         std::vector<std::string> index_col_names;
@@ -237,20 +233,12 @@ std::shared_ptr<Plan> Planner::make_one_rel(std::shared_ptr<Query> query) {
         if (index_exist == false) {
             // 没有可用索引：使用顺序扫描（Sequential Scan）
             // 将WHERE条件传递给ScanPlan，让执行器处理Filter节点生成
-            std::cerr << "DEBUG: Using sequential scan for table " << tables[i] << std::endl;
             index_col_names.clear();
             table_scan_executors[i] =
                 std::make_shared<ScanPlan>(T_SeqScan, sm_manager_, tables[i], curr_conds, index_col_names);
         } else {
             // 有可用索引：使用索引扫描（Index Scan）
             // 将WHERE条件传递给ScanPlan，让执行器处理Filter节点生成
-            std::cerr << "DEBUG: Using index scan for table " << tables[i]
-                      << " on columns: ";
-            for (size_t j = 0; j < index_col_names.size(); ++j) {
-                if (j > 0) std::cerr << ", ";
-                std::cerr << index_col_names[j];
-            }
-            std::cerr << std::endl;
             table_scan_executors[i] =
                 std::make_shared<ScanPlan>(T_IndexScan, sm_manager_, tables[i], curr_conds, index_col_names);
         }
@@ -294,18 +282,13 @@ std::shared_ptr<Plan> Planner::make_one_rel(std::shared_ptr<Query> query) {
         // 第2.1阶段：按优化后的表顺序构建连接树
         // ===========================================
 
-        std::cerr << "DEBUG: Building join tree in optimized order..." << std::endl;
-
         // 首先构建第一个表的计划
         table_join_executors = table_scan_executors[0];
         scantbl[0] = 1;  // 标记第一个表已使用
 
-        std::cerr << "DEBUG: Starting with table " << tables[0] << std::endl;
-
         // 按照优化后的顺序逐个加入剩余的表
         for (size_t i = 1; i < tables.size(); i++) {
             std::string next_table = tables[i];
-            std::cerr << "DEBUG: Adding table " << next_table << " to join tree" << std::endl;
 
             // 查找与当前已连接的表集合之间的连接条件
             std::vector<Condition> applicable_conds;
@@ -325,8 +308,6 @@ std::shared_ptr<Plan> Planner::make_one_rel(std::shared_ptr<Query> query) {
                     applicable_conds.push_back(cond);
                 }
             }
-
-            std::cerr << "DEBUG: Found " << applicable_conds.size() << " applicable join conditions" << std::endl;
 
             // 获取下一个表的扫描计划
             std::shared_ptr<Plan> right_plan = table_scan_executors[i];
@@ -349,8 +330,6 @@ std::shared_ptr<Plan> Planner::make_one_rel(std::shared_ptr<Query> query) {
                 // 配置错误：没有启用任何连接算法
                 throw RMDBError("No join executor selected!");
             }
-
-            std::cerr << "DEBUG: Created join node for table " << next_table << std::endl;
         }
     } else {
         // ===========================================
@@ -797,31 +776,19 @@ std::shared_ptr<Query> Planner::join_order_optimization(std::shared_ptr<Query> q
     // 收集每个表的统计信息（基数估计）
     std::vector<std::pair<std::string, size_t>> table_stats;
 
-    std::cerr << "DEBUG: Collecting table statistics for join order optimization..." << std::endl;
-
     for (const auto &table_name : query->tables) {
         try {
             // 获取表的实际行数估计
             size_t estimated_cardinality = estimate_table_cardinality(table_name);
             table_stats.emplace_back(table_name, estimated_cardinality);
-            std::cerr << "DEBUG: Table " << table_name << " has estimated cardinality: " << estimated_cardinality << std::endl;
         } catch (...) {
             // 如果无法获取表信息，使用默认值
-            std::cerr << "DEBUG: Failed to get cardinality for table " << table_name << ", using default: 1000" << std::endl;
             table_stats.emplace_back(table_name, 1000);
         }
     }
 
     // 实现贪心连接顺序优化算法
-    std::cerr << "DEBUG: Starting greedy join order optimization..." << std::endl;
     std::vector<std::string> optimized_tables = greedy_join_order_optimization(table_stats, query->conds);
-
-    std::cerr << "DEBUG: Optimized table order: ";
-    for (size_t i = 0; i < optimized_tables.size(); ++i) {
-        if (i > 0) std::cerr << " -> ";
-        std::cerr << optimized_tables[i];
-    }
-    std::cerr << std::endl;
 
     query->tables = std::move(optimized_tables);
 
@@ -839,7 +806,6 @@ size_t Planner::estimate_table_cardinality(const std::string &table_name) {
         // 获取表的文件句柄
         if (sm_manager_->fhs_.find(table_name) == sm_manager_->fhs_.end()) {
             // 表文件未打开，使用默认估计值
-            std::cerr << "DEBUG: Table " << table_name << " file not opened, using default cardinality: 1000" << std::endl;
             return 1000;
         }
 
@@ -856,15 +822,12 @@ size_t Planner::estimate_table_cardinality(const std::string &table_name) {
                 actual_records += page_handle.page_hdr->num_records;
             }
 
-            std::cerr << "DEBUG: Table " << table_name << " actual record count by scanning: " << actual_records << std::endl;
             return actual_records > 0 ? actual_records : 1;
 
         } catch (const std::exception &e) {
             // 如果扫描失败，回退到估算方法
-            std::cerr << "DEBUG: Failed to scan table " << table_name << " (" << e.what() << "), using estimation method" << std::endl;
         } catch (...) {
             // 如果扫描失败，回退到估算方法
-            std::cerr << "DEBUG: Failed to scan table " << table_name << ", using estimation method" << std::endl;
         }
 
         // 回退到原来的估算方法，但调整估算策略
@@ -873,20 +836,12 @@ size_t Planner::estimate_table_cardinality(const std::string &table_name) {
         // 使用更保守的估算：假设页面利用率为30%而不是70%
         size_t estimated_records = estimated_pages * file_hdr.num_records_per_page * 0.3;
 
-        std::cerr << "DEBUG: Table " << table_name << " cardinality estimation (fallback):" << std::endl;
-        std::cerr << "  - Total pages: " << file_hdr.num_pages << std::endl;
-        std::cerr << "  - Data pages: " << estimated_pages << std::endl;
-        std::cerr << "  - Records per page: " << file_hdr.num_records_per_page << std::endl;
-        std::cerr << "  - Estimated records (30% utilization): " << estimated_records << std::endl;
-
         return estimated_records > 0 ? estimated_records : 1;  // 至少返回1避免除零错误
     } catch (const std::exception &e) {
         // 如果出现任何错误，返回默认值
-        std::cerr << "DEBUG: Exception estimating cardinality for table " << table_name << ": " << e.what() << std::endl;
         return 1000;
     } catch (...) {
         // 如果出现任何错误，返回默认值
-        std::cerr << "DEBUG: Unknown exception estimating cardinality for table " << table_name << std::endl;
         return 1000;
     }
 }
@@ -941,9 +896,6 @@ std::vector<std::string> Planner::greedy_join_order_optimization(
     used_tables.insert(sorted_stats[0].first);
     size_t current_result_size = cardinality_map[sorted_stats[0].first];
 
-    std::cerr << "DEBUG: Greedy join order - starting with table " << sorted_stats[0].first
-              << " (cardinality: " << current_result_size << ")" << std::endl;
-
     if (sorted_stats.size() > 1) {
         result.push_back(sorted_stats[1].first);
         used_tables.insert(sorted_stats[1].first);
@@ -952,19 +904,12 @@ std::vector<std::string> Planner::greedy_join_order_optimization(
         current_result_size = estimate_join_result_size(
             sorted_stats[0].first, sorted_stats[1].first,
             cardinality_map, join_graph, conditions);
-
-        std::cerr << "DEBUG: Added table " << sorted_stats[1].first
-                  << " (cardinality: " << cardinality_map[sorted_stats[1].first]
-                  << "), intermediate result size: " << current_result_size << std::endl;
     }
 
     // 第二步：贪心地添加剩余的表，每次选择使中间结果最小的表
     while (used_tables.size() < table_stats.size()) {
         std::string best_table;
         size_t min_result_size = SIZE_MAX;
-
-        std::cerr << "DEBUG: Choosing next table from " << (table_stats.size() - used_tables.size())
-                  << " remaining tables..." << std::endl;
 
         for (const auto &stat : table_stats) {
             const std::string &table = stat.first;
@@ -988,12 +933,7 @@ std::vector<std::string> Planner::greedy_join_order_optimization(
             } else {
                 // 没有连接条件：笛卡尔积
                 estimated_result_size = current_result_size * cardinality_map[table];
-                std::cerr << "DEBUG: Table " << table << " has no join conditions, cartesian product size: "
-                          << estimated_result_size << std::endl;
             }
-
-            std::cerr << "DEBUG: Table " << table << " (cardinality: " << cardinality_map[table]
-                      << ") would result in intermediate size: " << estimated_result_size << std::endl;
 
             if (estimated_result_size < min_result_size) {
                 min_result_size = estimated_result_size;
@@ -1005,16 +945,12 @@ std::vector<std::string> Planner::greedy_join_order_optimization(
             result.push_back(best_table);
             used_tables.insert(best_table);
             current_result_size = min_result_size;
-
-            std::cerr << "DEBUG: Selected table " << best_table
-                      << ", new intermediate result size: " << current_result_size << std::endl;
         } else {
             // 如果没有找到最佳表，选择剩余表中基数最小的
             for (const auto &stat : sorted_stats) {
                 if (!used_tables.count(stat.first)) {
                     result.push_back(stat.first);
                     used_tables.insert(stat.first);
-                    std::cerr << "DEBUG: Fallback selected table " << stat.first << std::endl;
                     break;
                 }
             }
@@ -1051,15 +987,10 @@ size_t Planner::estimate_join_result_size(const std::string &table1, const std::
         size_t max_card = std::max(card1, card2);
         size_t result_size = (card1 * card2) / max_card;
 
-        std::cerr << "DEBUG: Join " << table1 << "(" << card1 << ") with " << table2 << "(" << card2
-                  << ") has join condition, estimated result: " << result_size << std::endl;
-
         return std::max(result_size, (size_t)1);  // 至少返回1
     } else {
         // 没有连接条件：笛卡尔积
         size_t result_size = card1 * card2;
-        std::cerr << "DEBUG: Cartesian product " << table1 << "(" << card1 << ") x " << table2 << "(" << card2
-                  << ") = " << result_size << std::endl;
         return result_size;
     }
 }
@@ -1099,15 +1030,10 @@ size_t Planner::estimate_join_with_intermediate_result(size_t intermediate_size,
         size_t max_size = std::max(intermediate_size, new_table_card);
         size_t result_size = (intermediate_size * new_table_card) / max_size;
 
-        std::cerr << "DEBUG: Join intermediate result(" << intermediate_size << ") with " << new_table
-                  << "(" << new_table_card << ") has join condition, estimated result: " << result_size << std::endl;
-
         return std::max(result_size, (size_t)1);  // 至少返回1
     } else {
         // 没有连接条件：笛卡尔积
         size_t result_size = intermediate_size * new_table_card;
-        std::cerr << "DEBUG: Cartesian product intermediate(" << intermediate_size << ") x " << new_table
-                  << "(" << new_table_card << ") = " << result_size << std::endl;
         return result_size;
     }
 }
@@ -1198,9 +1124,6 @@ std::shared_ptr<Plan> Planner::insert_project_nodes(std::shared_ptr<Plan> plan,
             }
         }
 
-        std::cerr << "DEBUG: For table " << table_name << ", found " << table_needed_cols.size()
-                  << " SELECT columns" << std::endl;
-
         // 添加JOIN条件中需要的列（但不包括WHERE过滤条件中的列）
         // 检查是否有JOIN操作，如果有，需要添加JOIN条件中涉及的列
         std::set<std::string> join_columns;
@@ -1217,9 +1140,6 @@ std::shared_ptr<Plan> Planner::insert_project_nodes(std::shared_ptr<Plan> plan,
                 }
             }
         }
-
-        std::cerr << "DEBUG: For table " << table_name << ", found " << join_columns.size()
-                  << " JOIN columns" << std::endl;
 
         for (const auto &join_col : join_columns) {
             size_t dot_pos = join_col.find('.');
@@ -1251,7 +1171,6 @@ std::shared_ptr<Plan> Planner::insert_project_nodes(std::shared_ptr<Plan> plan,
         // 对于不在SELECT子句中且不参与JOIN的表，不需要Project节点
         // 只有在表真正需要列时才添加Project节点
 
-        std::cerr << "DEBUG: Adding Project node for table " << table_name << " with " << table_needed_cols.size() << " columns" << std::endl;
         current_plan = std::make_shared<ProjectionPlan>(T_Projection, current_plan, table_needed_cols);
 
         return current_plan;

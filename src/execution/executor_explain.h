@@ -89,7 +89,6 @@ class ExplainExecutor : public AbstractExecutor {
      * @param plan 查询计划节点
      * @return Project节点的数量
      */
-    int count_project_nodes(std::shared_ptr<Plan> plan);
 
    public:
     /**

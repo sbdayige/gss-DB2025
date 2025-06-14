@@ -249,6 +249,7 @@ void SmManager::create_table(const std::string &tab_name, const std::vector<ColD
     if (db_.is_table(tab_name)) {
         throw TableExistsError(tab_name);
     }
+
     // Create table meta
     int curr_offset = 0;
     TabMeta tab;

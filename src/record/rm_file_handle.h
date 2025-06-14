@@ -35,21 +35,21 @@ struct RmPageHandle {
     }
 
     // 返回指定slot_no的slot存储收地址
-    char* get_slot(int slot_no) const {
+    char *get_slot(int slot_no) const {
         return slots + slot_no * file_hdr->record_size;  // slots的首地址 + slot个数 * 每个slot的大小(每个record的大小)
     }
 };
 
 /* 每个RmFileHandle对应一个表的数据文件，里面有多个page，每个page的数据封装在RmPageHandle中 */
-class RmFileHandle {      
-    friend class RmScan;    
+class RmFileHandle {
+    friend class RmScan;
     friend class RmManager;
 
    private:
     DiskManager *disk_manager_;
     BufferPoolManager *buffer_pool_manager_;
-    int fd_;        // 打开文件后产生的文件句柄
-    RmFileHdr file_hdr_;    // 文件头，维护当前表文件的元数据
+    int fd_;              // 打开文件后产生的文件句柄
+    RmFileHdr file_hdr_;  // 文件头，维护当前表文件的元数据
 
    public:
     RmFileHandle(DiskManager *disk_manager, BufferPoolManager *buffer_pool_manager, int fd)
@@ -78,7 +78,6 @@ class RmFileHandle {
     void insert_record(const Rid &rid, char *buf);
 
     void delete_record(const Rid &rid, Context *context);
-
     void update_record(const Rid &rid, char *buf, Context *context);
 
     RmPageHandle create_new_page_handle();
