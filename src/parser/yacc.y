@@ -392,26 +392,26 @@ tableList:
     {
         $$.push_back($3);
     }
-    |   tableList joinType JOIN tableRef ON condition
+    |   tableList joinType JOIN tableRef ON whereClause
     {
         // 创建JOIN表达式并添加到表列表
         auto join_expr = std::make_shared<JoinExpr>(
             $$.back()->tab_name,  // 左表名
             $4->tab_name,         // 右表名
-            std::vector<std::shared_ptr<BinaryExpr>>{$6}, // 连接条件
+            $6,                   // 连接条件列表（支持AND连接）
             $2                    // JOIN类型
         );
         // 将JOIN表达式存储在特殊的表引用中
         // 这里我们需要修改语义动作来支持JOIN
         $$.push_back($4);
     }
-    |   tableList JOIN tableRef ON condition
+    |   tableList JOIN tableRef ON whereClause
     {
         // 默认为INNER JOIN
         auto join_expr = std::make_shared<JoinExpr>(
             $$.back()->tab_name,  // 左表名
             $3->tab_name,         // 右表名
-            std::vector<std::shared_ptr<BinaryExpr>>{$5}, // 连接条件
+            $5,                   // 连接条件列表（支持AND连接）
             INNER_JOIN            // 默认为内连接
         );
         $$.push_back($3);
