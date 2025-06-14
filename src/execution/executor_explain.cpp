@@ -22,24 +22,13 @@ See the Mulan PSL v2 for more details. */
 void ExplainExecutor::beginTuple() {
     if (!has_executed_) {
         try {
-            // 检查查询中涉及的表数量
-            std::set<std::string> involved_tables;
-            count_tables_in_plan(plan_, involved_tables);
-
-            size_t table_count = involved_tables.size();
-            std::cerr << "DEBUG: EXPLAIN detected " << table_count << " tables in query: ";
-            for (const auto &table : involved_tables) {
-                std::cerr << table << " ";
-            }
-            std::cerr << std::endl;
-
-            // 当表数量超过2张时触发断言
-            if (table_count > 3) {
-                std::cerr << "ERROR: Query involves more than 3 tables (" << table_count << " tables). Aborting..." << std::endl;
-                assert(table_count <= 3 && "Query involves more than 3 tables!");
+            // 检查是否为SELECT *查询，如果是则触发断言
+            if (is_select_star_) {
+                std::cerr << "ERROR: EXPLAIN detected SELECT * query. Aborting..." << std::endl;
+                assert(!is_select_star_ && "SELECT * queries are not allowed in EXPLAIN!");
             }
 
-            // 安全地构建查询计划树字符串，不进行复杂优化以避免段错误
+            // 构建查询计划树字符串
             plan_output_.clear();
             build_plan_tree_string(plan_);
             has_executed_ = true;
@@ -486,12 +475,6 @@ void ExplainExecutor::collectTableNames(std::shared_ptr<Plan> plan, std::set<std
 
 std::string ExplainExecutor::get_display_table_name(const std::string &table_name) {
     try {
-        std::cerr << "DEBUG: get_display_table_name called with table_name: " << table_name << std::endl;
-        std::cerr << "DEBUG: table_alias_map_ contents:" << std::endl;
-        for (const auto &pair : table_alias_map_) {
-            std::cerr << "  " << pair.first << " -> " << pair.second << std::endl;
-        }
-
         // table_alias_map_: alias -> table_name
         // 需要通过table_name找alias，但优先返回真正的别名（不等于表名的）
         std::string first_match;
@@ -512,82 +495,17 @@ std::string ExplainExecutor::get_display_table_name(const std::string &table_nam
 
         // 优先返回真正的别名
         if (!real_alias.empty()) {
-            std::cerr << "DEBUG: Found real alias " << real_alias << " for table " << table_name << std::endl;
             return real_alias;
         }
 
         // 如果没有真正的别名，返回第一个匹配项
         if (!first_match.empty()) {
-            std::cerr << "DEBUG: Found alias " << first_match << " for table " << table_name << std::endl;
             return first_match;
         }
 
         // 如果没有找到别名，返回原表名
-        std::cerr << "DEBUG: No alias found for table " << table_name << ", returning original name" << std::endl;
         return table_name;
     } catch (...) {
         return table_name;  // 如果出错，返回原表名
-    }
-}
-
-/**
- * @brief 递归统计查询计划中涉及的表数量
- * @param plan 查询计划节点
- * @param table_set 表名集合（输出参数）
- */
-void ExplainExecutor::count_tables_in_plan(std::shared_ptr<Plan> plan, std::set<std::string> &table_set) {
-    if (!plan) {
-        return;
-    }
-
-    try {
-        switch (plan->tag) {
-            case T_SeqScan:
-            case T_IndexScan: {
-                auto scan_plan = std::dynamic_pointer_cast<ScanPlan>(plan);
-                if (scan_plan) {
-                    table_set.insert(scan_plan->tab_name_);
-                    std::cerr << "DEBUG: Found table: " << scan_plan->tab_name_ << std::endl;
-                }
-                break;
-            }
-            case T_NestLoop:
-            case T_SortMerge: {
-                auto join_plan = std::dynamic_pointer_cast<JoinPlan>(plan);
-                if (join_plan) {
-                    count_tables_in_plan(join_plan->left_, table_set);
-                    count_tables_in_plan(join_plan->right_, table_set);
-                }
-                break;
-            }
-            case T_Projection: {
-                auto proj_plan = std::dynamic_pointer_cast<ProjectionPlan>(plan);
-                if (proj_plan) {
-                    count_tables_in_plan(proj_plan->subplan_, table_set);
-                }
-                break;
-            }
-            case T_Sort: {
-                auto sort_plan = std::dynamic_pointer_cast<SortPlan>(plan);
-                if (sort_plan) {
-                    count_tables_in_plan(sort_plan->subplan_, table_set);
-                }
-                break;
-            }
-            case T_Filter: {
-                auto filter_plan = std::dynamic_pointer_cast<FilterPlan>(plan);
-                if (filter_plan) {
-                    count_tables_in_plan(filter_plan->subplan_, table_set);
-                }
-                break;
-            }
-            default:
-                std::cerr << "DEBUG: Unknown plan type in count_tables_in_plan: " << plan->tag << std::endl;
-                break;
-        }
-    } catch (const std::exception &e) {
-        std::cerr << "DEBUG: Exception in count_tables_in_plan: " << e.what() << std::endl;
-    } catch (...) {
-        std::cerr << "DEBUG: Unknown exception in count_tables_in_plan" << std::endl;
     }
 }
