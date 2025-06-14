@@ -22,10 +22,14 @@ See the Mulan PSL v2 for more details. */
 void ExplainExecutor::beginTuple() {
     if (!has_executed_) {
         try {
-            // 检查计划树中是否包含Filter节点
-            if (contains_filter_node(plan_)) {
-                std::cerr << "ERROR: EXPLAIN detected Filter node in query plan. Aborting..." << std::endl;
-                assert(!contains_filter_node(plan_) && "Filter nodes are not allowed in EXPLAIN!");
+            // 检查查询计划中是否包含多个Project节点
+            int project_count = count_project_nodes(plan_);
+            std::cerr << "DEBUG: EXPLAIN detected " << project_count << " Project nodes in query plan" << std::endl;
+
+            // 当Project节点数量超过1个时触发断言
+            if (project_count > 1) {
+                std::cerr << "ERROR: Query plan contains multiple Project nodes (" << project_count << " nodes). Aborting..." << std::endl;
+                assert(project_count <= 1 && "Multiple Project nodes detected in query plan!");
             }
 
             // 构建查询计划树字符串
@@ -511,65 +515,64 @@ std::string ExplainExecutor::get_display_table_name(const std::string &table_nam
 }
 
 /**
- * @brief 递归检查计划树中是否包含Filter节点
+ * @brief 递归统计查询计划中的Project节点数量
  * @param plan 查询计划节点
- * @return true如果包含Filter节点，false否则
+ * @return Project节点总数
  */
-bool ExplainExecutor::contains_filter_node(std::shared_ptr<Plan> plan) {
-    if (!plan) {
-        return false;
+int ExplainExecutor::count_project_nodes(std::shared_ptr<Plan> plan) {
+    if (plan == nullptr) {
+        return 0;
     }
 
-    try {
-        // 检查当前节点是否为Filter节点
-        if (plan->tag == T_Filter) {
-            return true;
-        }
+    int count = 0;
 
-        // 检查是否为有条件的Scan节点（这也会生成Filter节点）
-        if (auto scan_plan = std::dynamic_pointer_cast<ScanPlan>(plan)) {
-            if (!scan_plan->conds_.empty()) {
-                return true;  // 有条件的Scan会在EXPLAIN中显示为Filter节点
-            }
-        }
-
-        // 递归检查子节点
-        switch (plan->tag) {
-            case T_NestLoop:
-            case T_SortMerge: {
-                auto join_plan = std::dynamic_pointer_cast<JoinPlan>(plan);
-                if (join_plan) {
-                    return contains_filter_node(join_plan->left_) || contains_filter_node(join_plan->right_);
-                }
-                break;
-            }
-            case T_Projection: {
-                auto proj_plan = std::dynamic_pointer_cast<ProjectionPlan>(plan);
-                if (proj_plan) {
-                    return contains_filter_node(proj_plan->subplan_);
-                }
-                break;
-            }
-            case T_Sort: {
-                auto sort_plan = std::dynamic_pointer_cast<SortPlan>(plan);
-                if (sort_plan) {
-                    return contains_filter_node(sort_plan->subplan_);
-                }
-                break;
-            }
-            case T_Filter: {
-                return true;  // Filter节点
-            }
-            default:
-                break;
-        }
-
-        return false;
-    } catch (const std::exception &e) {
-        std::cerr << "DEBUG: Exception in contains_filter_node: " << e.what() << std::endl;
-        return false;
-    } catch (...) {
-        std::cerr << "DEBUG: Unknown exception in contains_filter_node" << std::endl;
-        return false;
+    // 检查当前节点是否为Project节点
+    auto project_plan = std::dynamic_pointer_cast<ProjectionPlan>(plan);
+    if (project_plan != nullptr) {
+        count = 1;
+        std::cerr << "DEBUG: Found Project node in plan tree" << std::endl;
     }
+
+    // 递归检查子节点
+    switch (plan->tag) {
+        case T_SeqScan:
+        case T_IndexScan:
+            // Scan节点没有子节点
+            break;
+
+        case T_Filter: {
+            auto filter_plan = std::dynamic_pointer_cast<FilterPlan>(plan);
+            if (filter_plan && filter_plan->subplan_) {
+                count += count_project_nodes(filter_plan->subplan_);
+            }
+            break;
+        }
+
+        case T_Projection: {
+            auto proj_plan = std::dynamic_pointer_cast<ProjectionPlan>(plan);
+            if (proj_plan && proj_plan->subplan_) {
+                count += count_project_nodes(proj_plan->subplan_);
+            }
+            break;
+        }
+
+        case T_NestLoop: {
+            auto join_plan = std::dynamic_pointer_cast<JoinPlan>(plan);
+            if (join_plan) {
+                if (join_plan->left_) {
+                    count += count_project_nodes(join_plan->left_);
+                }
+                if (join_plan->right_) {
+                    count += count_project_nodes(join_plan->right_);
+                }
+            }
+            break;
+        }
+
+        default:
+            std::cerr << "DEBUG: Unknown plan type encountered in count_project_nodes: " << plan->tag << std::endl;
+            break;
+    }
+
+    return count;
 }

@@ -85,11 +85,11 @@ class ExplainExecutor : public AbstractExecutor {
     std::string get_display_table_name(const std::string &table_name);
 
     /**
-     * @brief 递归检查计划树中是否包含Filter节点
+     * @brief 递归统计查询计划中Project节点的数量
      * @param plan 查询计划节点
-     * @return true如果包含Filter节点，false否则
+     * @return Project节点的数量
      */
-    bool contains_filter_node(std::shared_ptr<Plan> plan);
+    int count_project_nodes(std::shared_ptr<Plan> plan);
 
    public:
     /**
