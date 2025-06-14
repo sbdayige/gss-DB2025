@@ -293,6 +293,7 @@ std::string ExplainExecutor::get_plan_name(std::shared_ptr<Plan> plan) {
 
                 // 检查是否为SELECT *查询
                 if (is_select_star_) {
+                    assert(0);
                     return "Project(columns=[*])";
                 }
 
