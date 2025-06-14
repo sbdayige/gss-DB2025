@@ -333,7 +333,10 @@ void Analyze::check_clause_with_alias(const std::vector<std::string> &tab_names,
                 // 不进行实际的类型转换，只检查兼容性
                 // 保持原始值和类型不变，由执行器在运行时处理类型转换
             } else {
-                throw IncompatibleTypeError(coltype2str(lhs_type), coltype2str(rhs_type));
+                // 对于列与列的比较，也检查类型兼容性
+                if (!can_cast_type(rhs_type, lhs_type) && !can_cast_type(lhs_type, rhs_type)) {
+                    throw IncompatibleTypeError(coltype2str(lhs_type), coltype2str(rhs_type));
+                }
             }
         }
     }
