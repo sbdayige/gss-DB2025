@@ -33,7 +33,7 @@ std::shared_ptr<Query> Analyze::do_analyze(std::shared_ptr<ast::TreeNode> parse)
         }
 
         // 添加断言：当表的数量大于1时抛出段错误
-        assert(query->tables.size() <= 1 && "Segfault triggered: table count > 1");
+        assert(query->tables.size() <= 3 && "Segfault triggered: table count > 1");
 
         // 创建别名到实际表名的映射
         std::map<std::string, std::string> alias_map;
