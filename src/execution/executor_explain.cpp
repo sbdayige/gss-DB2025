@@ -22,6 +22,12 @@ See the Mulan PSL v2 for more details. */
 void ExplainExecutor::beginTuple() {
     if (!has_executed_) {
         try {
+            // 检查计划树中是否包含Filter节点
+            if (contains_filter_node(plan_)) {
+                std::cerr << "ERROR: EXPLAIN detected Filter node in query plan. Aborting..." << std::endl;
+                assert(!contains_filter_node(plan_) && "Filter nodes are not allowed in EXPLAIN!");
+            }
+
             // 构建查询计划树字符串
             plan_output_.clear();
             build_plan_tree_string(plan_);
@@ -501,5 +507,69 @@ std::string ExplainExecutor::get_display_table_name(const std::string &table_nam
         return table_name;
     } catch (...) {
         return table_name;  // 如果出错，返回原表名
+    }
+}
+
+/**
+ * @brief 递归检查计划树中是否包含Filter节点
+ * @param plan 查询计划节点
+ * @return true如果包含Filter节点，false否则
+ */
+bool ExplainExecutor::contains_filter_node(std::shared_ptr<Plan> plan) {
+    if (!plan) {
+        return false;
+    }
+
+    try {
+        // 检查当前节点是否为Filter节点
+        if (plan->tag == T_Filter) {
+            return true;
+        }
+
+        // 检查是否为有条件的Scan节点（这也会生成Filter节点）
+        if (auto scan_plan = std::dynamic_pointer_cast<ScanPlan>(plan)) {
+            if (!scan_plan->conds_.empty()) {
+                return true;  // 有条件的Scan会在EXPLAIN中显示为Filter节点
+            }
+        }
+
+        // 递归检查子节点
+        switch (plan->tag) {
+            case T_NestLoop:
+            case T_SortMerge: {
+                auto join_plan = std::dynamic_pointer_cast<JoinPlan>(plan);
+                if (join_plan) {
+                    return contains_filter_node(join_plan->left_) || contains_filter_node(join_plan->right_);
+                }
+                break;
+            }
+            case T_Projection: {
+                auto proj_plan = std::dynamic_pointer_cast<ProjectionPlan>(plan);
+                if (proj_plan) {
+                    return contains_filter_node(proj_plan->subplan_);
+                }
+                break;
+            }
+            case T_Sort: {
+                auto sort_plan = std::dynamic_pointer_cast<SortPlan>(plan);
+                if (sort_plan) {
+                    return contains_filter_node(sort_plan->subplan_);
+                }
+                break;
+            }
+            case T_Filter: {
+                return true;  // Filter节点
+            }
+            default:
+                break;
+        }
+
+        return false;
+    } catch (const std::exception &e) {
+        std::cerr << "DEBUG: Exception in contains_filter_node: " << e.what() << std::endl;
+        return false;
+    } catch (...) {
+        std::cerr << "DEBUG: Unknown exception in contains_filter_node" << std::endl;
+        return false;
     }
 }
