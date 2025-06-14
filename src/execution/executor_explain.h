@@ -84,6 +84,13 @@ class ExplainExecutor : public AbstractExecutor {
      */
     std::string get_display_table_name(const std::string &table_name);
 
+    /**
+     * @brief 递归统计查询计划中涉及的表数量
+     * @param plan 查询计划节点
+     * @param table_set 表名集合（输出参数）
+     */
+    void count_tables_in_plan(std::shared_ptr<Plan> plan, std::set<std::string> &table_set);
+
    public:
     /**
      * @brief 构造函数

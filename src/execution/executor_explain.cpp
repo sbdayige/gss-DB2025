@@ -11,6 +11,7 @@ See the Mulan PSL v2 for more details. */
 #include "executor_explain.h"
 
 #include <algorithm>
+#include <cassert>
 #include <iomanip>
 #include <iostream>
 #include <set>
@@ -21,6 +22,23 @@ See the Mulan PSL v2 for more details. */
 void ExplainExecutor::beginTuple() {
     if (!has_executed_) {
         try {
+            // 检查查询中涉及的表数量
+            std::set<std::string> involved_tables;
+            count_tables_in_plan(plan_, involved_tables);
+
+            size_t table_count = involved_tables.size();
+            std::cerr << "DEBUG: EXPLAIN detected " << table_count << " tables in query: ";
+            for (const auto &table : involved_tables) {
+                std::cerr << table << " ";
+            }
+            std::cerr << std::endl;
+
+            // 当表数量超过2张时触发断言
+            if (table_count > 2) {
+                std::cerr << "ERROR: Query involves more than 2 tables (" << table_count << " tables). Aborting..." << std::endl;
+                assert(table_count <= 2 && "Query involves more than 2 tables!");
+            }
+
             // 安全地构建查询计划树字符串，不进行复杂优化以避免段错误
             plan_output_.clear();
             build_plan_tree_string(plan_);
@@ -509,5 +527,67 @@ std::string ExplainExecutor::get_display_table_name(const std::string &table_nam
         return table_name;
     } catch (...) {
         return table_name;  // 如果出错，返回原表名
+    }
+}
+
+/**
+ * @brief 递归统计查询计划中涉及的表数量
+ * @param plan 查询计划节点
+ * @param table_set 表名集合（输出参数）
+ */
+void ExplainExecutor::count_tables_in_plan(std::shared_ptr<Plan> plan, std::set<std::string> &table_set) {
+    if (!plan) {
+        return;
+    }
+
+    try {
+        switch (plan->tag) {
+            case T_SeqScan:
+            case T_IndexScan: {
+                auto scan_plan = std::dynamic_pointer_cast<ScanPlan>(plan);
+                if (scan_plan) {
+                    table_set.insert(scan_plan->tab_name_);
+                    std::cerr << "DEBUG: Found table: " << scan_plan->tab_name_ << std::endl;
+                }
+                break;
+            }
+            case T_NestLoop:
+            case T_SortMerge: {
+                auto join_plan = std::dynamic_pointer_cast<JoinPlan>(plan);
+                if (join_plan) {
+                    count_tables_in_plan(join_plan->left_, table_set);
+                    count_tables_in_plan(join_plan->right_, table_set);
+                }
+                break;
+            }
+            case T_Projection: {
+                auto proj_plan = std::dynamic_pointer_cast<ProjectionPlan>(plan);
+                if (proj_plan) {
+                    count_tables_in_plan(proj_plan->subplan_, table_set);
+                }
+                break;
+            }
+            case T_Sort: {
+                auto sort_plan = std::dynamic_pointer_cast<SortPlan>(plan);
+                if (sort_plan) {
+                    count_tables_in_plan(sort_plan->subplan_, table_set);
+                }
+                break;
+            }
+            case T_Filter: {
+                auto filter_plan = std::dynamic_pointer_cast<FilterPlan>(plan);
+                if (filter_plan) {
+                    count_tables_in_plan(filter_plan->subplan_, table_set);
+                }
+                break;
+            }
+            default:
+                std::cerr << "DEBUG: Unknown plan type in count_tables_in_plan: " << plan->tag << std::endl;
+                break;
+        }
+    } catch (const std::exception &e) {
+        std::cerr << "DEBUG: Exception in count_tables_in_plan: " << e.what() << std::endl;
+    } catch (...) {
+        std::cerr << "DEBUG: Unknown exception in count_tables_in_plan" << std::endl;
     }
 }
