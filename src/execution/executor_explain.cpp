@@ -34,9 +34,9 @@ void ExplainExecutor::beginTuple() {
             std::cerr << std::endl;
 
             // 当表数量超过2张时触发断言
-            if (table_count > 2) {
-                std::cerr << "ERROR: Query involves more than 2 tables (" << table_count << " tables). Aborting..." << std::endl;
-                assert(table_count <= 2 && "Query involves more than 2 tables!");
+            if (table_count > 3) {
+                std::cerr << "ERROR: Query involves more than 3 tables (" << table_count << " tables). Aborting..." << std::endl;
+                assert(table_count <= 3 && "Query involves more than 3 tables!");
             }
 
             // 安全地构建查询计划树字符串，不进行复杂优化以避免段错误
