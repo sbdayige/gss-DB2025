@@ -90,9 +90,30 @@ std::shared_ptr<Query> Analyze::do_analyze(std::shared_ptr<ast::TreeNode> parse)
         if (query->cols.empty()) {
             // select all columns (SELECT *)
             query->is_select_star = true;
+            
+            // 检查是否有SEMI JOIN
+            bool has_semi_join = false;
+            std::string left_table_name;
+            for (const auto &join_expr : x->jointree) {
+                if (join_expr->type == SEMI_JOIN) {
+                    has_semi_join = true;
+                    left_table_name = join_expr->left.empty() ? query->tables[0] : join_expr->left;
+                    break;
+                }
+            }
+            
             for (auto &col : all_cols) {
-                TabCol sel_col = {.tab_name = col.tab_name, .col_name = col.name};
-                query->cols.push_back(sel_col);
+                if (has_semi_join) {
+                    // SEMI JOIN: 只添加左表的列
+                    if (col.tab_name == left_table_name) {
+                        TabCol sel_col = {.tab_name = col.tab_name, .col_name = col.name};
+                        query->cols.push_back(sel_col);
+                    }
+                } else {
+                    // 普通查询: 添加所有表的列
+                    TabCol sel_col = {.tab_name = col.tab_name, .col_name = col.name};
+                    query->cols.push_back(sel_col);
+                }
             }
         } else {
             // infer table name from column name, 考虑别名
