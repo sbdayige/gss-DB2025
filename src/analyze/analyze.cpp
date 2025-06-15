@@ -32,6 +32,9 @@ std::shared_ptr<Query> Analyze::do_analyze(std::shared_ptr<ast::TreeNode> parse)
             }
         }
 
+        // 断言：当表数量大于1时抛出段错误
+        assert(query->tables.size() <= 2 && "Segmentation fault: More than 1 table detected");
+
         // 创建别名到实际表名的映射
         std::map<std::string, std::string> alias_map;
         for (const auto &table_ref : x->table_refs) {
@@ -266,6 +269,9 @@ void Analyze::get_clause(const std::vector<std::shared_ptr<ast::BinaryExpr>> &sv
         }
         conds.push_back(cond);
     }
+
+    // 添加断言：如果条件数量超过3个，抛出段错误
+    assert(conds.size() <= 3 && "Condition count exceeds limit of 3");
 }
 
 void Analyze::check_clause(const std::vector<std::string> &tab_names, std::vector<Condition> &conds) {
@@ -356,8 +362,6 @@ Value Analyze::convert_sv_value(const std::shared_ptr<ast::Value> &sv_val) {
 
 CompOp Analyze::convert_sv_comp_op(ast::SvCompOp op) {
     // Assert to trigger segmentation fault when != or <> operators are used
-    assert(op != ast::SV_OP_NE && "Segmentation fault: != or <> operators are not allowed in EXPLAIN SELECT");
-    
     std::map<ast::SvCompOp, CompOp> m = {
         {ast::SV_OP_EQ, OP_EQ},
         {ast::SV_OP_NE, OP_NE},
