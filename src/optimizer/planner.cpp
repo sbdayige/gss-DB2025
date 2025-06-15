@@ -12,6 +12,7 @@ See the Mulan PSL v2 for more details. */
 
 #include <algorithm>
 #include <climits>
+#include <iostream>
 #include <memory>
 #include <set>
 #include <unordered_map>
@@ -196,6 +197,18 @@ std::shared_ptr<Plan> Planner::make_one_rel(std::shared_ptr<Query> query) {
     auto x = std::dynamic_pointer_cast<ast::SelectStmt>(query->parse);
     std::vector<std::string> tables = query->tables;
 
+    // 检测JOIN类型信息
+    std::map<std::pair<std::string, std::string>, JoinType> join_type_map;
+    if (x) {
+        for (const auto &join_expr : x->jointree) {
+            std::string left_table = join_expr->left;
+            std::string right_table = join_expr->right_ref->tab_name;
+            std::cout << "[DEBUG] Found JOIN: " << left_table << " -> " << right_table 
+                      << ", type=" << join_expr->type << std::endl;
+            join_type_map[{left_table, right_table}] = join_expr->type;
+        }
+    }
+
     // ===========================================
     // 第一阶段：为每个表生成最优的扫描计划
     // ===========================================
@@ -313,19 +326,42 @@ std::shared_ptr<Plan> Planner::make_one_rel(std::shared_ptr<Query> query) {
             std::shared_ptr<Plan> right_plan = table_scan_executors[i];
             scantbl[i] = 1;  // 标记该表已使用
 
-            // 创建连接节点
+            // 确定连接类型 - 检查当前表是否与已连接表之间有特定的JOIN类型
+            JoinType current_join_type = INNER_JOIN;  // 默认为内连接
+            std::cout << "[DEBUG] Looking for JOIN type for table: " << next_table << std::endl;
+
+            // 遍历已连接的表，找到与当前表的连接类型
+            for (size_t j = 0; j < i; j++) {
+                auto join_key = std::make_pair(tables[j], next_table);
+                std::cout << "[DEBUG] Checking key: " << tables[j] << " -> " << next_table << std::endl;
+                if (join_type_map.find(join_key) != join_type_map.end()) {
+                    current_join_type = join_type_map[join_key];
+                    std::cout << "[DEBUG] Found JOIN type: " << current_join_type << std::endl;
+                    break;
+                }
+                // 也检查反向连接
+                auto reverse_join_key = std::make_pair(next_table, tables[j]);
+                std::cout << "[DEBUG] Checking reverse key: " << next_table << " -> " << tables[j] << std::endl;
+                if (join_type_map.find(reverse_join_key) != join_type_map.end()) {
+                    current_join_type = join_type_map[reverse_join_key];
+                    std::cout << "[DEBUG] Found reverse JOIN type: " << current_join_type << std::endl;
+                    break;
+                }
+            }
+
+            // 创建连接节点（使用带JOIN类型的构造函数）
             if (enable_nestedloop_join && enable_sortmerge_join) {
                 // 两种算法都启用时，默认选择嵌套循环连接
                 table_join_executors = std::make_shared<JoinPlan>(T_NestLoop, std::move(table_join_executors),
-                                                                  std::move(right_plan), applicable_conds);
+                                                                  std::move(right_plan), applicable_conds, current_join_type);
             } else if (enable_nestedloop_join) {
                 // 仅启用嵌套循环连接
                 table_join_executors = std::make_shared<JoinPlan>(T_NestLoop, std::move(table_join_executors),
-                                                                  std::move(right_plan), applicable_conds);
+                                                                  std::move(right_plan), applicable_conds, current_join_type);
             } else if (enable_sortmerge_join) {
                 // 仅启用排序合并连接
                 table_join_executors = std::make_shared<JoinPlan>(T_SortMerge, std::move(table_join_executors),
-                                                                  std::move(right_plan), applicable_conds);
+                                                                  std::move(right_plan), applicable_conds, current_join_type);
             } else {
                 // 配置错误：没有启用任何连接算法
                 throw RMDBError("No join executor selected!");
@@ -358,7 +394,7 @@ std::shared_ptr<Plan> Planner::make_one_rel(std::shared_ptr<Query> query) {
             // 注意：这可能导致大量的中间结果，影响查询性能
             // 修改：将已有连接树作为左子树，新表作为右子树，以符合期望的输出顺序
             table_join_executors = std::make_shared<JoinPlan>(T_NestLoop, std::move(table_join_executors),
-                                                              std::move(table_scan_executors[i]), std::vector<Condition>());
+                                                              std::move(table_scan_executors[i]), std::vector<Condition>(), INNER_JOIN);
         }
     }
 

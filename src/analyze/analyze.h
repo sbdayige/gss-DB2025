@@ -12,18 +12,17 @@ See the Mulan PSL v2 for more details. */
 
 #include <cassert>
 #include <cstring>
+#include <map>
 #include <memory>
 #include <string>
 #include <vector>
-#include <map>
 
+#include "common/common.h"
 #include "parser/parser.h"
 #include "system/sm.h"
-#include "common/common.h"
 
-class Query
-{
-public:
+class Query {
+   public:
     std::shared_ptr<ast::TreeNode> parse;
     // TODO jointree
     // where条件
@@ -44,20 +43,20 @@ public:
     Query() {}
 };
 
-class Analyze
-{
-private:
+class Analyze {
+   private:
     SmManager *sm_manager_;
 
-public:
+   public:
     Analyze(SmManager *sm_manager) : sm_manager_(sm_manager) {}
     ~Analyze() {}
 
     std::shared_ptr<Query> do_analyze(std::shared_ptr<ast::TreeNode> root);
 
-private:
+   private:
     TabCol check_column(const std::vector<ColMeta> &all_cols, TabCol target);
     TabCol check_column_with_alias(const std::vector<ColMeta> &all_cols, TabCol target, const std::map<std::string, std::string> &alias_map);
+    TabCol check_column_with_semi_join_preference(const std::vector<ColMeta> &all_cols, TabCol target, const std::map<std::string, std::string> &alias_map, const std::string &preferred_table);
     void get_all_cols(const std::vector<std::string> &tab_names, std::vector<ColMeta> &all_cols);
     void get_clause(const std::vector<std::shared_ptr<ast::BinaryExpr>> &sv_conds, std::vector<Condition> &conds);
     void check_clause(const std::vector<std::string> &tab_names, std::vector<Condition> &conds);

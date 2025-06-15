@@ -39,7 +39,6 @@ std::shared_ptr<Query> Analyze::do_analyze(std::shared_ptr<ast::TreeNode> parse)
                 throw TableNotFoundError(table_ref->tab_name);
             }
 
-            // 建立别名映射
             if (!table_ref->alias.empty()) {
                 // 检查别名是否已经存在
                 if (alias_map.find(table_ref->alias) != alias_map.end()) {
@@ -97,8 +96,23 @@ std::shared_ptr<Query> Analyze::do_analyze(std::shared_ptr<ast::TreeNode> parse)
             }
         } else {
             // infer table name from column name, 考虑别名
+            // 对于SEMI JOIN，需要特殊处理模糊列名（优先选择左表列）
+            bool has_semi_join = false;
+            std::string left_table_name;
+            for (const auto &join_expr : x->jointree) {
+                if (join_expr->type == SEMI_JOIN) {
+                    has_semi_join = true;
+                    left_table_name = join_expr->left;
+                    break;
+                }
+            }
+
             for (auto &sel_col : query->cols) {
-                sel_col = check_column_with_alias(all_cols, sel_col, alias_map);  // 列元数据校验（支持别名）
+                if (has_semi_join) {
+                    sel_col = check_column_with_semi_join_preference(all_cols, sel_col, alias_map, left_table_name);
+                } else {
+                    sel_col = check_column_with_alias(all_cols, sel_col, alias_map);  // 列元数据校验（支持别名）
+                }
             }
         }
         // 处理where条件
@@ -107,12 +121,45 @@ std::shared_ptr<Query> Analyze::do_analyze(std::shared_ptr<ast::TreeNode> parse)
 
         // 处理JOIN ON条件
         for (const auto &join_expr : x->jointree) {
+            // 设置左表名（语法解析器中留空，在这里确定）
+            if (join_expr->left.empty() && !query->tables.empty()) {
+                join_expr->left = query->tables[0];  // 假设第一个表是左表
+            }
+            
             std::vector<Condition> join_conds;
             get_clause(join_expr->conds, join_conds);
             check_clause_with_alias(query->tables, join_conds, alias_map);
 
             // 将JOIN ON条件添加到查询条件中
             query->conds.insert(query->conds.end(), join_conds.begin(), join_conds.end());
+        }
+
+        // SEMI JOIN语义检查：SELECT子句中只能选择左表的列
+        for (const auto &join_expr : x->jointree) {
+            if (join_expr->type == SEMI_JOIN) {
+                std::string right_table_name = join_expr->right_ref->tab_name;
+                std::string right_table_alias = join_expr->right_ref->alias;
+
+                // 检查所有选择的列是否来自右表
+                for (const auto &sel_col : query->cols) {
+                    bool is_from_right_table = false;
+
+                    // 检查是否通过表名引用右表
+                    if (sel_col.tab_name == right_table_name) {
+                        is_from_right_table = true;
+                    }
+
+                    // 检查是否通过别名引用右表
+                    if (!right_table_alias.empty() && sel_col.tab_name == right_table_alias) {
+                        is_from_right_table = true;
+                    }
+
+                    if (is_from_right_table) {
+                        throw InternalError("SEMI JOIN cannot select columns from right table: " +
+                                            sel_col.tab_name + "." + sel_col.col_name);
+                    }
+                }
+            }
         }
 
         // 保存别名映射到Query对象（用于EXPLAIN显示）
@@ -216,6 +263,57 @@ TabCol Analyze::check_column_with_alias(const std::vector<ColMeta> &all_cols, Ta
             throw ColumnNotFoundError(target.col_name);
         }
         target.tab_name = tab_name;
+    } else {
+        // 检查是否使用了别名，如果是则转换为实际表名
+        std::string actual_tab_name = target.tab_name;
+        auto alias_it = alias_map.find(target.tab_name);
+        if (alias_it != alias_map.end()) {
+            actual_tab_name = alias_it->second;
+        }
+
+        // 使用实际表名检查列是否存在
+        bool found = false;
+        for (auto &col : all_cols) {
+            if (col.tab_name == actual_tab_name && col.name == target.col_name) {
+                found = true;
+                break;
+            }
+        }
+        if (!found) {
+            throw ColumnNotFoundError(target.tab_name + "." + target.col_name);
+        }
+
+        // 返回的target仍然使用实际表名，这样后续处理就不需要再考虑别名
+        target.tab_name = actual_tab_name;
+    }
+    return target;
+}
+
+// 支持SEMI JOIN的列检查函数：在模糊列名时优先选择左表的列
+TabCol Analyze::check_column_with_semi_join_preference(const std::vector<ColMeta> &all_cols, TabCol target, const std::map<std::string, std::string> &alias_map, const std::string &preferred_table) {
+    if (target.tab_name.empty()) {
+        // Table name not specified, infer table name from column name
+        std::string tab_name;
+        std::string preferred_tab_name;
+
+        // 先检查是否存在首选表（左表）中的列
+        for (auto &col : all_cols) {
+            if (col.name == target.col_name) {
+                if (col.tab_name == preferred_table) {
+                    preferred_tab_name = col.tab_name;
+                }
+                if (tab_name.empty()) {
+                    tab_name = col.tab_name;
+                }
+            }
+        }
+
+        if (preferred_tab_name.empty() && tab_name.empty()) {
+            throw ColumnNotFoundError(target.col_name);
+        }
+
+        // 如果找到首选表中的列，优先使用它
+        target.tab_name = preferred_tab_name.empty() ? tab_name : preferred_tab_name;
     } else {
         // 检查是否使用了别名，如果是则转换为实际表名
         std::string actual_tab_name = target.tab_name;

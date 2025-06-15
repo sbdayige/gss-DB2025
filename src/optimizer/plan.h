@@ -151,6 +151,22 @@ class JoinPlan : public Plan {
         conds_ = std::move(conds);
         type = INNER_JOIN;
     }
+
+    /**
+     * @brief 构造函数（支持指定连接类型）
+     * @param tag 计划类型标签(T_NestLoop或T_SortMerge)
+     * @param left 左子计划
+     * @param right 右子计划
+     * @param conds 连接条件列表
+     * @param join_type 连接类型
+     */
+    JoinPlan(PlanTag tag, std::shared_ptr<Plan> left, std::shared_ptr<Plan> right, std::vector<Condition> conds, JoinType join_type) {
+        Plan::tag = tag;
+        left_ = std::move(left);
+        right_ = std::move(right);
+        conds_ = std::move(conds);
+        type = join_type;
+    }
     ~JoinPlan() {}
 
     std::shared_ptr<Plan> left_;    // 左子计划(通常是外表)

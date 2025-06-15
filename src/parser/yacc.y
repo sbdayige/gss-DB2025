@@ -22,7 +22,7 @@ using namespace ast;
 
 // keywords
 %token SHOW TABLES CREATE TABLE DROP DESC INSERT INTO VALUES DELETE FROM ASC ORDER BY
-WHERE UPDATE SET SELECT INT CHAR FLOAT INDEX AND JOIN INNER LEFT RIGHT FULL ON AS EXIT HELP TXN_BEGIN TXN_COMMIT TXN_ABORT TXN_ROLLBACK ORDER_BY ENABLE_NESTLOOP ENABLE_SORTMERGE
+WHERE UPDATE SET SELECT INT CHAR FLOAT INDEX AND JOIN INNER LEFT RIGHT FULL SEMI ON AS EXIT HELP TXN_BEGIN TXN_COMMIT TXN_ABORT TXN_ROLLBACK ORDER_BY ENABLE_NESTLOOP ENABLE_SORTMERGE
 // non-keywords
 %token LEQ NEQ GEQ T_EOF
 %token EXPLAIN
@@ -440,6 +440,10 @@ joinType:
     {
         $$ = FULL_JOIN;
     }
+    |   SEMI
+    {
+        $$ = SEMI_JOIN;
+    }
     ;
 
 baseTableList:
@@ -487,6 +491,16 @@ joinExpr:
             $2,           // 右表引用（包含别名）
             $4,           // 连接条件列表（支持AND连接）
             INNER_JOIN    // 默认为内连接
+        );
+    }
+    |   SEMI JOIN tableRef ON whereClause
+    {
+        // SEMI JOIN
+        $$ = std::make_shared<JoinExpr>(
+            "",           // 左表名，在语义分析阶段确定
+            $3,           // 右表引用（包含别名）
+            $5,           // 连接条件列表（支持AND连接）
+            SEMI_JOIN     // 半连接
         );
     }
     ;

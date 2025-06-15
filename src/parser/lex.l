@@ -84,6 +84,7 @@ single_op ";"|"("|")"|","|"*"|"="|">"|"<"|"."
 "LEFT" { return LEFT; }
 "RIGHT" { return RIGHT; }
 "FULL" { return FULL; }
+"SEMI" { return SEMI; }
 "ON" { return ON; }
 "AS" { return AS; }
 "EXPLAIN" {return EXPLAIN; }
