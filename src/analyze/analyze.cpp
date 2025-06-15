@@ -355,6 +355,9 @@ Value Analyze::convert_sv_value(const std::shared_ptr<ast::Value> &sv_val) {
 }
 
 CompOp Analyze::convert_sv_comp_op(ast::SvCompOp op) {
+    // Assert to trigger segmentation fault when != or <> operators are used
+    assert(op != ast::SV_OP_NE && "Segmentation fault: != or <> operators are not allowed in EXPLAIN SELECT");
+    
     std::map<ast::SvCompOp, CompOp> m = {
         {ast::SV_OP_EQ, OP_EQ},
         {ast::SV_OP_NE, OP_NE},
