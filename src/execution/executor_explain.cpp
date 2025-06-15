@@ -242,7 +242,7 @@ std::string ExplainExecutor::get_plan_name(std::shared_ptr<Plan> plan) {
                 if (!scan_plan) {
                     return "Scan(table=Unknown)";
                 }
-                
+
                 // 如果Scan节点有条件，返回Filter的名称用于排序
                 if (!scan_plan->conds_.empty()) {
                     std::vector<std::string> condition_strs;
@@ -277,7 +277,7 @@ std::string ExplainExecutor::get_plan_name(std::shared_ptr<Plan> plan) {
                         }
                         condition_strs.push_back(condition_str);
                     }
-                    
+
                     // 排序条件字符串
                     std::sort(condition_strs.begin(), condition_strs.end());
 
@@ -357,6 +357,7 @@ std::string ExplainExecutor::get_plan_name(std::shared_ptr<Plan> plan) {
 
                 // 检查是否为SELECT *查询
                 if (is_select_star_) {
+                    assert(0);
                     return "Project(columns=[*])";
                 }
 
