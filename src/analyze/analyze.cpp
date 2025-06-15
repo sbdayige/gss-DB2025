@@ -31,10 +31,6 @@ std::shared_ptr<Query> Analyze::do_analyze(std::shared_ptr<ast::TreeNode> parse)
                 query->tables.push_back(right_table);
             }
         }
-
-        // 断言：当表数量大于1时抛出段错误
-        assert(query->tables.size() <= 2 && "Segmentation fault: More than 1 table detected");
-
         // 创建别名到实际表名的映射
         std::map<std::string, std::string> alias_map;
         for (const auto &table_ref : x->table_refs) {
@@ -269,9 +265,6 @@ void Analyze::get_clause(const std::vector<std::shared_ptr<ast::BinaryExpr>> &sv
         }
         conds.push_back(cond);
     }
-
-    // 添加断言：如果条件数量超过3个，抛出段错误
-    assert(conds.size() <= 3 && "Condition count exceeds limit of 3");
 }
 
 void Analyze::check_clause(const std::vector<std::string> &tab_names, std::vector<Condition> &conds) {
