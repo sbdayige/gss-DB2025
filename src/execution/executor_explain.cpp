@@ -409,17 +409,9 @@ std::string ExplainExecutor::get_plan_name(std::shared_ptr<Plan> plan) {
                         std::string lhs_col = cond.lhs_col.col_name;
                         std::string rhs_col = cond.rhs_col.col_name;
                         CompOp op = cond.op;
-                        bool should_swap = false;
-                        if (op == OP_EQ && lhs_table > rhs_table) {
-                            should_swap = true;
-                        }
 
                         std::string condition_str;
-                        if (should_swap) {
-                            condition_str = rhs_table + "." + rhs_col;
-                        } else {
-                            condition_str = lhs_table + "." + lhs_col;
-                        }
+                        condition_str = lhs_table + "." + lhs_col;
 
                         switch (op) {
                             case OP_EQ:
@@ -429,27 +421,24 @@ std::string ExplainExecutor::get_plan_name(std::shared_ptr<Plan> plan) {
                                 condition_str += "!=";
                                 break;
                             case OP_LT:
-                                condition_str += should_swap ? ">" : "<";
+                                condition_str += "<";
                                 break;
                             case OP_GT:
-                                condition_str += should_swap ? "<" : ">";
+                                condition_str += ">";
                                 break;
                             case OP_LE:
-                                condition_str += should_swap ? ">=" : "<=";
+                                condition_str += "<=";
                                 break;
                             case OP_GE:
-                                condition_str += should_swap ? "<=" : ">=";
+                                condition_str += ">=";
                                 break;
                             default:
                                 condition_str += "?";
                                 break;
                         }
 
-                        if (should_swap) {
-                            condition_str += lhs_table + "." + lhs_col;
-                        } else {
-                            condition_str += rhs_table + "." + rhs_col;
-                        }
+                        condition_str += rhs_table + "." + rhs_col;
+                        
                         condition_strs.push_back(condition_str);
                     } catch (...) {
                         condition_strs.push_back("join_condition_error");
