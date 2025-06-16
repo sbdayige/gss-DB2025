@@ -157,8 +157,10 @@ void *client_handler(void *sock_fd) {
             if (ast::parse_tree != nullptr) {
                 try {
                     // analyze and rewrite
+
                     std::shared_ptr<Query> query =
                         analyze->do_analyze(ast::parse_tree);
+
                     yy_delete_buffer(buf);
                     finish_analyze = true;
                     pthread_mutex_unlock(buffer_mutex);
@@ -166,6 +168,7 @@ void *client_handler(void *sock_fd) {
                     std::shared_ptr<Plan> plan =
                         optimizer->plan_query(query, context.get());
                     // portal
+
                     std::shared_ptr<PortalStmt> portalStmt =
                         portal->start(plan, context.get());
                     portal->run(portalStmt, ql_manager.get(), &txn_id,

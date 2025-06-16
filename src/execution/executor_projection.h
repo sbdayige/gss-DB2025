@@ -17,18 +17,18 @@ See the Mulan PSL v2 for more details. */
 
 class ProjectionExecutor : public AbstractExecutor {
    private:
-    std::unique_ptr<AbstractExecutor> prev_;        // 投影节点的儿子节点
-    std::vector<ColMeta> cols_;                     // 需要投影的字段
-    size_t len_;                                    // 字段总长度
-    std::vector<size_t> sel_idxs_;                  // 选中列在原始记录中的索引位置
+    std::unique_ptr<AbstractExecutor> prev_;  // 投影节点的儿子节点
+    std::vector<ColMeta> cols_;               // 需要投影的字段
+    size_t len_;                              // 字段总长度
+    std::vector<size_t> sel_idxs_;            // 选中列在原始记录中的索引位置
 
    public:
     /**
      * @brief ProjectionExecutor构造函数
-     * 
+     *
      * @param prev 子执行器，提供原始数据源
      * @param sel_cols 需要投影的列信息
-     * 
+     *
      * 构造函数执行以下工作：
      * 1. 接收子执行器和选择的列信息
      * 2. 建立列索引映射关系
@@ -92,9 +92,9 @@ class ProjectionExecutor : public AbstractExecutor {
 
     /**
      * @brief 获取下一条投影后的记录
-     * 
+     *
      * @return std::unique_ptr<RmRecord> 投影后的记录，如果没有更多记录则返回nullptr
-     * 
+     *
      * 执行流程：
      * 1. 从子执行器获取下一条原始记录
      * 2. 根据选择的列索引提取对应数据
@@ -109,18 +109,18 @@ class ProjectionExecutor : public AbstractExecutor {
 
         // 创建投影后的记录缓冲区
         auto projected_record = std::make_unique<RmRecord>(len_);
-        
+
         // 根据选择的列索引提取数据并重新组织
         auto &prev_cols = prev_->cols();
         for (size_t i = 0; i < sel_idxs_.size(); ++i) {
-            size_t sel_idx = sel_idxs_[i];                    // 原始记录中的列索引
-            const auto &prev_col = prev_cols[sel_idx];       // 原始列的元数据
-            const auto &proj_col = cols_[i];                 // 投影后列的元数据
-            
+            size_t sel_idx = sel_idxs_[i];              // 原始记录中的列索引
+            const auto &prev_col = prev_cols[sel_idx];  // 原始列的元数据
+            const auto &proj_col = cols_[i];            // 投影后列的元数据
+
             // 从原始记录中复制对应列的数据到投影记录中
-            memcpy(projected_record->data + proj_col.offset,           // 目标位置
-                   prev_record->data + prev_col.offset,                // 源位置
-                   prev_col.len);                                      // 复制长度
+            memcpy(projected_record->data + proj_col.offset,  // 目标位置
+                   prev_record->data + prev_col.offset,       // 源位置
+                   prev_col.len);                             // 复制长度
         }
 
         return projected_record;
@@ -130,15 +130,15 @@ class ProjectionExecutor : public AbstractExecutor {
      * @brief 获取当前记录的位置标识符
      * @return Rid& 委托给子执行器的rid
      */
-    Rid &rid() override { 
-        return prev_->rid(); 
+    Rid &rid() override {
+        return prev_->rid();
     }
 
     /**
      * @brief 获取执行器类型名称
      * @return std::string 返回执行器类型标识
      */
-    std::string getType() override { 
-        return "ProjectionExecutor"; 
+    std::string getType() override {
+        return "ProjectionExecutor";
     }
 };

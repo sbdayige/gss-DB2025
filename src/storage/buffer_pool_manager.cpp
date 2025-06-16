@@ -261,18 +261,44 @@ void BufferPoolManager::flush_all_pages(int fd) {
     }
 }
 
-void BufferPoolManager::flush_and_delete_all_pages(int fd) {
-    std::lock_guard<std::mutex> lock(latch_);
+void BufferPoolManager::delete_all_pages(int fd) {
+    std::scoped_lock lock{latch_};
 
-    for (size_t i = 0; i < pool_size_; i++) {
-        Page *page = &pages_[i];
-        if (page->get_page_id().fd == fd && page->get_page_id().page_no != INVALID_PAGE_ID) {
-            disk_manager_->write_page(page->get_page_id().fd, page->get_page_id().page_no, page->get_data(), PAGE_SIZE);
+    // 使用迭代器一次遍历删除，避免创建临时容器
+    auto iter = page_table_.begin();
+    while (iter != page_table_.end()) {
+        const PageId &page_id = iter->first;
+
+        if (page_id.fd == fd) {
+            frame_id_t frame_id = iter->second;
+            Page *page = &pages_[frame_id];
+
+            // 如果页面被pin，强制解除pin
+            if (page->pin_count_ > 0) {
+                page->pin_count_ = 0;
+                replacer_->unpin(frame_id);
+            }
+
+            // 如果是脏页，写回磁盘
+            if (page->is_dirty_) {
+                disk_manager_->write_page(page_id.fd, page_id.page_no, page->data_, PAGE_SIZE);
+                page->is_dirty_ = false;  // 避免重复写入
+            }
+
+            // 重置页面元数据（批量设置避免分别设置）
+            page->id_ = {INVALID_FILE_ID, INVALID_PAGE_ID};
+            page->pin_count_ = 0;
             page->is_dirty_ = false;
-            auto page_id = page->get_page_id();
-            page->reset_memory();
-            page_table_.erase(page_id);
-            free_list_.emplace_back(i);
+            // 延迟内存清零，因为在下次使用时会被覆盖
+            // page->reset_memory();
+
+            // 将frame加入空闲列表
+            free_list_.push_back(frame_id);
+
+            // 从页表中删除并移动到下一个元素
+            iter = page_table_.erase(iter);
+        } else {
+            ++iter;
         }
     }
 }

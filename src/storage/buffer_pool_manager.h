@@ -71,12 +71,12 @@ class BufferPoolManager {
     bool flush_page(PageId page_id);
 
     Page *new_page(PageId *page_id);
-    
+
     bool delete_page(PageId page_id);
 
     void flush_all_pages(int fd);
 
-    void flush_and_delete_all_pages(int fd);
+    void delete_all_pages(int fd);
 
    private:
     bool find_victim_page(frame_id_t *frame_id);

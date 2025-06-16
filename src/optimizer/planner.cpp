@@ -29,46 +29,62 @@ See the Mulan PSL v2 for more details. */
 #include "record/rm.h"
 #include "record_printer.h"
 
-// 索引匹配规则：支持等值查询和范围查询，匹配索引字段
 bool Planner::get_index_cols(std::string tab_name, std::vector<Condition> curr_conds, std::vector<std::string> &index_col_names) {
     index_col_names.clear();
-    std::set<std::string> indexed_columns;
-
-    // 收集所有可以使用索引的列（等值查询和范围查询）
-    for (auto &cond : curr_conds) {
-        if (cond.is_rhs_val && cond.lhs_col.tab_name.compare(tab_name) == 0) {
-            // 支持等值查询和范围查询操作符
-            if (cond.op == OP_EQ || cond.op == OP_LT || cond.op == OP_GT ||
-                cond.op == OP_LE || cond.op == OP_GE || cond.op == OP_NE) {
-                indexed_columns.insert(cond.lhs_col.col_name);
-            }
-        }
-    }
-
-    // 将集合转换为向量
-    for (const auto &col : indexed_columns) {
-        index_col_names.push_back(col);
-    }
-
     TabMeta &tab = sm_manager_->db_.get_table(tab_name);
+    if (tab.indexes.empty()) {
+        return false;
+    }
 
-    // 检查是否存在匹配的索引（单列索引或复合索引的前缀）
-    if (!index_col_names.empty()) {
-        // 优先查找单列索引
-        for (const auto &col : index_col_names) {
-            std::vector<std::string> single_col = {col};
-            if (tab.is_index(single_col)) {
-                index_col_names = single_col;
-                return true;
-            }
-        }
+    // 从条件中提取所有涉及该表的列
+    std::unordered_set<std::string> cols;
+    cols.reserve(curr_conds.size());  // 预分配空间避免频繁rehash
 
-        // 检查是否有复合索引可以使用
-        if (tab.is_index(index_col_names)) {
-            return true;
+    // 预编译支持的操作符集合
+    static const std::unordered_set<CompOp> supported_ops = {
+        CompOp::OP_EQ, CompOp::OP_GT, CompOp::OP_GE, CompOp::OP_LT, CompOp::OP_LE};
+
+    for (const auto &cond : curr_conds) {
+        if (cond.is_rhs_val && cond.lhs_col.tab_name == tab_name &&
+            supported_ops.count(cond.op) > 0) {
+            cols.insert(cond.lhs_col.col_name);
         }
     }
 
+    if (cols.empty()) {
+        return false;
+    }
+
+    // 最左匹配原则
+    const IndexMeta *best_idx = nullptr;
+    int max_match_count = 0;
+
+    for (const auto &index : tab.indexes) {
+        int match_count = 0;
+
+        // 检查连续能匹配列数
+        for (int i = 0; i < index.col_num; ++i) {
+            if (cols.count(index.cols[i].name) > 0) {
+                match_count++;  // 统计匹配列数
+            } else {
+                break;  // 某一列不匹配就停止
+            }
+        }
+
+        if (match_count > max_match_count) {
+            max_match_count = match_count;
+            best_idx = &index;
+        }
+    }
+
+    if (best_idx != nullptr && max_match_count > 0) {
+        // 返回最匹配索引的列名
+        index_col_names.reserve(best_idx->col_num);  // 预分配空间
+        for (int i = 0; i < best_idx->col_num; ++i) {
+            index_col_names.emplace_back(best_idx->cols[i].name);
+        }
+        return true;
+    }
     return false;
 }
 
@@ -203,7 +219,7 @@ std::shared_ptr<Plan> Planner::make_one_rel(std::shared_ptr<Query> query) {
         for (const auto &join_expr : x->jointree) {
             std::string left_table = join_expr->left;
             std::string right_table = join_expr->right_ref->tab_name;
-            std::cout << "[DEBUG] Found JOIN: " << left_table << " -> " << right_table 
+            std::cout << "[DEBUG] Found JOIN: " << left_table << " -> " << right_table
                       << ", type=" << join_expr->type << std::endl;
             join_type_map[{left_table, right_table}] = join_expr->type;
         }
@@ -584,19 +600,6 @@ std::shared_ptr<Plan> Planner::do_planner(std::shared_ptr<Query> query, Context 
         // 创建DDL执行计划：索引删除操作
         // 需要指定表名和要删除的索引列名
         plannerRoot = std::make_shared<DDLPlan>(T_DropIndex, x->tab_name, x->col_names, std::vector<ColDef>());
-    }
-    // ===========================================
-    // 其他DDL语句处理
-    // ===========================================
-
-    else if (auto x = std::dynamic_pointer_cast<ast::ShowIndex>(query->parse)) {
-        // ===============================
-        // SHOW INDEX FROM 语句处理
-        // ===============================
-
-        // 创建其他类型执行计划：显示索引操作
-        // 用于查看指定表的索引信息
-        plannerRoot = std::make_shared<OtherPlan>(T_ShowIndex, x->tab_name);
     }
     // ===========================================
     // DML语句处理：数据操纵语言

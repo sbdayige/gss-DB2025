@@ -10,7 +10,7 @@ See the Mulan PSL v2 for more details. */
 
 #pragma once
 
-#include <map>
+#include <limits>
 
 #include "execution_defs.h"
 #include "execution_manager.h"
@@ -52,6 +52,7 @@ class IndexScanExecutor : public AbstractExecutor {
 
     std::vector<std::string> index_col_names_;  // 索引包含的列名列表
     IndexMeta index_meta_;                      // 使用的索引的元数据
+    std::string index_name_;                    // 索引标识
 
     Rid rid_;                        // 当前记录的物理位置标识符
     std::unique_ptr<RecScan> scan_;  // 索引扫描器，实际类型为IxScan
@@ -75,8 +76,7 @@ class IndexScanExecutor : public AbstractExecutor {
      * 4. 标准化比较操作符的方向（确保左操作数是当前表的列）
      * 5. 计算输出记录的长度
      */
-    IndexScanExecutor(SmManager* sm_manager, std::string tab_name, std::vector<Condition> conds, std::vector<std::string> index_col_names,
-                      Context* context) {
+    IndexScanExecutor(SmManager* sm_manager, std::string tab_name, std::vector<Condition> conds, std::vector<std::string> index_col_names, Context* context) {
         sm_manager_ = sm_manager;
         context_ = context;
         tab_name_ = std::move(tab_name);
@@ -94,15 +94,12 @@ class IndexScanExecutor : public AbstractExecutor {
         cols_ = tab_.cols;
         len_ = cols_.back().offset + cols_.back().len;
 
-        // 操作符映射表，用于交换左右操作数时调整操作符
-        std::map<CompOp, CompOp> swap_op = {
-            {OP_EQ, OP_EQ},
-            {OP_NE, OP_NE},
-            {OP_LT, OP_GT},
-            {OP_GT, OP_LT},
-            {OP_LE, OP_GE},
-            {OP_GE, OP_LE},
-        };
+        // 获取索引名称并确保索引文件已打开
+        index_name_ = sm_manager_->get_ix_manager()->get_index_name(tab_name_, index_col_names_);
+        if (!sm_manager->ihs_.count(index_name_)) {
+            // 如果没有打开则打开文件
+            sm_manager->ihs_.emplace(index_name_, sm_manager_->get_ix_manager()->open_index(tab_name_, index_col_names_));
+        }
 
         // 标准化查询条件：确保左操作数总是当前表的列
         for (auto& cond : conds_) {
@@ -110,10 +107,84 @@ class IndexScanExecutor : public AbstractExecutor {
                 // 如果左操作数不是当前表的列，需要交换左右操作数
                 assert(!cond.is_rhs_val && cond.rhs_col.tab_name == tab_name_);
                 std::swap(cond.lhs_col, cond.rhs_col);
-                cond.op = swap_op.at(cond.op);  // 调整比较操作符
+                cond.op = swap_op(cond.op);  // 调整比较操作符
             }
         }
         fed_conds_ = conds_;
+    }
+
+    /**
+     * @brief 值比较辅助函数
+     *
+     * @param val1 第一个值
+     * @param val2 第二个值
+     * @param op 比较操作符
+     * @return bool 比较结果
+     */
+    static inline bool compare_values(const Value& val1, const Value& val2, CompOp op) {
+        // 确保两个值的类型相同
+        if (val1.type != val2.type) {
+            return false;
+        }
+
+        int cmp = 0;
+        switch (val1.type) {
+            case TYPE_INT:
+                cmp = (val1.int_val < val2.int_val) ? -1 : (val1.int_val > val2.int_val) ? 1
+                                                                                         : 0;
+                break;
+            case TYPE_FLOAT:
+                cmp = (val1.float_val < val2.float_val) ? -1 : (val1.float_val > val2.float_val) ? 1
+                                                                                                 : 0;
+                break;
+            case TYPE_STRING:
+                cmp = val1.str_val.compare(val2.str_val);
+                break;
+            default:
+                return false;
+        }
+
+        switch (op) {
+            case OP_EQ:
+                return cmp == 0;
+            case OP_NE:
+                return cmp != 0;
+            case OP_LT:
+                return cmp < 0;
+            case OP_GT:
+                return cmp > 0;
+            case OP_LE:
+                return cmp <= 0;
+            case OP_GE:
+                return cmp >= 0;
+            default:
+                return false;
+        }
+    }
+
+    /**
+     * @brief 操作符交换函数
+     *
+     * @param op 原操作符
+     * @return CompOp 交换后的操作符
+     */
+    static inline CompOp swap_op(CompOp op) {
+        switch (op) {
+            case OP_EQ:
+                return OP_EQ;
+            case OP_NE:
+                return OP_NE;
+            case OP_LT:
+                return OP_GT;
+            case OP_GT:
+                return OP_LT;
+            case OP_LE:
+                return OP_GE;
+            case OP_GE:
+                return OP_LE;
+            default:
+                return op;
+        }
     }
 
     /**
@@ -128,166 +199,196 @@ class IndexScanExecutor : public AbstractExecutor {
      * 4. 定位到第一个满足条件的记录
      */
     void beginTuple() override {
-        // 初始化条件值的raw数据
-        init_condition_values();
+        // 缓存索引句柄，避免重复查找
+        auto ih = sm_manager_->ihs_.at(index_name_).get();
 
-        // 获取索引句柄
-        auto index_name = sm_manager_->get_ix_manager()->get_index_name(tab_name_, index_meta_.cols);
-        auto ih = sm_manager_->ihs_.at(index_name).get();
+        // 使用局部缓冲区，避免线程本地变量的问题
+        const size_t record_size = index_meta_.col_tot_len;
+        std::vector<char> lower_buffer(record_size);
+        std::vector<char> upper_buffer(record_size);
 
-        // 分析条件，构建索引查询范围
-        Iid lower_iid, upper_iid;
-        bool has_range = false;
+        RmRecord lower_record(lower_buffer.data(), record_size);
+        RmRecord upper_record(upper_buffer.data(), record_size);
 
-        // 为单列索引构建范围查询
-        if (index_col_names_.size() == 1) {
-            const std::string& index_col = index_col_names_[0];
-            const auto& col_meta = *tab_.get_col(index_col);
+        off_t offset = 0;
 
-            // 收集该列的所有条件
-            Value lower_val, upper_val;
-            bool has_lower = false, has_upper = false;
-            bool lower_inclusive = true, upper_inclusive = true;
-
-            for (const auto& cond : conds_) {
-                if (!cond.is_rhs_val || cond.lhs_col.col_name != index_col) continue;
-
-                switch (cond.op) {
-                    case OP_EQ:
-                        // 等值查询：设置相同的上下界
-                        lower_val = upper_val = cond.rhs_val;
-                        has_lower = has_upper = true;
-                        lower_inclusive = upper_inclusive = true;
-                        break;
-                    case OP_GT:
-                        // 大于：设置下界，不包含
-                        if (!has_lower || compare_values(cond.rhs_val, lower_val, col_meta.type) > 0) {
-                            lower_val = cond.rhs_val;
-                            has_lower = true;
-                            lower_inclusive = false;
+        for (const auto& col : index_meta_.cols) {
+            Value max_val, min_val;
+            switch (col.type) {
+                case ColType::TYPE_INT: {
+                    max_val.set_int(std::numeric_limits<int>::max());
+                    min_val.set_int(std::numeric_limits<int>::min());
+                    break;
+                }
+                case ColType::TYPE_FLOAT: {
+                    max_val.set_float(std::numeric_limits<float>::max());
+                    min_val.set_float(std::numeric_limits<float>::lowest());
+                    break;
+                }
+                case ColType::TYPE_STRING: {
+                    max_val.set_str(std::string(col.len, '\xFF'));  // 使用0xFF而不是255
+                    min_val.set_str(std::string(col.len, '\0'));    // 使用'\0'而不是0
+                    break;
+                }
+                default:
+                    throw InternalError("Unsupported column type in index scan");
+            }
+            for (const auto& cond : fed_conds_) {
+                if (cond.lhs_col.col_name == col.name && cond.is_rhs_val) {
+                    switch (cond.op) {
+                        case CompOp::OP_EQ: {
+                            if (compare_values(cond.rhs_val, min_val, CompOp::OP_GT)) {
+                                min_val = cond.rhs_val;
+                            }
+                            if (compare_values(cond.rhs_val, max_val, CompOp::OP_LT)) {
+                                max_val = cond.rhs_val;
+                            }
+                            break;
                         }
-                        break;
-                    case OP_GE:
-                        // 大于等于：设置下界，包含
-                        if (!has_lower || compare_values(cond.rhs_val, lower_val, col_meta.type) > 0) {
-                            lower_val = cond.rhs_val;
-                            has_lower = true;
-                            lower_inclusive = true;
+                        case CompOp::OP_LT:
+                        case CompOp::OP_LE: {
+                            if (compare_values(cond.rhs_val, max_val, CompOp::OP_LT)) {
+                                max_val = cond.rhs_val;
+                            }
+                            break;
                         }
-                        break;
-                    case OP_LT:
-                        // 小于：设置上界，不包含
-                        if (!has_upper || compare_values(cond.rhs_val, upper_val, col_meta.type) < 0) {
-                            upper_val = cond.rhs_val;
-                            has_upper = true;
-                            upper_inclusive = false;
+                        case CompOp::OP_GT:
+                        case CompOp::OP_GE: {
+                            if (compare_values(cond.rhs_val, min_val, CompOp::OP_GT)) {
+                                min_val = cond.rhs_val;
+                            }
+                            break;
                         }
-                        break;
-                    case OP_LE:
-                        // 小于等于：设置上界，包含
-                        if (!has_upper || compare_values(cond.rhs_val, upper_val, col_meta.type) < 0) {
-                            upper_val = cond.rhs_val;
-                            has_upper = true;
-                            upper_inclusive = true;
+                        case CompOp::OP_NE: {
+                            // 对于不等于的情况，忽略（索引扫描不支持不等于条件）
+                            break;
                         }
-                        break;
+                        default: {
+                            throw InternalError("Unexpected comparison operator in index scan condition at " + getType());
+                        }
+                    }
                 }
             }
 
-            // 构建索引键并获取扫描范围
-            if (has_lower || has_upper) {
-                auto lower_key = std::make_unique<char[]>(index_meta_.col_tot_len);
-                auto upper_key = std::make_unique<char[]>(index_meta_.col_tot_len);
-
-                // 初始化键值
-                memset(lower_key.get(), 0, index_meta_.col_tot_len);
-                memset(upper_key.get(), 0, index_meta_.col_tot_len);
-
-                if (has_lower) {
-                    memcpy(lower_key.get(), lower_val.raw->data, col_meta.len);
-                    if (lower_inclusive) {
-                        lower_iid = ih->lower_bound(lower_key.get());
-                    } else {
-                        lower_iid = ih->upper_bound(lower_key.get());
-                    }
-                } else {
-                    lower_iid = ih->leaf_begin();
+            // 安全地复制值到记录缓冲区
+            switch (col.type) {
+                case ColType::TYPE_INT: {
+                    memcpy(lower_record.data + offset, &min_val.int_val, sizeof(int));
+                    memcpy(upper_record.data + offset, &max_val.int_val, sizeof(int));
+                    break;
                 }
-
-                if (has_upper) {
-                    memcpy(upper_key.get(), upper_val.raw->data, col_meta.len);
-                    if (upper_inclusive) {
-                        upper_iid = ih->upper_bound(upper_key.get());
-                    } else {
-                        upper_iid = ih->lower_bound(upper_key.get());
-                    }
-                } else {
-                    upper_iid = ih->leaf_end();
+                case ColType::TYPE_FLOAT: {
+                    memcpy(lower_record.data + offset, &min_val.float_val, sizeof(float));
+                    memcpy(upper_record.data + offset, &max_val.float_val, sizeof(float));
+                    break;
                 }
+                case ColType::TYPE_STRING: {
+                    // 确保字符串长度不超过列长度
+                    size_t copy_len = std::min(static_cast<size_t>(col.len), min_val.str_val.length());
+                    memcpy(lower_record.data + offset, min_val.str_val.c_str(), copy_len);
+                    if (copy_len < col.len) {
+                        memset(lower_record.data + offset + copy_len, 0, col.len - copy_len);
+                    }
 
-                has_range = true;
+                    copy_len = std::min(static_cast<size_t>(col.len), max_val.str_val.length());
+                    memcpy(upper_record.data + offset, max_val.str_val.c_str(), copy_len);
+                    if (copy_len < col.len) {
+                        memset(upper_record.data + offset + copy_len, 0, col.len - copy_len);
+                    }
+                    break;
+                }
+                default:
+                    throw InternalError("Unsupported column type in index scan");
             }
-        }
-
-        // 如果没有可用的索引条件，回退到全索引扫描
-        if (!has_range) {
-            lower_iid = ih->leaf_begin();
-            upper_iid = ih->leaf_end();
+            offset += col.len;
         }
 
         // 创建索引扫描器
+        auto lower_iid = ih->lower_bound(lower_record.data);
+        auto upper_iid = ih->upper_bound(upper_record.data);
         scan_ = std::make_unique<IxScan>(ih, lower_iid, upper_iid, sm_manager_->get_bpm());
 
-        // 移动到第一个满足所有条件的记录
-        while (!scan_->is_end()) {
-            rid_ = scan_->rid();
-            auto rec = fh_->get_record(rid_, context_);
-            if (eval_conds(cols_, fed_conds_, rec.get())) {
-                return;  // 找到第一个满足条件的记录
-            }
-            scan_->next();
+        std::cerr << "debug2 - scan created" << std::endl;
+
+        // 检查扫描器是否有效
+        if (scan_ == nullptr) {
+            std::cerr << "Error: Failed to create scan" << std::endl;
+            return;
         }
+
+        std::cerr << "debug2.5 - about to call find_next_valid_record" << std::endl;
+
+        // 定位到第一个满足条件的记录
+        find_next_valid_record();
+        std::cerr << "debug1" << std::endl;
     }
 
-   private:
     /**
-     * @brief 比较两个值的大小
-     * @param val1 第一个值
-     * @param val2 第二个值
-     * @param type 值的类型
-     * @return 负数表示val1<val2，0表示相等，正数表示val1>val2
+     * @brief 查找下一个有效记录
      */
-    int compare_values(const Value& val1, const Value& val2, ColType type) {
-        switch (type) {
-            case TYPE_INT:
-                return *(int*)val1.raw->data - *(int*)val2.raw->data;
-            case TYPE_FLOAT: {
-                float f1 = *(float*)val1.raw->data;
-                float f2 = *(float*)val2.raw->data;
-                if (f1 < f2) return -1;
-                if (f1 > f2) return 1;
-                return 0;
-            }
-            case TYPE_STRING: {
-                // 使用更安全的字符串比较
-                size_t len1 = strnlen((char*)val1.raw->data, val1.raw->size);
-                size_t len2 = strnlen((char*)val2.raw->data, val2.raw->size);
-                size_t min_len = std::min(len1, len2);
-
-                int result = memcmp(val1.raw->data, val2.raw->data, min_len);
-                if (result != 0) return result;
-
-                // 如果前面的字符都相同，比较长度
-                if (len1 < len2) return -1;
-                if (len1 > len2) return 1;
-                return 0;
-            }
-            default:
-                throw InternalError("Unsupported column type for comparison");
+    inline void find_next_valid_record() {
+        // 安全检查：确保扫描器已初始化
+        if (scan_ == nullptr) {
+            std::cerr << "Error: scan_ is null in find_next_valid_record" << std::endl;
+            return;
         }
+
+        while (!is_end()) {
+            try {
+                // 安全获取当前记录的RID
+                rid_ = scan_->rid();
+                std::cerr << "Got rid: page_no=" << rid_.page_no << ", slot_no=" << rid_.slot_no << std::endl;
+
+                // 安全获取记录
+                if (fh_ == nullptr) {
+                    std::cerr << "Error: fh_ is null" << std::endl;
+                    return;
+                }
+
+                std::cerr << "About to call get_record with rid: page_no=" << rid_.page_no << ", slot_no=" << rid_.slot_no << std::endl;
+
+                auto rec = fh_->get_record(rid_, context_);
+
+                std::cerr << "get_record completed successfully" << std::endl;
+
+                if (rec == nullptr) {
+                    std::cerr << "Error: get_record returned null" << std::endl;
+                    scan_->next();
+                    continue;
+                }
+
+                std::cerr << "About to check record pointer" << std::endl;
+                if (rec.get() == nullptr) {
+                    std::cerr << "Error: rec.get() returned null" << std::endl;
+                    scan_->next();
+                    continue;
+                }
+
+                std::cerr << "About to check cols_ size: " << cols_.size() << std::endl;
+                std::cerr << "About to check fed_conds_ size: " << fed_conds_.size() << std::endl;
+
+                // 评估条件
+                std::cerr << "About to call eval_conds" << std::endl;
+                bool conds_result = eval_conds(cols_, fed_conds_, rec.get());
+                std::cerr << "eval_conds completed with result: " << conds_result << std::endl;
+                
+                if (conds_result) {
+                    std::cerr << "Found valid record" << std::endl;
+                    return;
+                }
+
+                scan_->next();
+            } catch (const std::exception& e) {
+                std::cerr << "Exception in find_next_valid_record: " << e.what() << std::endl;
+                scan_->next();
+            } catch (...) {
+                std::cerr << "Unknown exception in find_next_valid_record" << std::endl;
+                scan_->next();
+            }
+        }
+        std::cerr << "Reached end of scan" << std::endl;
     }
 
-   public:
     /**
      * @brief 移动到下一个满足条件的记录
      *
@@ -296,22 +397,13 @@ class IndexScanExecutor : public AbstractExecutor {
      */
     void nextTuple() override {
         if (scan_ == nullptr) {
-            throw InternalError("Index scan not initialized at " + getType());
+            throw InternalError("Scan not initialized at " + getType());
         }
-
         if (!scan_->is_end()) {
             scan_->next();
         }
-
-        // 继续寻找下一个满足条件的记录
-        while (!scan_->is_end()) {
-            rid_ = scan_->rid();
-            auto rec = fh_->get_record(rid_, context_);
-            if (eval_conds(cols_, fed_conds_, rec.get())) {
-                return;  // 找到满足条件的记录
-            }
-            scan_->next();
-        }
+        // 查找下一个有效记录
+        find_next_valid_record();
     }
 
     /**
@@ -328,7 +420,6 @@ class IndexScanExecutor : public AbstractExecutor {
      * 4. 移动到下一个记录位置
      */
     std::unique_ptr<RmRecord> Next() override {
-        // 自动初始化扫描器（如果还未初始化）
         if (scan_ == nullptr) {
             beginTuple();
         }
@@ -337,11 +428,7 @@ class IndexScanExecutor : public AbstractExecutor {
         if (is_end()) {
             return nullptr;
         }
-
-        // 获取当前记录
-        auto record = fh_->get_record(rid_, context_);
-
-        return record;
+        return fh_->get_record(rid_, context_);
     }
 
     /**
@@ -372,6 +459,16 @@ class IndexScanExecutor : public AbstractExecutor {
     }
 
     /**
+     * @brief 获取指定列的元数据
+     * @param target 目标列的表列引用
+     * @return 目标列的元数据
+     */
+    ColMeta get_col_offset(const TabCol& target) override {
+        auto pos = get_col(cols_, target);
+        return *pos;
+    }
+
+    /**
      * @brief 获取当前记录的位置标识符
      *
      * @return Rid& 当前记录在数据文件中的位置引用
@@ -384,56 +481,4 @@ class IndexScanExecutor : public AbstractExecutor {
      * @return std::string 执行器类型标识
      */
     std::string getType() override { return "IndexScanExecutor"; }
-
-   private:
-    /**
-     * @brief 初始化条件值的raw数据
-     * 处理类型不匹配的情况，确保条件值能够正确比较
-     */
-    void init_condition_values() {
-        for (auto& cond : conds_) {
-            if (cond.is_rhs_val) {
-                // 找到左侧列的元数据
-                auto lhs_col = get_col(cols_, cond.lhs_col);
-
-                // 如果类型不匹配但可以转换，进行类型转换
-                if (cond.rhs_val.type != lhs_col->type) {
-                    if (can_cast_type(cond.rhs_val.type, lhs_col->type)) {
-                        cast_condition_value(cond.rhs_val, lhs_col->type);
-                    }
-                }
-
-                // 初始化raw数据
-                if (cond.rhs_val.raw == nullptr) {
-                    cond.rhs_val.init_raw(lhs_col->len);
-                }
-            }
-        }
-    }
-
-    /**
-     * @brief 检查是否可以进行类型转换
-     */
-    bool can_cast_type(ColType from, ColType to) {
-        if (from == to) return true;
-        if (from == TYPE_INT && to == TYPE_FLOAT) return true;
-        if (from == TYPE_FLOAT && to == TYPE_INT) return true;
-        return false;
-    }
-
-    /**
-     * @brief 转换条件值的类型
-     */
-    void cast_condition_value(Value& val, ColType to) {
-        if (val.type == TYPE_INT && to == TYPE_FLOAT) {
-            int int_val = val.int_val;
-            val.type = TYPE_FLOAT;
-            val.float_val = static_cast<float>(int_val);
-        } else if (val.type == TYPE_FLOAT && to == TYPE_INT) {
-            float float_val = val.float_val;
-            val.type = TYPE_INT;
-            val.int_val = static_cast<int>(float_val);
-        }
-        // 如果类型相同或无法转换，保持原样
-    }
 };
