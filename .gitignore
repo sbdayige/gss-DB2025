@@ -53,6 +53,6 @@ runS.sh
 runC.sh
 test.sh
 *_test_db/
-src/parser/lex.yy.cpp
+lex.yy.cpp
 src/parser/yacc.tab.cppsrc/parser/yacc.tab.h
 src/parser/yacc.tab.cpp
