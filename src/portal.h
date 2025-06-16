@@ -289,7 +289,12 @@ public:
         {
             // SELECT查询执行：遍历执行器树，输出结果集
             // 使用投影列信息格式化输出
-            ql->select_from(std::move(portal->root), std::move(portal->sel_cols), context);
+            // 获取DML计划中的limit值
+            int limit = 0;
+            if (auto dml_plan = std::dynamic_pointer_cast<DMLPlan>(portal->plan)) {
+                limit = dml_plan->limit_;
+            }
+            ql->select_from(std::move(portal->root), std::move(portal->sel_cols), context, limit);
             break;
         }
 
@@ -415,8 +420,23 @@ public:
             // 排序计划转换
             // ===============================
             // 递归转换子计划，创建排序执行器
-            return std::make_unique<SortExecutor>(convert_plan_executor(x->subplan_, context),
-                                                  x->sel_col_, x->is_desc_);
+            if (x->is_multi_column()) {
+                // 多列排序：构建列列表和排序方向列表
+                std::vector<TabCol> sort_tab_cols;
+                std::vector<bool> sort_directions;
+                
+                for (const auto& sort_col : x->sort_cols_) {
+                    sort_tab_cols.push_back(sort_col.col);
+                    sort_directions.push_back(sort_col.is_desc);
+                }
+                
+                return std::make_unique<SortExecutor>(convert_plan_executor(x->subplan_, context),
+                                                      sort_tab_cols, sort_directions);
+            } else {
+                // 单列排序：使用向后兼容的构造函数
+                return std::make_unique<SortExecutor>(convert_plan_executor(x->subplan_, context),
+                                                      x->sel_col_, x->is_desc_);
+            }
         }
         else if (auto x = std::dynamic_pointer_cast<FilterPlan>(plan))
         {

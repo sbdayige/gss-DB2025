@@ -558,23 +558,42 @@ std::shared_ptr<Plan> Planner::generate_sort_plan(std::shared_ptr<Query> query, 
     }
 
     // ===========================================
-    // 第三阶段：定位排序列信息
+    // 第三阶段：处理多列排序或单列排序
     // ===========================================
 
-    // 创建表列对象，用于存储找到的排序列的完整信息
-    TabCol sel_col;
+    std::vector<SortColumn> sort_cols;
 
-    // 在所有列元数据中查找与ORDER BY子句指定的列名匹配的列
-    for (auto &col : all_cols)
-    {
-        // 比较列名（不区分大小写的字符串比较）
-        if (col.name.compare(x->order->cols->col_name) == 0)
-        {
-            // 找到匹配的列，构建完整的表列信息
-            // 包括表名和列名，这对于多表查询中的列唯一标识至关重要
-            sel_col = {.tab_name = col.tab_name, .col_name = col.name};
-            break; // 找到后立即退出循环，避免重复处理
+    // 检查是否为多列排序
+    if (x->order->order_items.size() > 0) {
+        // 多列排序处理
+        for (const auto& order_item : x->order->order_items) {
+            // 查找排序列信息
+            for (auto &col : all_cols) {
+                if (col.name.compare(order_item->col->col_name) == 0) {
+                    TabCol sel_col = {.tab_name = col.tab_name, .col_name = col.name};
+                    bool is_desc = (order_item->orderby_dir == ast::OrderBy_DESC);
+                    sort_cols.push_back(SortColumn(sel_col, is_desc));
+                    break;
+                }
+            }
         }
+    } else {
+        // 单列排序处理（向后兼容）
+        TabCol sel_col;
+        
+        // 在所有列元数据中查找与ORDER BY子句指定的列名匹配的列
+        for (auto &col : all_cols) {
+            // 比较列名（不区分大小写的字符串比较）
+            if (col.name.compare(x->order->cols->col_name) == 0) {
+                // 找到匹配的列，构建完整的表列信息
+                // 包括表名和列名，这对于多表查询中的列唯一标识至关重要
+                sel_col = {.tab_name = col.tab_name, .col_name = col.name};
+                break; // 找到后立即退出循环，避免重复处理
+            }
+        }
+        
+        bool is_desc = (x->order->orderby_dir == ast::OrderBy_DESC);
+        sort_cols.push_back(SortColumn(sel_col, is_desc));
     }
 
     // ===========================================
@@ -585,10 +604,9 @@ std::shared_ptr<Plan> Planner::generate_sort_plan(std::shared_ptr<Query> query, 
     // 这遵循了查询处理的管道化模式：数据先经过基础计划（扫描、连接等），
     // 然后通过排序算子进行排序处理
     return std::make_shared<SortPlan>(
-        T_Sort,                                    // 计划类型：排序操作
-        std::move(plan),                           // 子计划：原始查询计划（数据源）
-        sel_col,                                   // 排序列：包含表名和列名的完整标识
-        x->order->orderby_dir == ast::OrderBy_DESC // 排序方向：true为降序，false为升序
+        T_Sort,                     // 计划类型：排序操作
+        std::move(plan),            // 子计划：原始查询计划（数据源）
+        std::move(sort_cols)        // 排序列列表：支持多列排序
     );
 
     // 注意：SortPlan会在执行时接收来自子计划的数据流，
@@ -830,10 +848,16 @@ std::shared_ptr<Plan> Planner::do_planner(std::shared_ptr<Query> query, Context 
         // 包括：逻辑优化、物理优化、连接顺序选择、排序处理等
         std::shared_ptr<Plan> projection = generate_select_plan(std::move(query), context);
 
+        // 获取limit值
+        int limit = 0;
+        if (x->limit_clause) {
+            limit = x->limit_clause->count;
+        }
+
         // 将SELECT查询结果包装为DML计划
         // 这样统一了所有SQL语句的执行接口
         plannerRoot = std::make_shared<DMLPlan>(T_Select, projection, std::string(), std::vector<Value>(),
-                                                std::vector<Condition>(), std::vector<SetClause>());
+                                                std::vector<Condition>(), std::vector<SetClause>(), limit);
     }
     else
     {

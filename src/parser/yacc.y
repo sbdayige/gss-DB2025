@@ -59,6 +59,8 @@ WHERE UPDATE SET SELECT INT CHAR FLOAT INDEX AND JOIN INNER LEFT RIGHT FULL ON A
 %type <sv_conds> whereClause optWhereClause havingClause optHavingClause
 %type <sv_orderby>  order_clause opt_order_clause
 %type <sv_orderby_dir> opt_asc_desc
+%type <sv_orderby_item> orderByItem
+%type <sv_orderby_items> orderByList
 %type <sv_setKnobType> set_knob_type
 
 %type <sv_agg_expr> aggregateExpr
@@ -600,11 +602,34 @@ opt_order_clause:
     ;
 
 order_clause:
-      col  opt_asc_desc 
+    orderByList
     { 
+        $$ = std::make_shared<OrderBy>($1);
+    }
+    |   col  opt_asc_desc 
+    { 
+        // 向后兼容：单列排序
         $$ = std::make_shared<OrderBy>($1, $2);
     }
     ;   
+
+orderByList:
+    orderByItem
+    {
+        $$ = std::vector<std::shared_ptr<OrderByItem>>{$1};
+    }
+    |   orderByList ',' orderByItem
+    {
+        $$.push_back($3);
+    }
+    ;
+
+orderByItem:
+    col opt_asc_desc
+    {
+        $$ = std::make_shared<OrderByItem>($1, $2);
+    }
+    ;
 
 opt_asc_desc:
     ASC          { $$ = OrderBy_ASC;     }

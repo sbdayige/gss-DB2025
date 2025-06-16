@@ -475,21 +475,67 @@ namespace ast
     };
 
     /**
+     * @brief 单个排序项AST节点
+     *
+     * 表示ORDER BY子句中的单个排序项，包含列引用和排序方向
+     * 例如：ORDER BY name ASC, age DESC 中的 "name ASC" 和 "age DESC"
+     *
+     * @param col 排序列引用
+     * @param orderby_dir 排序方向（ASC/DESC）
+     */
+    struct OrderByItem : public TreeNode
+    {
+        std::shared_ptr<Col> col;   // 排序列
+        OrderByDir orderby_dir;     // 排序方向
+
+        OrderByItem(std::shared_ptr<Col> col_, OrderByDir orderby_dir_) 
+            : col(std::move(col_)), orderby_dir(orderby_dir_) {}
+    };
+
+    /**
      * @brief ORDER BY子句AST节点
      *
-     * 表示SELECT语句中的ORDER BY子句，指定排序的列和排序方向
-     * 例如：SELECT * FROM student ORDER BY age DESC
-     * 其中 "age DESC" 就是OrderBy节点
+     * 表示SELECT语句中的ORDER BY子句，支持多列排序
+     * 例如：SELECT * FROM student ORDER BY age DESC, name ASC
      *
-     * @param cols 排序列引用
-     * @param orderby_dir 排序方向（ASC/DESC）
+     * @param order_items 排序项列表，支持多列排序
+     * @param cols 排序列引用（为了向后兼容保留）
+     * @param orderby_dir 排序方向（为了向后兼容保留）
      */
     struct OrderBy : public TreeNode
     {
-        std::shared_ptr<Col> cols; // 排序列
-        OrderByDir orderby_dir;    // 排序方向
+        std::vector<std::shared_ptr<OrderByItem>> order_items; // 多列排序项列表
+        std::shared_ptr<Col> cols; // 排序列（向后兼容）
+        OrderByDir orderby_dir;    // 排序方向（向后兼容）
 
-        OrderBy(std::shared_ptr<Col> cols_, OrderByDir orderby_dir_) : cols(std::move(cols_)), orderby_dir(std::move(orderby_dir_)) {}
+        // 新的构造函数：支持多列排序
+        OrderBy(std::vector<std::shared_ptr<OrderByItem>> order_items_) 
+            : order_items(std::move(order_items_)), orderby_dir(OrderBy_DEFAULT) 
+        {
+            // 为了向后兼容，如果只有一列，也设置cols和orderby_dir
+            if (!order_items.empty()) {
+                cols = order_items[0]->col;
+                orderby_dir = order_items[0]->orderby_dir;
+            }
+        }
+
+        // 向后兼容的构造函数：单列排序
+        OrderBy(std::shared_ptr<Col> cols_, OrderByDir orderby_dir_) 
+            : cols(std::move(cols_)), orderby_dir(orderby_dir_) 
+        {
+            // 创建对应的order_items
+            order_items.push_back(std::make_shared<OrderByItem>(cols, orderby_dir));
+        }
+
+        // 检查是否为多列排序
+        bool is_multi_column() const {
+            return order_items.size() > 1;
+        }
+
+        // 获取排序列数量
+        size_t column_count() const {
+            return order_items.size();
+        }
     };
 
     /**
@@ -803,6 +849,8 @@ namespace ast
 
         // ===== ORDER BY相关 =====
         std::shared_ptr<OrderBy> sv_orderby; // ORDER BY子句
+        std::shared_ptr<OrderByItem> sv_orderby_item; // 单个排序项
+        std::vector<std::shared_ptr<OrderByItem>> sv_orderby_items; // 排序项列表
 
         // ===== 系统配置相关 =====
         SetKnobType sv_setKnobType; // 系统配置参数类型
