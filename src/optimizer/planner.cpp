@@ -12,7 +12,6 @@ See the Mulan PSL v2 for more details. */
 
 #include <algorithm>
 #include <climits>
-#include <iostream>
 #include <memory>
 #include <set>
 #include <unordered_map>
@@ -27,7 +26,6 @@ See the Mulan PSL v2 for more details. */
 #include "execution/executor_update.h"
 #include "index/ix.h"
 #include "record/rm.h"
-#include "record_printer.h"
 
 bool Planner::get_index_cols(std::string tab_name, std::vector<Condition> curr_conds, std::vector<std::string> &index_col_names) {
     index_col_names.clear();
@@ -89,7 +87,6 @@ bool Planner::get_index_cols(std::string tab_name, std::vector<Condition> curr_c
 }
 
 std::shared_ptr<Query> Planner::logical_optimization(std::shared_ptr<Query> query, Context *context) {
-    // 3. 连接顺序优化 (Join Order Optimization)
     query = join_order_optimization(query);
 
     return query;
@@ -127,8 +124,6 @@ std::shared_ptr<Plan> Planner::make_one_rel(std::shared_ptr<Query> query) {
         for (const auto &join_expr : x->jointree) {
             std::string left_table = join_expr->left;
             std::string right_table = join_expr->right_ref->tab_name;
-            std::cout << "[DEBUG] Found JOIN: " << left_table << " -> " << right_table
-                      << ", type=" << join_expr->type << std::endl;
             join_type_map[{left_table, right_table}] = join_expr->type;
         }
     }
@@ -159,9 +154,6 @@ std::shared_ptr<Plan> Planner::make_one_rel(std::shared_ptr<Query> query) {
                 // 其他情况是连接条件，不在这里处理
             }
         }
-
-        // 获取表的实际记录数量用于优化
-        size_t table_cardinality = estimate_table_cardinality(tables[i]);
 
         // 检查当前表是否有可用的索引来优化查询
         std::vector<std::string> index_col_names;
@@ -252,23 +244,18 @@ std::shared_ptr<Plan> Planner::make_one_rel(std::shared_ptr<Query> query) {
 
             // 确定连接类型 - 检查当前表是否与已连接表之间有特定的JOIN类型
             JoinType current_join_type = INNER_JOIN;  // 默认为内连接
-            std::cout << "[DEBUG] Looking for JOIN type for table: " << next_table << std::endl;
 
             // 遍历已连接的表，找到与当前表的连接类型
             for (size_t j = 0; j < i; j++) {
                 auto join_key = std::make_pair(tables[j], next_table);
-                std::cout << "[DEBUG] Checking key: " << tables[j] << " -> " << next_table << std::endl;
                 if (join_type_map.find(join_key) != join_type_map.end()) {
                     current_join_type = join_type_map[join_key];
-                    std::cout << "[DEBUG] Found JOIN type: " << current_join_type << std::endl;
                     break;
                 }
                 // 也检查反向连接
                 auto reverse_join_key = std::make_pair(next_table, tables[j]);
-                std::cout << "[DEBUG] Checking reverse key: " << next_table << " -> " << tables[j] << std::endl;
                 if (join_type_map.find(reverse_join_key) != join_type_map.end()) {
                     current_join_type = join_type_map[reverse_join_key];
-                    std::cout << "[DEBUG] Found reverse JOIN type: " << current_join_type << std::endl;
                     break;
                 }
             }
@@ -413,24 +400,6 @@ std::shared_ptr<Plan> Planner::generate_sort_plan(std::shared_ptr<Query> query, 
 
     // 注意：SortPlan会在执行时接收来自子计划的数据流，
     // 对其进行排序后向上层计划提供有序的数据流
-}
-
-/**
- * @brief select plan 生成
- *
- * @param sel_cols select plan 选取的列
- * @param tab_names select plan 目标的表
- * @param conds select plan 选取条件
- */
-std::shared_ptr<Plan> Planner::generate_select_plan(std::shared_ptr<Query> query, Context *context) {
-    // 逻辑优化
-    query = logical_optimization(std::move(query), context);
-
-    // 物理优化
-
-    std::shared_ptr<Plan> plannerRoot = physical_optimization(query, context);
-
-    return plannerRoot;
 }
 
 /**
@@ -591,7 +560,7 @@ std::shared_ptr<Plan> Planner::do_planner(std::shared_ptr<Query> query, Context 
         auto table_alias_map = query->table_alias_map;
         bool is_select_star = query->is_select_star;
 
-        std::shared_ptr<Plan> projection = generate_select_plan(std::move(query), context);
+        std::shared_ptr<Plan> projection = physical_optimization(std::move(query), context);
 
         plannerRoot = std::make_shared<DMLPlan>(T_Explain, projection, std::string(), std::vector<Value>(),
                                                 std::vector<Condition>(), std::vector<SetClause>(), table_alias_map, is_select_star);
@@ -607,7 +576,7 @@ std::shared_ptr<Plan> Planner::do_planner(std::shared_ptr<Query> query, Context 
 
         // 调用专门的SELECT计划生成器进行复杂的查询优化
         // 包括：逻辑优化、物理优化、连接顺序选择、排序处理等
-        std::shared_ptr<Plan> projection = generate_select_plan(std::move(query), context);
+        std::shared_ptr<Plan> projection = physical_optimization(std::move(query), context);
 
         // 将SELECT查询结果包装为DML计划
         // 这样统一了所有SQL语句的执行接口
@@ -925,9 +894,6 @@ size_t Planner::estimate_join_with_intermediate_result(size_t intermediate_size,
  * @return 插入Project节点后的计划树
  */
 std::shared_ptr<Plan> Planner::apply_projection_pushdown(std::shared_ptr<Plan> plan, std::shared_ptr<Query> query) {
-    if (!plan)
-        return plan;
-
     // 获取SELECT语句
     auto select_stmt = std::dynamic_pointer_cast<ast::SelectStmt>(query->parse);
     if (!select_stmt)
@@ -980,9 +946,6 @@ std::shared_ptr<Plan> Planner::insert_project_nodes(std::shared_ptr<Plan> plan,
                                                     const std::set<std::string> &needed_columns,
                                                     const std::vector<TabCol> &select_cols,
                                                     std::shared_ptr<Query> query) {
-    if (!plan)
-        return plan;
-
     // 根据计划类型决定如何插入Project节点
     if (auto join_plan = std::dynamic_pointer_cast<JoinPlan>(plan)) {
         // 对于Join节点，递归处理左右子树
@@ -1181,9 +1144,6 @@ void Planner::clear_conditions_from_plan(std::shared_ptr<Plan> plan) {
  * @param join_columns 收集到的JOIN列集合（输出参数）
  */
 void Planner::collect_join_columns_from_plan(std::shared_ptr<Plan> plan, std::set<std::string> &join_columns) {
-    if (!plan)
-        return;
-
     if (auto join_plan = std::dynamic_pointer_cast<JoinPlan>(plan)) {
         // 收集当前JOIN节点的条件中涉及的列
         for (const auto &cond : join_plan->conds_) {
@@ -1207,9 +1167,6 @@ void Planner::collect_join_columns_from_plan(std::shared_ptr<Plan> plan, std::se
  * @brief 从计划树中收集表名
  */
 void Planner::collect_table_names_from_plan(std::shared_ptr<Plan> plan, std::set<std::string> &table_names) {
-    if (!plan)
-        return;
-
     if (auto scan_plan = std::dynamic_pointer_cast<ScanPlan>(plan)) {
         table_names.insert(scan_plan->tab_name_);
     } else if (auto join_plan = std::dynamic_pointer_cast<JoinPlan>(plan)) {
