@@ -368,12 +368,6 @@ std::shared_ptr<Plan> Planner::generate_sort_plan(std::shared_ptr<Query> query, 
     if (!x->has_sort) {
         return plan;
     }
-
-    // ===========================================
-    // 第二阶段：收集表列元数据信息
-    // ===========================================
-
-    // 获取查询涉及的所有表名
     std::vector<std::string> tables = query->tables;
 
     // 创建所有列的元数据集合，用于后续的排序列查找
