@@ -36,6 +36,10 @@ class Planner {
    private:
     std::shared_ptr<Query> logical_optimization(std::shared_ptr<Query> query, Context *context);
 
+    std::shared_ptr<Query> predicate_pushdown(std::shared_ptr<Query> query);
+
+    std::shared_ptr<Query> projection_pushdown(std::shared_ptr<Query> query);
+
     std::shared_ptr<Query> join_order_optimization(std::shared_ptr<Query> query);
 
     size_t estimate_table_cardinality(const std::string &table_name);
