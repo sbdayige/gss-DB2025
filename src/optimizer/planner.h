@@ -34,12 +34,7 @@ class Planner {
     void set_enable_sortmerge_join(bool set_val) { enable_sortmerge_join = set_val; }
 
    private:
-
     std::shared_ptr<Query> logical_optimization(std::shared_ptr<Query> query, Context *context);
-
-    std::shared_ptr<Query> predicate_pushdown(std::shared_ptr<Query> query);
-
-    std::shared_ptr<Query> projection_pushdown(std::shared_ptr<Query> query);
 
     std::shared_ptr<Query> join_order_optimization(std::shared_ptr<Query> query);
 
