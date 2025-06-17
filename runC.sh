@@ -9,6 +9,7 @@ fi
 # 创建测试SQL文件
 
 cat > test_commands.sql << EOF
+
 create table warehouse (w_id int, name char(8));
 
 insert into warehouse values (10 , 'qweruiop');
@@ -18,20 +19,6 @@ insert into warehouse values (534, 'asdfhjkl');
 insert into warehouse values (100,'qwerghjk');
 
 insert into warehouse values (500,'bgtyhnmj');
-
-create index warehouse(w_id);
-
-select * from warehouse where w_id = 10;
-
-select * from warehouse where w_id < 534 and w_id > 100;
-
-drop index warehouse(w_id);
-
-create index warehouse(name);
-
-select * from warehouse where name = 'qweruiop';
-
-
 
 
 EOF
