@@ -34,21 +34,6 @@ class Planner {
     void set_enable_sortmerge_join(bool set_val) { enable_sortmerge_join = set_val; }
 
    private:
-
-    std::shared_ptr<Query> logical_optimization(std::shared_ptr<Query> query, Context *context);
-
-    std::shared_ptr<Query> predicate_pushdown(std::shared_ptr<Query> query);
-
-    std::shared_ptr<Query> projection_pushdown(std::shared_ptr<Query> query);
-
-    std::shared_ptr<Query> join_order_optimization(std::shared_ptr<Query> query);
-
-    size_t estimate_table_cardinality(const std::string &table_name);
-
-    std::vector<std::string> greedy_join_order_optimization(
-        const std::vector<std::pair<std::string, size_t>> &table_stats,
-        const std::vector<Condition> &conditions);
-
     void collect_table_names_from_plan(std::shared_ptr<Plan> plan, std::set<std::string> &table_names);
 
     std::shared_ptr<Plan> apply_projection_pushdown(std::shared_ptr<Plan> plan, std::shared_ptr<Query> query);
@@ -68,24 +53,11 @@ class Planner {
 
     bool is_select_all(std::shared_ptr<ast::SelectStmt> select_stmt);
 
-    size_t estimate_join_result_size(const std::string &table1, const std::string &table2,
-                                     const std::unordered_map<std::string, size_t> &cardinality_map,
-                                     const std::unordered_map<std::string, std::set<std::string>> &join_graph,
-                                     const std::vector<Condition> &conditions);
-
-    size_t estimate_join_with_intermediate_result(size_t intermediate_size, const std::string &new_table,
-                                                  const std::unordered_map<std::string, size_t> &cardinality_map,
-                                                  const std::unordered_map<std::string, std::set<std::string>> &join_graph,
-                                                  const std::vector<Condition> &conditions,
-                                                  const std::set<std::string> &used_tables);
-
     std::shared_ptr<Plan> physical_optimization(std::shared_ptr<Query> query, Context *context);
 
     std::shared_ptr<Plan> make_one_rel(std::shared_ptr<Query> query);
 
     std::shared_ptr<Plan> generate_sort_plan(std::shared_ptr<Query> query, std::shared_ptr<Plan> plan);
-
-    std::shared_ptr<Plan> generate_select_plan(std::shared_ptr<Query> query, Context *context);
 
     bool get_index_cols(std::string tab_name, std::vector<Condition> curr_conds, std::vector<std::string> &index_col_names);
 

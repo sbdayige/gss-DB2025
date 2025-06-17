@@ -12,7 +12,6 @@ See the Mulan PSL v2 for more details. */
 
 #include <algorithm>
 #include <climits>
-#include <iostream>
 #include <memory>
 #include <set>
 #include <unordered_map>
@@ -27,7 +26,6 @@ See the Mulan PSL v2 for more details. */
 #include "execution/executor_update.h"
 #include "index/ix.h"
 #include "record/rm.h"
-#include "record_printer.h"
 
 bool Planner::get_index_cols(std::string tab_name, std::vector<Condition> curr_conds, std::vector<std::string> &index_col_names) {
     index_col_names.clear();
@@ -88,106 +86,14 @@ bool Planner::get_index_cols(std::string tab_name, std::vector<Condition> curr_c
     return false;
 }
 
-/**
- * @brief 表算子条件谓词生成
- *
- * @param conds 条件
- * @param tab_names 表名
- * @return std::vector<Condition>
- */
-std::vector<Condition> pop_conds(std::vector<Condition> &conds, std::string tab_names) {
-    // auto has_tab = [&](const std::string &tab_name) {
-    //     return std::find(tab_names.begin(), tab_names.end(), tab_name) != tab_names.end();
-    // };
-    std::vector<Condition> solved_conds;
-    auto it = conds.begin();
-    while (it != conds.end()) {
-        if ((tab_names.compare(it->lhs_col.tab_name) == 0 && it->is_rhs_val) || (it->lhs_col.tab_name.compare(it->rhs_col.tab_name) == 0)) {
-            solved_conds.emplace_back(std::move(*it));
-            it = conds.erase(it);
-        } else {
-            it++;
-        }
-    }
-    return solved_conds;
-}
-
-int push_conds(Condition *cond, std::shared_ptr<Plan> plan) {
-    if (auto x = std::dynamic_pointer_cast<ScanPlan>(plan)) {
-        if (x->tab_name_.compare(cond->lhs_col.tab_name) == 0) {
-            return 1;
-        } else if (x->tab_name_.compare(cond->rhs_col.tab_name) == 0) {
-            return 2;
-        } else {
-            return 0;
-        }
-    } else if (auto x = std::dynamic_pointer_cast<JoinPlan>(plan)) {
-        int left_res = push_conds(cond, x->left_);
-        // 条件已经下推到左子节点
-        if (left_res == 3) {
-            return 3;
-        }
-        int right_res = push_conds(cond, x->right_);
-        // 条件已经下推到右子节点
-        if (right_res == 3) {
-            return 3;
-        }
-        // 左子节点或右子节点有一个没有匹配到条件的列
-        if (left_res == 0 || right_res == 0) {
-            return left_res + right_res;
-        }
-        // 左子节点匹配到条件的右边
-        if (left_res == 2) {
-            // 需要将左右两边的条件变换位置
-            std::map<CompOp, CompOp> swap_op = {
-                {OP_EQ, OP_EQ},
-                {OP_NE, OP_NE},
-                {OP_LT, OP_GT},
-                {OP_GT, OP_LT},
-                {OP_LE, OP_GE},
-                {OP_GE, OP_LE},
-            };
-            std::swap(cond->lhs_col, cond->rhs_col);
-            cond->op = swap_op.at(cond->op);
-        }
-        x->conds_.emplace_back(std::move(*cond));
-        return 3;
-    }
-    return false;
-}
-
-std::shared_ptr<Plan> pop_scan(int *scantbl, std::string table, std::vector<std::string> &joined_tables,
-                               std::vector<std::shared_ptr<Plan>> plans) {
-    for (size_t i = 0; i < plans.size(); i++) {
-        auto x = std::dynamic_pointer_cast<ScanPlan>(plans[i]);
-        if (x->tab_name_.compare(table) == 0) {
-            scantbl[i] = 1;
-            joined_tables.emplace_back(x->tab_name_);
-            return plans[i];
-        }
-    }
-    return nullptr;
-}
-
-std::shared_ptr<Query> Planner::logical_optimization(std::shared_ptr<Query> query, Context *context) {
-    // 只对SELECT语句执行逻辑优化
-    if (!std::dynamic_pointer_cast<ast::SelectStmt>(query->parse)) {
-        return query;
-    }
-
-    // 1. 谓词下推 (Predicate Pushdown)
-    query = predicate_pushdown(query);
-
-    // 2. 投影下推 (Projection Pushdown)
-    query = projection_pushdown(query);
-
-    // 3. 连接顺序优化 (Join Order Optimization)
-    query = join_order_optimization(query);
-
-    return query;
-}
-
 std::shared_ptr<Plan> Planner::physical_optimization(std::shared_ptr<Query> query, Context *context) {
+    // 检查是否为SELECT语句，只有SELECT语句才需要物理优化
+    auto select_stmt = std::dynamic_pointer_cast<ast::SelectStmt>(query->parse);
+    if (!select_stmt) {
+        // 非SELECT语句，无需物理优化，直接返回空计划
+        return nullptr;
+    }
+
     // 第一步：构建基本的扫描和连接计划
     std::shared_ptr<Plan> plan = make_one_rel(query);
 
@@ -219,8 +125,6 @@ std::shared_ptr<Plan> Planner::make_one_rel(std::shared_ptr<Query> query) {
         for (const auto &join_expr : x->jointree) {
             std::string left_table = join_expr->left;
             std::string right_table = join_expr->right_ref->tab_name;
-            std::cout << "[DEBUG] Found JOIN: " << left_table << " -> " << right_table
-                      << ", type=" << join_expr->type << std::endl;
             join_type_map[{left_table, right_table}] = join_expr->type;
         }
     }
@@ -251,9 +155,6 @@ std::shared_ptr<Plan> Planner::make_one_rel(std::shared_ptr<Query> query) {
                 // 其他情况是连接条件，不在这里处理
             }
         }
-
-        // 获取表的实际记录数量用于优化
-        size_t table_cardinality = estimate_table_cardinality(tables[i]);
 
         // 检查当前表是否有可用的索引来优化查询
         std::vector<std::string> index_col_names;
@@ -344,23 +245,18 @@ std::shared_ptr<Plan> Planner::make_one_rel(std::shared_ptr<Query> query) {
 
             // 确定连接类型 - 检查当前表是否与已连接表之间有特定的JOIN类型
             JoinType current_join_type = INNER_JOIN;  // 默认为内连接
-            std::cout << "[DEBUG] Looking for JOIN type for table: " << next_table << std::endl;
 
             // 遍历已连接的表，找到与当前表的连接类型
             for (size_t j = 0; j < i; j++) {
                 auto join_key = std::make_pair(tables[j], next_table);
-                std::cout << "[DEBUG] Checking key: " << tables[j] << " -> " << next_table << std::endl;
                 if (join_type_map.find(join_key) != join_type_map.end()) {
                     current_join_type = join_type_map[join_key];
-                    std::cout << "[DEBUG] Found JOIN type: " << current_join_type << std::endl;
                     break;
                 }
                 // 也检查反向连接
                 auto reverse_join_key = std::make_pair(next_table, tables[j]);
-                std::cout << "[DEBUG] Checking reverse key: " << next_table << " -> " << tables[j] << std::endl;
                 if (join_type_map.find(reverse_join_key) != join_type_map.end()) {
                     current_join_type = join_type_map[reverse_join_key];
-                    std::cout << "[DEBUG] Found reverse JOIN type: " << current_join_type << std::endl;
                     break;
                 }
             }
@@ -505,24 +401,6 @@ std::shared_ptr<Plan> Planner::generate_sort_plan(std::shared_ptr<Query> query, 
 
     // 注意：SortPlan会在执行时接收来自子计划的数据流，
     // 对其进行排序后向上层计划提供有序的数据流
-}
-
-/**
- * @brief select plan 生成
- *
- * @param sel_cols select plan 选取的列
- * @param tab_names select plan 目标的表
- * @param conds select plan 选取条件
- */
-std::shared_ptr<Plan> Planner::generate_select_plan(std::shared_ptr<Query> query, Context *context) {
-    // 逻辑优化
-    query = logical_optimization(std::move(query), context);
-
-    // 物理优化
-
-    std::shared_ptr<Plan> plannerRoot = physical_optimization(query, context);
-
-    return plannerRoot;
 }
 
 /**
@@ -683,7 +561,7 @@ std::shared_ptr<Plan> Planner::do_planner(std::shared_ptr<Query> query, Context 
         auto table_alias_map = query->table_alias_map;
         bool is_select_star = query->is_select_star;
 
-        std::shared_ptr<Plan> projection = generate_select_plan(std::move(query), context);
+        std::shared_ptr<Plan> projection = physical_optimization(std::move(query), context);
 
         plannerRoot = std::make_shared<DMLPlan>(T_Explain, projection, std::string(), std::vector<Value>(),
                                                 std::vector<Condition>(), std::vector<SetClause>(), table_alias_map, is_select_star);
@@ -699,7 +577,7 @@ std::shared_ptr<Plan> Planner::do_planner(std::shared_ptr<Query> query, Context 
 
         // 调用专门的SELECT计划生成器进行复杂的查询优化
         // 包括：逻辑优化、物理优化、连接顺序选择、排序处理等
-        std::shared_ptr<Plan> projection = generate_select_plan(std::move(query), context);
+        std::shared_ptr<Plan> projection = physical_optimization(std::move(query), context);
 
         // 将SELECT查询结果包装为DML计划
         // 这样统一了所有SQL语句的执行接口
@@ -731,351 +609,7 @@ std::shared_ptr<Plan> Planner::do_planner(std::shared_ptr<Query> query, Context 
     return plannerRoot;
 }
 
-// ========== 查询优化算法实现 ==========
-
-/**
- * @brief 谓词下推优化实现
- * @param query 待优化的查询对象
- * @return 优化后的查询对象
- * @details 将WHERE条件尽可能下推到数据源附近，减少中间结果的数据量
- */
-std::shared_ptr<Query> Planner::predicate_pushdown(std::shared_ptr<Query> query) {
-    // 谓词下推优化：将选择操作尽可能下推到扫描操作附近
-    // 目前在make_one_rel中已经实现了基本的条件下推逻辑
-    // 这里可以添加更复杂的谓词下推规则，比如：
-    // 1. 跨连接的条件下推
-    // 2. 复杂表达式的简化和下推
-    // 3. 条件的重新排序以提高过滤效率
-
-    // 当前实现：保持现有的条件下推逻辑不变
-    // 在make_one_rel中的pop_conds函数已经实现了基本的单表条件下推
-
-    return query;
-}
-
-/**
- * @brief 投影下推优化实现
- * @param query 待优化的查询对象
- * @return 优化后的查询对象
- * @details 将SELECT列选择尽可能下推，减少不必要的列传输
- */
-std::shared_ptr<Query> Planner::projection_pushdown(std::shared_ptr<Query> query) {
-    // 投影下推优化：只传输查询真正需要的列
-    // 分析SELECT子句和WHERE子句中用到的列，
-    // 确保只从存储层读取必要的列数据
-
-    auto select_stmt = std::dynamic_pointer_cast<ast::SelectStmt>(query->parse);
-    if (!select_stmt) {
-        return query;
-    }
-
-    // 收集真正需要的列
-    std::set<std::string> needed_cols;
-
-    // 1. 添加SELECT子句中的列
-    for (const auto &col : query->cols) {
-        needed_cols.insert(col.tab_name + "." + col.col_name);
-    }
-
-    // 2. 添加WHERE条件中涉及的列
-    for (const auto &cond : query->conds) {
-        needed_cols.insert(cond.lhs_col.tab_name + "." + cond.lhs_col.col_name);
-        if (!cond.is_rhs_val) {
-            needed_cols.insert(cond.rhs_col.tab_name + "." + cond.rhs_col.col_name);
-        }
-    }
-
-    // 3. 如果有ORDER BY，添加排序列
-    if (select_stmt->has_sort && select_stmt->order) {
-        // 需要根据具体的AST结构来获取排序列信息
-        // 这里简化处理，实际实现需要根据ast::OrderBy的结构调整
-    }
-
-    // 当前简化实现：保持原有列选择不变
-    // 完整的投影下推需要更深入的执行计划树分析
-
-    return query;
-}
-
-/**
- * @brief 连接顺序优化实现
- * @param query 待优化的查询对象
- * @return 优化后的查询对象
- * @details 使用贪心算法基于表的基数(cardinality)优化连接顺序
- */
-std::shared_ptr<Query> Planner::join_order_optimization(std::shared_ptr<Query> query) {
-    // 连接顺序优化：使用贪心算法基于表基数进行优化
-    // 基本策略：优先连接小表，减少中间结果的大小
-
-    if (query->tables.size() <= 2) {
-        // 对于单表或两表查询，无需优化连接顺序
-        return query;
-    }
-
-    // 收集每个表的统计信息（基数估计）
-    std::vector<std::pair<std::string, size_t>> table_stats;
-
-    for (const auto &table_name : query->tables) {
-        try {
-            // 获取表的实际行数估计
-            size_t estimated_cardinality = estimate_table_cardinality(table_name);
-            table_stats.emplace_back(table_name, estimated_cardinality);
-        } catch (...) {
-            // 如果无法获取表信息，使用默认值
-            table_stats.emplace_back(table_name, 1000);
-        }
-    }
-
-    // 实现贪心连接顺序优化算法
-    std::vector<std::string> optimized_tables = greedy_join_order_optimization(table_stats, query->conds);
-
-    query->tables = std::move(optimized_tables);
-
-    return query;
-}
-
-/**
- * @brief 估算表的行数基数
- * @param table_name 表名
- * @return 估算的表行数
- * @details 通过扫描表文件的页面来估算实际记录数量
- */
-size_t Planner::estimate_table_cardinality(const std::string &table_name) {
-    try {
-        // 获取表的文件句柄
-        if (sm_manager_->fhs_.find(table_name) == sm_manager_->fhs_.end()) {
-            // 表文件未打开，使用默认估计值
-            return 1000;
-        }
-
-        auto &file_handle = sm_manager_->fhs_[table_name];
-        auto file_hdr = file_handle->get_file_hdr();
-
-        // 尝试通过实际扫描获取更准确的记录数
-        size_t actual_records = 0;
-        try {
-            // 遍历所有数据页面，统计实际记录数
-            for (int page_no = 1; page_no < file_hdr.num_pages; ++page_no) {
-                auto page_handle = file_handle->fetch_page_handle(page_no);
-                // 使用page_hdr成员变量而不是get_page_hdr()方法
-                actual_records += page_handle.page_hdr->num_records;
-            }
-
-            return actual_records > 0 ? actual_records : 1;
-
-        } catch (const std::exception &e) {
-            // 如果扫描失败，回退到估算方法
-        } catch (...) {
-            // 如果扫描失败，回退到估算方法
-        }
-
-        // 回退到原来的估算方法，但调整估算策略
-        size_t estimated_pages = file_hdr.num_pages > 1 ? file_hdr.num_pages - 1 : 0;  // 减去文件头页面
-
-        // 使用更保守的估算：假设页面利用率为30%而不是70%
-        size_t estimated_records = estimated_pages * file_hdr.num_records_per_page * 0.3;
-
-        return estimated_records > 0 ? estimated_records : 1;  // 至少返回1避免除零错误
-    } catch (const std::exception &e) {
-        // 如果出现任何错误，返回默认值
-        return 1000;
-    } catch (...) {
-        // 如果出现任何错误，返回默认值
-        return 1000;
-    }
-}
-
-/**
- * @brief 贪心连接顺序优化算法
- * @param table_stats 表的统计信息（表名和基数）
- * @param conditions 连接条件列表
- * @return 优化后的表顺序
- * @details 实现贪心算法：从最小的两个表开始，逐步添加能最小化中间结果大小的表
- */
-std::vector<std::string> Planner::greedy_join_order_optimization(
-    const std::vector<std::pair<std::string, size_t>> &table_stats,
-    const std::vector<Condition> &conditions) {
-    if (table_stats.size() <= 2) {
-        // 对于两个表或更少，直接按基数排序
-        std::vector<std::pair<std::string, size_t>> sorted_stats = table_stats;
-        std::sort(sorted_stats.begin(), sorted_stats.end(),
-                  [](const auto &a, const auto &b) { return a.second < b.second; });
-
-        std::vector<std::string> result;
-        for (const auto &stat : sorted_stats) {
-            result.push_back(stat.first);
-        }
-        return result;
-    }
-
-    // 创建表名到基数的映射
-    std::unordered_map<std::string, size_t> cardinality_map;
-    for (const auto &stat : table_stats) {
-        cardinality_map[stat.first] = stat.second;
-    }
-
-    // 分析连接图：找出哪些表之间有连接条件
-    std::unordered_map<std::string, std::set<std::string>> join_graph;
-    for (const auto &cond : conditions) {
-        if (!cond.is_rhs_val) {  // 只考虑表间连接条件
-            join_graph[cond.lhs_col.tab_name].insert(cond.rhs_col.tab_name);
-            join_graph[cond.rhs_col.tab_name].insert(cond.lhs_col.tab_name);
-        }
-    }
-
-    std::vector<std::string> result;
-    std::set<std::string> used_tables;
-
-    // 第一步：找出基数最小的两个表作为起始点
-    std::vector<std::pair<std::string, size_t>> sorted_stats = table_stats;
-    std::sort(sorted_stats.begin(), sorted_stats.end(),
-              [](const auto &a, const auto &b) { return a.second < b.second; });
-
-    result.push_back(sorted_stats[0].first);
-    used_tables.insert(sorted_stats[0].first);
-    size_t current_result_size = cardinality_map[sorted_stats[0].first];
-
-    if (sorted_stats.size() > 1) {
-        result.push_back(sorted_stats[1].first);
-        used_tables.insert(sorted_stats[1].first);
-
-        // 估算初始两表连接的结果大小
-        current_result_size = estimate_join_result_size(
-            sorted_stats[0].first, sorted_stats[1].first,
-            cardinality_map, join_graph, conditions);
-    }
-
-    // 第二步：贪心地添加剩余的表，每次选择使中间结果最小的表
-    while (used_tables.size() < table_stats.size()) {
-        std::string best_table;
-        size_t min_result_size = SIZE_MAX;
-
-        for (const auto &stat : table_stats) {
-            const std::string &table = stat.first;
-            if (used_tables.count(table)) continue;  // 已经使用过的表
-
-            // 检查这个表是否与已选择的表集合有连接条件
-            bool has_join_condition = false;
-            for (const std::string &used_table : used_tables) {
-                if (join_graph[table].count(used_table)) {
-                    has_join_condition = true;
-                    break;
-                }
-            }
-
-            // 估算加入这个表后的中间结果大小
-            size_t estimated_result_size;
-            if (has_join_condition) {
-                // 有连接条件：使用连接选择性估算
-                estimated_result_size = estimate_join_with_intermediate_result(
-                    current_result_size, table, cardinality_map, join_graph, conditions, used_tables);
-            } else {
-                // 没有连接条件：笛卡尔积
-                estimated_result_size = current_result_size * cardinality_map[table];
-            }
-
-            if (estimated_result_size < min_result_size) {
-                min_result_size = estimated_result_size;
-                best_table = table;
-            }
-        }
-
-        if (!best_table.empty()) {
-            result.push_back(best_table);
-            used_tables.insert(best_table);
-            current_result_size = min_result_size;
-        } else {
-            // 如果没有找到最佳表，选择剩余表中基数最小的
-            for (const auto &stat : sorted_stats) {
-                if (!used_tables.count(stat.first)) {
-                    result.push_back(stat.first);
-                    used_tables.insert(stat.first);
-                    break;
-                }
-            }
-        }
-    }
-
-    return result;
-}
-
-/**
- * @brief 估算两个表连接的结果大小
- * @param table1 第一个表名
- * @param table2 第二个表名
- * @param cardinality_map 表基数映射
- * @param join_graph 连接图
- * @param conditions 连接条件列表
- * @return 估算的连接结果大小
- */
-size_t Planner::estimate_join_result_size(const std::string &table1, const std::string &table2,
-                                          const std::unordered_map<std::string, size_t> &cardinality_map,
-                                          const std::unordered_map<std::string, std::set<std::string>> &join_graph,
-                                          const std::vector<Condition> &conditions) {
-    size_t card1 = cardinality_map.at(table1);
-    size_t card2 = cardinality_map.at(table2);
-
-    // 检查是否有连接条件
-    auto it1 = join_graph.find(table1);
-    bool has_join_condition = (it1 != join_graph.end() && it1->second.count(table2) > 0);
-
-    if (has_join_condition) {
-        // 有连接条件：使用简化的选择性估算
-        // 默认假设等值连接的选择性为 1/max(card1, card2)
-        // 这是一个常用的启发式规则
-        size_t max_card = std::max(card1, card2);
-        size_t result_size = (card1 * card2) / max_card;
-
-        return std::max(result_size, (size_t)1);  // 至少返回1
-    } else {
-        // 没有连接条件：笛卡尔积
-        size_t result_size = card1 * card2;
-        return result_size;
-    }
-}
-
-/**
- * @brief 估算中间结果与新表连接的结果大小
- * @param intermediate_size 当前中间结果的大小
- * @param new_table 要加入的新表
- * @param cardinality_map 表基数映射
- * @param join_graph 连接图
- * @param conditions 连接条件列表
- * @param used_tables 已使用的表集合
- * @return 估算的连接结果大小
- */
-size_t Planner::estimate_join_with_intermediate_result(size_t intermediate_size, const std::string &new_table,
-                                                       const std::unordered_map<std::string, size_t> &cardinality_map,
-                                                       const std::unordered_map<std::string, std::set<std::string>> &join_graph,
-                                                       const std::vector<Condition> &conditions,
-                                                       const std::set<std::string> &used_tables) {
-    size_t new_table_card = cardinality_map.at(new_table);
-
-    // 检查新表与已使用表集合是否有连接条件
-    bool has_join_condition = false;
-    auto it = join_graph.find(new_table);
-    if (it != join_graph.end()) {
-        for (const std::string &used_table : used_tables) {
-            if (it->second.count(used_table) > 0) {
-                has_join_condition = true;
-                break;
-            }
-        }
-    }
-
-    if (has_join_condition) {
-        // 有连接条件：使用启发式选择性估算
-        // 假设连接选择性为 1/max(intermediate_size, new_table_card)
-        size_t max_size = std::max(intermediate_size, new_table_card);
-        size_t result_size = (intermediate_size * new_table_card) / max_size;
-
-        return std::max(result_size, (size_t)1);  // 至少返回1
-    } else {
-        // 没有连接条件：笛卡尔积
-        size_t result_size = intermediate_size * new_table_card;
-        return result_size;
-    }
-}
+// ========== 投影下推优化 ==========
 
 /**
  * @brief 在物理计划中应用投影下推
@@ -1084,9 +618,6 @@ size_t Planner::estimate_join_with_intermediate_result(size_t intermediate_size,
  * @return 插入Project节点后的计划树
  */
 std::shared_ptr<Plan> Planner::apply_projection_pushdown(std::shared_ptr<Plan> plan, std::shared_ptr<Query> query) {
-    if (!plan)
-        return plan;
-
     // 获取SELECT语句
     auto select_stmt = std::dynamic_pointer_cast<ast::SelectStmt>(query->parse);
     if (!select_stmt)
@@ -1139,9 +670,6 @@ std::shared_ptr<Plan> Planner::insert_project_nodes(std::shared_ptr<Plan> plan,
                                                     const std::set<std::string> &needed_columns,
                                                     const std::vector<TabCol> &select_cols,
                                                     std::shared_ptr<Query> query) {
-    if (!plan)
-        return plan;
-
     // 根据计划类型决定如何插入Project节点
     if (auto join_plan = std::dynamic_pointer_cast<JoinPlan>(plan)) {
         // 对于Join节点，递归处理左右子树
@@ -1340,9 +868,6 @@ void Planner::clear_conditions_from_plan(std::shared_ptr<Plan> plan) {
  * @param join_columns 收集到的JOIN列集合（输出参数）
  */
 void Planner::collect_join_columns_from_plan(std::shared_ptr<Plan> plan, std::set<std::string> &join_columns) {
-    if (!plan)
-        return;
-
     if (auto join_plan = std::dynamic_pointer_cast<JoinPlan>(plan)) {
         // 收集当前JOIN节点的条件中涉及的列
         for (const auto &cond : join_plan->conds_) {
@@ -1366,9 +891,6 @@ void Planner::collect_join_columns_from_plan(std::shared_ptr<Plan> plan, std::se
  * @brief 从计划树中收集表名
  */
 void Planner::collect_table_names_from_plan(std::shared_ptr<Plan> plan, std::set<std::string> &table_names) {
-    if (!plan)
-        return;
-
     if (auto scan_plan = std::dynamic_pointer_cast<ScanPlan>(plan)) {
         table_names.insert(scan_plan->tab_name_);
     } else if (auto join_plan = std::dynamic_pointer_cast<JoinPlan>(plan)) {
