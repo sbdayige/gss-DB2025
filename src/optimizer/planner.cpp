@@ -1033,13 +1033,19 @@ size_t Planner::estimate_join_with_intermediate_result(size_t intermediate_size,
  * @return 插入Project节点后的计划树
  */
 std::shared_ptr<Plan> Planner::apply_projection_pushdown(std::shared_ptr<Plan> plan, std::shared_ptr<Query> query) {
+    std::cout << "[DEBUG] apply_projection_pushdown called" << std::endl;
+
     if (!plan)
         return plan;
 
     // 获取SELECT语句
     auto select_stmt = std::dynamic_pointer_cast<ast::SelectStmt>(query->parse);
-    if (!select_stmt)
+    if (!select_stmt) {
+        std::cout << "[DEBUG] Not a SELECT statement, returning original plan" << std::endl;
         return plan;
+    }
+
+    std::cout << "[DEBUG] SELECT statement detected, analyzing columns" << std::endl;
 
     // 分析查询中需要的列
     std::set<std::string> needed_columns;
@@ -1056,7 +1062,37 @@ std::shared_ptr<Plan> Planner::apply_projection_pushdown(std::shared_ptr<Plan> p
             needed_columns.insert(cond.rhs_col.tab_name + "." + cond.rhs_col.col_name);
         }
     }
+
+    // 添加聚合函数中涉及的列
+    for (const auto &agg_expr : query->agg_exprs) {
+        if (agg_expr->col && !agg_expr->col->col_name.empty() && agg_expr->col->col_name != "*") {
+            std::string col_fullname = agg_expr->col->tab_name + "." + agg_expr->col->col_name;
+            needed_columns.insert(col_fullname);
+            std::cout << "[DEBUG] Added aggregate column to needed_columns: " << col_fullname << std::endl;
+        }
+    }
+
+    // 添加GROUP BY列
+    for (const auto &group_col : query->group_by_cols) {
+        std::string col_fullname = group_col.tab_name + "." + group_col.col_name;
+        needed_columns.insert(col_fullname);
+        std::cout << "[DEBUG] Added GROUP BY column to needed_columns: " << col_fullname << std::endl;
+    }
+
+    // 添加HAVING条件中涉及的列
+    for (const auto &having_cond : query->having_conds) {
+        needed_columns.insert(having_cond.lhs_col.tab_name + "." + having_cond.lhs_col.col_name);
+        if (!having_cond.is_rhs_val) {
+            needed_columns.insert(having_cond.rhs_col.tab_name + "." + having_cond.rhs_col.col_name);
+        }
+    }
     collect_join_columns_from_plan(plan, needed_columns);
+
+    std::cout << "[DEBUG] Total needed_columns collected: ";
+    for (const auto &col : needed_columns) {
+        std::cout << col << " ";
+    }
+    std::cout << std::endl;
 
     // 根据要求：
     // - SELECT *：只在根节点添加Project节点
@@ -1105,10 +1141,38 @@ std::shared_ptr<Plan> Planner::insert_project_nodes(std::shared_ptr<Plan> plan,
         // 为每个Scan节点添加Project节点（除了SELECT *）
         std::vector<TabCol> table_needed_cols;
 
-        // 只添加SELECT子句中属于当前表的列
+        // 添加SELECT子句中属于当前表的列
         for (const auto &col : select_cols) {
             if (col.tab_name == table_name) {
                 table_needed_cols.push_back(col);
+            }
+        }
+
+        for (const auto &needed_col : needed_columns) {
+            size_t dot_pos = needed_col.find('.');
+            if (dot_pos != std::string::npos) {
+                std::string tab_name = needed_col.substr(0, dot_pos);
+                std::string col_name = needed_col.substr(dot_pos + 1);
+
+                if (tab_name == table_name) {
+                    TabCol tab_col;
+                    tab_col.tab_name = tab_name;
+                    tab_col.col_name = col_name;
+
+                    // 避免重复添加
+                    bool already_exists = false;
+                    for (const auto &existing_col : table_needed_cols) {
+                        if (existing_col.tab_name == tab_col.tab_name &&
+                            existing_col.col_name == tab_col.col_name) {
+                            already_exists = true;
+                            break;
+                        }
+                    }
+                    if (!already_exists) {
+                        table_needed_cols.push_back(tab_col);
+                        std::cout << "[DEBUG] Added needed column to scan: " << needed_col << std::endl;
+                    }
+                }
             }
         }
 
