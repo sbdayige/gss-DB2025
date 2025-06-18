@@ -1056,6 +1056,28 @@ std::shared_ptr<Plan> Planner::apply_projection_pushdown(std::shared_ptr<Plan> p
             needed_columns.insert(cond.rhs_col.tab_name + "." + cond.rhs_col.col_name);
         }
     }
+
+    for (const auto &agg_expr : query->agg_exprs) {
+        if (agg_expr->col != nullptr && !agg_expr->col->col_name.empty()) {
+            std::string tab_name = agg_expr->col->tab_name;
+            // 如果聚合函数列没有表名前缀，则需要为每个查询表都添加这个列
+            if (tab_name.empty()) {
+                for (const auto &table : query->tables) {
+                    std::string full_col_name = table + "." + agg_expr->col->col_name;
+                    needed_columns.insert(full_col_name);
+                }
+            } else {
+                std::string full_col_name = tab_name + "." + agg_expr->col->col_name;
+                needed_columns.insert(full_col_name);
+            }
+        }
+    }
+
+    // 添加GROUP BY列
+    for (const auto &group_col : query->group_by_cols) {
+        needed_columns.insert(group_col.tab_name + "." + group_col.col_name);
+    }
+
     collect_join_columns_from_plan(plan, needed_columns);
 
     // 根据要求：
@@ -1112,46 +1134,94 @@ std::shared_ptr<Plan> Planner::insert_project_nodes(std::shared_ptr<Plan> plan,
             }
         }
 
-        // 添加JOIN条件中需要的列（但不包括WHERE过滤条件中的列）
-        // 检查是否有JOIN操作，如果有，需要添加JOIN条件中涉及的列
-        std::set<std::string> join_columns;
-
-        // 从query的条件中收集JOIN条件涉及的列
+        // 2. 添加JOIN条件中需要的列（不包括WHERE过滤条件）
         for (const auto &cond : query->conds) {
             if (!cond.is_rhs_val) {  // JOIN条件：两边都是列
-                // 添加该条件涉及的列
+                // 添加JOIN条件中涉及的列
                 if (cond.lhs_col.tab_name == table_name) {
-                    join_columns.insert(cond.lhs_col.tab_name + "." + cond.lhs_col.col_name);
-                }
-                if (cond.rhs_col.tab_name == table_name) {
-                    join_columns.insert(cond.rhs_col.tab_name + "." + cond.rhs_col.col_name);
-                }
-            }
-        }
-
-        for (const auto &join_col : join_columns) {
-            size_t dot_pos = join_col.find('.');
-            if (dot_pos != std::string::npos) {
-                std::string tab_name = join_col.substr(0, dot_pos);
-                std::string col_name = join_col.substr(dot_pos + 1);
-
-                if (tab_name == table_name) {
-                    TabCol tab_col;
-                    tab_col.tab_name = tab_name;
-                    tab_col.col_name = col_name;
+                    TabCol join_col;
+                    join_col.tab_name = cond.lhs_col.tab_name;
+                    join_col.col_name = cond.lhs_col.col_name;
 
                     // 避免重复添加
                     bool already_exists = false;
                     for (const auto &existing_col : table_needed_cols) {
-                        if (existing_col.tab_name == tab_col.tab_name &&
-                            existing_col.col_name == tab_col.col_name) {
+                        if (existing_col.tab_name == join_col.tab_name &&
+                            existing_col.col_name == join_col.col_name) {
                             already_exists = true;
                             break;
                         }
                     }
                     if (!already_exists) {
-                        table_needed_cols.push_back(tab_col);
+                        table_needed_cols.push_back(join_col);
                     }
+                }
+                if (cond.rhs_col.tab_name == table_name) {
+                    TabCol join_col;
+                    join_col.tab_name = cond.rhs_col.tab_name;
+                    join_col.col_name = cond.rhs_col.col_name;
+
+                    // 避免重复添加
+                    bool already_exists = false;
+                    for (const auto &existing_col : table_needed_cols) {
+                        if (existing_col.tab_name == join_col.tab_name &&
+                            existing_col.col_name == join_col.col_name) {
+                            already_exists = true;
+                            break;
+                        }
+                    }
+                    if (!already_exists) {
+                        table_needed_cols.push_back(join_col);
+                    }
+                }
+            }
+            // 注意：WHERE过滤条件（cond.is_rhs_val == true）的列不需要添加到Project中
+            // 因为这些列只用于过滤，不需要传递给上层节点
+        }
+
+        // 3. 添加聚合函数和GROUP BY中需要的列
+        for (const auto &agg_expr : query->agg_exprs) {
+            if (agg_expr->col != nullptr && !agg_expr->col->col_name.empty()) {
+                std::string tab_name = agg_expr->col->tab_name;
+                if (tab_name.empty()) {
+                    // 如果没有表名前缀，假设是当前表
+                    tab_name = table_name;
+                }
+
+                if (tab_name == table_name) {
+                    TabCol agg_col;
+                    agg_col.tab_name = tab_name;
+                    agg_col.col_name = agg_expr->col->col_name;
+
+                    // 避免重复添加
+                    bool already_exists = false;
+                    for (const auto &existing_col : table_needed_cols) {
+                        if (existing_col.tab_name == agg_col.tab_name &&
+                            existing_col.col_name == agg_col.col_name) {
+                            already_exists = true;
+                            break;
+                        }
+                    }
+                    if (!already_exists) {
+                        table_needed_cols.push_back(agg_col);
+                    }
+                }
+            }
+        }
+
+        for (const auto &group_col : query->group_by_cols) {
+            if (group_col.tab_name == table_name) {
+                // 避免重复添加
+                bool already_exists = false;
+                for (const auto &existing_col : table_needed_cols) {
+                    if (existing_col.tab_name == group_col.tab_name &&
+                        existing_col.col_name == group_col.col_name) {
+                        already_exists = true;
+                        break;
+                    }
+                }
+                if (!already_exists) {
+                    table_needed_cols.push_back(group_col);
                 }
             }
         }
