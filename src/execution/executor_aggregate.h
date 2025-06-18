@@ -187,28 +187,20 @@ class AggregateExecutor : public AbstractExecutor {
 
             if (!agg_info.is_count_star) {
                 agg_info.col_name = agg_expr->col->col_name;
-                std::cout << "[DEBUG] Aggregate executor looking for column: " << agg_info.col_name << std::endl;
 
                 // 从子执行器中找到对应的列
                 auto& prev_cols = prev_->cols();
-                std::cout << "[DEBUG] Available columns in prev executor:" << std::endl;
-                for (const auto& col : prev_cols) {
-                    std::cout << "[DEBUG]   - " << col.tab_name << "." << col.name << " (offset: " << col.offset << ")" << std::endl;
-                }
 
                 // 查找列信息
                 std::vector<ColMeta>::const_iterator pos = prev_cols.end();
                 for (auto it = prev_cols.begin(); it != prev_cols.end(); ++it) {
-                    std::cout << "[DEBUG] Comparing: " << it->name << " with " << agg_info.col_name << std::endl;
                     if (it->name == agg_info.col_name) {
                         pos = it;
-                        std::cout << "[DEBUG] Found matching column: " << it->tab_name << "." << it->name << std::endl;
                         break;
                     }
                 }
 
                 if (pos == prev_cols.end()) {
-                    std::cout << "[DEBUG] Column not found in aggregate executor: " << agg_info.col_name << std::endl;
                     throw ColumnNotFoundError(agg_info.col_name);
                 }
 

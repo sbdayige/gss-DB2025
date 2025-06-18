@@ -129,13 +129,11 @@ std::shared_ptr<Query> Analyze::do_analyze(std::shared_ptr<ast::TreeNode> parse)
             }
 
             for (auto &sel_col : query->cols) {
-                std::cout << "[DEBUG] Validating SELECT column: " << sel_col.tab_name << "." << sel_col.col_name << std::endl;
                 if (has_semi_join) {
                     sel_col = check_column_with_semi_join_preference(all_cols, sel_col, alias_map, left_table_name);
                 } else {
                     sel_col = check_column_with_alias(all_cols, sel_col, alias_map);  // 列元数据校验（支持别名）
                 }
-                std::cout << "[DEBUG] SELECT column validated successfully: " << sel_col.tab_name << "." << sel_col.col_name << std::endl;
             }
         }
         // 处理where条件
@@ -263,20 +261,6 @@ std::shared_ptr<Query> Analyze::do_analyze(std::shared_ptr<ast::TreeNode> parse)
                     auto agg_expr = std::make_shared<ast::AggregateExpr>(agg_type, agg_col, col->alias);
                     query->agg_exprs.push_back(agg_expr);
                 }
-            }
-        }
-
-        // 验证聚合函数中使用的列是否存在
-        for (auto &agg_expr : query->agg_exprs) {
-            if (agg_expr->col != nullptr) {  // 不是COUNT(*)
-                std::cout << "DEBUG: Validating aggregate column: " << agg_expr->col->col_name << std::endl;
-                TabCol agg_col = {.tab_name = agg_expr->col->tab_name, .col_name = agg_expr->col->col_name};
-                // 验证聚合函数中引用的列是否存在
-                agg_col = check_column_with_alias(all_cols, agg_col, alias_map);
-                std::cout << "DEBUG: Aggregate column validated successfully: " << agg_col.tab_name << "." << agg_col.col_name << std::endl;
-                // 更新聚合表达式中的列信息
-                agg_expr->col->tab_name = agg_col.tab_name;
-                agg_expr->col->col_name = agg_col.col_name;
             }
         }
 
