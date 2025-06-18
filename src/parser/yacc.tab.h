@@ -36,10 +36,10 @@
    private implementation details that can be changed or removed.  */
 
 #ifndef YY_YY_HOME_GUO_CODE_COPY_GSS_DB2025_SRC_PARSER_YACC_TAB_H_INCLUDED
-# define YY_YY_HOME_GUO_CODE_COPY_GSS_DB2025_SRC_PARSER_YACC_TAB_H_INCLUDED
+#define YY_YY_HOME_GUO_CODE_COPY_GSS_DB2025_SRC_PARSER_YACC_TAB_H_INCLUDED
 /* Debug traces.  */
 #ifndef YYDEBUG
-# define YYDEBUG 0
+#define YYDEBUG 0
 #endif
 #if YYDEBUG
 extern int yydebug;
@@ -47,87 +47,81 @@ extern int yydebug;
 
 /* Token kinds.  */
 #ifndef YYTOKENTYPE
-# define YYTOKENTYPE
-  enum yytokentype
-  {
+#define YYTOKENTYPE
+enum yytokentype {
     YYEMPTY = -2,
-    YYEOF = 0,                     /* "end of file"  */
-    YYerror = 256,                 /* error  */
-    YYUNDEF = 257,                 /* "invalid token"  */
-    SHOW = 258,                    /* SHOW  */
-    TABLES = 259,                  /* TABLES  */
-    CREATE = 260,                  /* CREATE  */
-    TABLE = 261,                   /* TABLE  */
-    DROP = 262,                    /* DROP  */
-    DESC = 263,                    /* DESC  */
-    INSERT = 264,                  /* INSERT  */
-    INTO = 265,                    /* INTO  */
-    VALUES = 266,                  /* VALUES  */
-    DELETE = 267,                  /* DELETE  */
-    FROM = 268,                    /* FROM  */
-    ASC = 269,                     /* ASC  */
-    ORDER = 270,                   /* ORDER  */
-    BY = 271,                      /* BY  */
-    WHERE = 272,                   /* WHERE  */
-    UPDATE = 273,                  /* UPDATE  */
-    SET = 274,                     /* SET  */
-    SELECT = 275,                  /* SELECT  */
-    INT = 276,                     /* INT  */
-    CHAR = 277,                    /* CHAR  */
-    FLOAT = 278,                   /* FLOAT  */
-    INDEX = 279,                   /* INDEX  */
-    AND = 280,                     /* AND  */
-    JOIN = 281,                    /* JOIN  */
-    INNER = 282,                   /* INNER  */
-    LEFT = 283,                    /* LEFT  */
-    RIGHT = 284,                   /* RIGHT  */
-    FULL = 285,                    /* FULL  */
-    SEMI = 286,                    /* SEMI  */
-    ON = 287,                      /* ON  */
-    AS = 288,                      /* AS  */
-    EXIT = 289,                    /* EXIT  */
-    HELP = 290,                    /* HELP  */
-    TXN_BEGIN = 291,               /* TXN_BEGIN  */
-    TXN_COMMIT = 292,              /* TXN_COMMIT  */
-    TXN_ABORT = 293,               /* TXN_ABORT  */
-    TXN_ROLLBACK = 294,            /* TXN_ROLLBACK  */
-    ORDER_BY = 295,                /* ORDER_BY  */
-    ENABLE_NESTLOOP = 296,         /* ENABLE_NESTLOOP  */
-    ENABLE_SORTMERGE = 297,        /* ENABLE_SORTMERGE  */
-    LEQ = 298,                     /* LEQ  */
-    NEQ = 299,                     /* NEQ  */
-    GEQ = 300,                     /* GEQ  */
-    T_EOF = 301,                   /* T_EOF  */
-    EXPLAIN = 302,                 /* EXPLAIN  */
-    IDENTIFIER = 303,              /* IDENTIFIER  */
-    VALUE_STRING = 304,            /* VALUE_STRING  */
-    VALUE_INT = 305,               /* VALUE_INT  */
-    VALUE_FLOAT = 306,             /* VALUE_FLOAT  */
-    VALUE_BOOL = 307               /* VALUE_BOOL  */
-  };
-  typedef enum yytokentype yytoken_kind_t;
+    YYEOF = 0,              /* "end of file"  */
+    YYerror = 256,          /* error  */
+    YYUNDEF = 257,          /* "invalid token"  */
+    SHOW = 258,             /* SHOW  */
+    TABLES = 259,           /* TABLES  */
+    CREATE = 260,           /* CREATE  */
+    TABLE = 261,            /* TABLE  */
+    DROP = 262,             /* DROP  */
+    DESC = 263,             /* DESC  */
+    INSERT = 264,           /* INSERT  */
+    INTO = 265,             /* INTO  */
+    VALUES = 266,           /* VALUES  */
+    DELETE = 267,           /* DELETE  */
+    FROM = 268,             /* FROM  */
+    ASC = 269,              /* ASC  */
+    ORDER = 270,            /* ORDER  */
+    BY = 271,               /* BY  */
+    WHERE = 272,            /* WHERE  */
+    UPDATE = 273,           /* UPDATE  */
+    SET = 274,              /* SET  */
+    SELECT = 275,           /* SELECT  */
+    INT = 276,              /* INT  */
+    CHAR = 277,             /* CHAR  */
+    FLOAT = 278,            /* FLOAT  */
+    INDEX = 279,            /* INDEX  */
+    AND = 280,              /* AND  */
+    JOIN = 281,             /* JOIN  */
+    INNER = 282,            /* INNER  */
+    LEFT = 283,             /* LEFT  */
+    RIGHT = 284,            /* RIGHT  */
+    FULL = 285,             /* FULL  */
+    SEMI = 286,             /* SEMI  */
+    ON = 287,               /* ON  */
+    AS = 288,               /* AS  */
+    EXIT = 289,             /* EXIT  */
+    HELP = 290,             /* HELP  */
+    TXN_BEGIN = 291,        /* TXN_BEGIN  */
+    TXN_COMMIT = 292,       /* TXN_COMMIT  */
+    TXN_ABORT = 293,        /* TXN_ABORT  */
+    TXN_ROLLBACK = 294,     /* TXN_ROLLBACK  */
+    ORDER_BY = 295,         /* ORDER_BY  */
+    ENABLE_NESTLOOP = 296,  /* ENABLE_NESTLOOP  */
+    ENABLE_SORTMERGE = 297, /* ENABLE_SORTMERGE  */
+    LEQ = 298,              /* LEQ  */
+    NEQ = 299,              /* NEQ  */
+    GEQ = 300,              /* GEQ  */
+    T_EOF = 301,            /* T_EOF  */
+    EXPLAIN = 302,          /* EXPLAIN  */
+    IDENTIFIER = 303,       /* IDENTIFIER  */
+    VALUE_STRING = 304,     /* VALUE_STRING  */
+    VALUE_INT = 305,        /* VALUE_INT  */
+    VALUE_FLOAT = 306,      /* VALUE_FLOAT  */
+    VALUE_BOOL = 307        /* VALUE_BOOL  */
+};
+typedef enum yytokentype yytoken_kind_t;
 #endif
 
 /* Value type.  */
 
 /* Location type.  */
-#if ! defined YYLTYPE && ! defined YYLTYPE_IS_DECLARED
+#if !defined YYLTYPE && !defined YYLTYPE_IS_DECLARED
 typedef struct YYLTYPE YYLTYPE;
-struct YYLTYPE
-{
-  int first_line;
-  int first_column;
-  int last_line;
-  int last_column;
+struct YYLTYPE {
+    int first_line;
+    int first_column;
+    int last_line;
+    int last_column;
 };
-# define YYLTYPE_IS_DECLARED 1
-# define YYLTYPE_IS_TRIVIAL 1
+#define YYLTYPE_IS_DECLARED 1
+#define YYLTYPE_IS_TRIVIAL 1
 #endif
 
-
-
-
-int yyparse (void);
-
+int yyparse(void);
 
 #endif /* !YY_YY_HOME_GUO_CODE_COPY_GSS_DB2025_SRC_PARSER_YACC_TAB_H_INCLUDED  */

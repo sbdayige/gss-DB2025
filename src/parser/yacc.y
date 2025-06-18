@@ -25,6 +25,7 @@ using namespace ast;
 %token WHERE UPDATE SET SELECT INT CHAR FLOAT INDEX AND JOIN INNER LEFT RIGHT FULL SEMI
 %token ON AS EXIT HELP TXN_BEGIN TXN_COMMIT TXN_ABORT TXN_ROLLBACK ORDER_BY 
 %token ENABLE_NESTLOOP ENABLE_SORTMERGE
+%token GROUP HAVING LIMIT COUNT MAX MIN SUM AVG
 // non-keywords
 %token LEQ NEQ GEQ T_EOF
 %token EXPLAIN
@@ -47,7 +48,8 @@ using namespace ast;
 %type <sv_str> tbName colName
 %type <sv_strs> colNameList
 %type <sv_col> col
-%type <sv_cols> colList selector
+%type <sv_cols> colList selector groupByClause optGroupByClause
+%type <sv_col> selectExpr
 %type <sv_table_ref> tableRef
 %type <sv_table_refs> baseTableList tableList
 %type <sv_join_exprs> joinList
@@ -55,11 +57,16 @@ using namespace ast;
 %type <sv_join_type> joinType
 %type <sv_set_clause> setClause
 %type <sv_set_clauses> setClauses
-%type <sv_cond> condition
-%type <sv_conds> whereClause optWhereClause
+%type <sv_cond> condition havingCondition
+%type <sv_conds> whereClause optWhereClause havingClause optHavingClause
 %type <sv_orderby>  order_clause opt_order_clause
 %type <sv_orderby_dir> opt_asc_desc
+%type <sv_orderby_item> orderByItem
+%type <sv_orderby_items> orderByList
 %type <sv_setKnobType> set_knob_type
+
+%type <sv_agg_expr> aggregateExpr
+%type <sv_limit_clause> optLimitClause
 
 %%
 start:
@@ -166,13 +173,66 @@ dml:
     {
         $$ = std::make_shared<UpdateStmt>($2, $4, $5);
     }
-    |   SELECT selector FROM baseTableList joinList optWhereClause opt_order_clause
+    |   SELECT selector FROM baseTableList joinList optWhereClause optGroupByClause optHavingClause opt_order_clause optLimitClause
     {
-        $$ = std::make_shared<SelectStmt>($2, $4, $6, $5, $7);
+        // 收集聚合表达式
+        std::vector<std::shared_ptr<AggregateExpr>> agg_exprs;
+        for (auto& col : $2) {
+            // 检查列名是否表示聚合函数
+            if (col->col_name.find("COUNT(") == 0 || col->col_name.find("MAX(") == 0 || 
+                col->col_name.find("MIN(") == 0 || col->col_name.find("SUM(") == 0 || 
+                col->col_name.find("AVG(") == 0) {
+                // 根据列名重建聚合表达式
+                std::shared_ptr<AggregateExpr> agg_expr;
+                
+                if (col->col_name.find("COUNT(*)") == 0) {
+                    agg_expr = std::make_shared<AggregateExpr>(AGG_COUNT, nullptr, col->alias);
+                } else if (col->col_name.find("COUNT(") == 0) {
+                    // 提取列名
+                    std::string col_part = col->col_name.substr(6, col->col_name.length() - 7);
+                    auto col_obj = std::make_shared<Col>("", col_part);
+                    agg_expr = std::make_shared<AggregateExpr>(AGG_COUNT, col_obj, col->alias);
+                } else if (col->col_name.find("MAX(") == 0) {
+                    std::string col_part = col->col_name.substr(4, col->col_name.length() - 5);
+                    auto col_obj = std::make_shared<Col>("", col_part);
+                    agg_expr = std::make_shared<AggregateExpr>(AGG_MAX, col_obj, col->alias);
+                } else if (col->col_name.find("MIN(") == 0) {
+                    std::string col_part = col->col_name.substr(4, col->col_name.length() - 5);
+                    auto col_obj = std::make_shared<Col>("", col_part);
+                    agg_expr = std::make_shared<AggregateExpr>(AGG_MIN, col_obj, col->alias);
+                } else if (col->col_name.find("SUM(") == 0) {
+                    std::string col_part = col->col_name.substr(4, col->col_name.length() - 5);
+                    auto col_obj = std::make_shared<Col>("", col_part);
+                    agg_expr = std::make_shared<AggregateExpr>(AGG_SUM, col_obj, col->alias);
+                } else if (col->col_name.find("AVG(") == 0) {
+                    std::string col_part = col->col_name.substr(4, col->col_name.length() - 5);
+                    auto col_obj = std::make_shared<Col>("", col_part);
+                    agg_expr = std::make_shared<AggregateExpr>(AGG_AVG, col_obj, col->alias);
+                }
+                
+                if (agg_expr) {
+                    agg_exprs.push_back(agg_expr);
+                }
+            }
+        }
+        
+        // 过滤掉聚合函数列，只保留普通列
+        std::vector<std::shared_ptr<Col>> regular_cols;
+        for (auto& col : $2) {
+            // 检查是否是聚合函数（通过col_name中的特殊标记识别）
+            if (!(col->col_name.find("COUNT(") == 0 || col->col_name.find("MAX(") == 0 || 
+                  col->col_name.find("MIN(") == 0 || col->col_name.find("SUM(") == 0 || 
+                  col->col_name.find("AVG(") == 0)) {
+                // 只有普通列才添加到regular_cols中
+                regular_cols.push_back(col);
+            }
+        }
+        
+        $$ = std::make_shared<SelectStmt>(regular_cols, $4, $6, $5, agg_exprs, $7, $8, $9, $10);
     }    
-    | EXPLAIN SELECT selector FROM baseTableList joinList optWhereClause opt_order_clause   
+    | EXPLAIN SELECT selector FROM baseTableList joinList optWhereClause optGroupByClause optHavingClause opt_order_clause optLimitClause   
     {
-        $$ = std::make_shared<ExplainStmt>($3, $5, $7, $6, $8);
+        $$ = std::make_shared<ExplainStmt>($3, $5, $7, $6, std::vector<std::shared_ptr<AggregateExpr>>{}, $8, $9, $10, $11);
     }
     ;
 
@@ -296,13 +356,51 @@ col:
     ;
 
 colList:
-        col
+        selectExpr
     {
         $$ = std::vector<std::shared_ptr<Col>>{$1};
     }
-    |   colList ',' col
+    |   colList ',' selectExpr
     {
         $$.push_back($3);
+    }
+    ;
+
+selectExpr:
+        col
+    {
+        $$ = $1;
+    }
+    |   aggregateExpr
+    {
+        // 将聚合函数表达式转换为列，用于兼容现有的SelectStmt结构
+        auto agg_col = std::make_shared<Col>("", "");
+        
+        // 设置别名
+        if (!$1->alias.empty()) {
+            agg_col->alias = $1->alias;
+        }
+        
+        // 总是为聚合函数生成col_name（用于识别）
+        switch ($1->agg_type) {
+            case AGG_COUNT:
+                agg_col->col_name = $1->col ? "COUNT(" + $1->col->col_name + ")" : "COUNT(*)";
+                break;
+            case AGG_MAX:
+                agg_col->col_name = "MAX(" + $1->col->col_name + ")";
+                break;
+            case AGG_MIN:
+                agg_col->col_name = "MIN(" + $1->col->col_name + ")";
+                break;
+            case AGG_SUM:
+                agg_col->col_name = "SUM(" + $1->col->col_name + ")";
+                break;
+            case AGG_AVG:
+                agg_col->col_name = "AVG(" + $1->col->col_name + ")";
+                break;
+        }
+        
+        $$ = agg_col;
     }
     ;
 
@@ -339,6 +437,10 @@ expr:
         $$ = std::static_pointer_cast<Expr>($1);
     }
     |   col
+    {
+        $$ = std::static_pointer_cast<Expr>($1);
+    }
+    |   aggregateExpr
     {
         $$ = std::static_pointer_cast<Expr>($1);
     }
@@ -516,11 +618,34 @@ opt_order_clause:
     ;
 
 order_clause:
-      col  opt_asc_desc 
+    orderByList
     { 
+        $$ = std::make_shared<OrderBy>($1);
+    }
+    |   col  opt_asc_desc 
+    { 
+        // 向后兼容：单列排序
         $$ = std::make_shared<OrderBy>($1, $2);
     }
     ;   
+
+orderByList:
+    orderByItem
+    {
+        $$ = std::vector<std::shared_ptr<OrderByItem>>{$1};
+    }
+    |   orderByList ',' orderByItem
+    {
+        $$.push_back($3);
+    }
+    ;
+
+orderByItem:
+    col opt_asc_desc
+    {
+        $$ = std::make_shared<OrderByItem>($1, $2);
+    }
+    ;
 
 opt_asc_desc:
     ASC          { $$ = OrderBy_ASC;     }
@@ -531,6 +656,130 @@ opt_asc_desc:
 set_knob_type:
     ENABLE_NESTLOOP { $$ = EnableNestLoop; }
     |   ENABLE_SORTMERGE { $$ = EnableSortMerge; }
+    ;
+
+aggregateExpr:
+    COUNT '(' col ')'
+    {
+        $$ = std::make_shared<AggregateExpr>(AGG_COUNT, $3);
+    }
+    |   COUNT '(' col ')' AS IDENTIFIER
+    {
+        $$ = std::make_shared<AggregateExpr>(AGG_COUNT, $3, $6);
+    }
+    |   COUNT '(' '*' ')'
+    {
+        $$ = std::make_shared<AggregateExpr>(AGG_COUNT, nullptr);
+    }
+    |   COUNT '(' '*' ')' AS IDENTIFIER
+    {
+        $$ = std::make_shared<AggregateExpr>(AGG_COUNT, nullptr, $6);
+    }
+    |   MAX '(' col ')'
+    {
+        $$ = std::make_shared<AggregateExpr>(AGG_MAX, $3);
+    }
+    |   MAX '(' col ')' AS IDENTIFIER
+    {
+        $$ = std::make_shared<AggregateExpr>(AGG_MAX, $3, $6);
+    }
+    |   MIN '(' col ')'
+    {
+        $$ = std::make_shared<AggregateExpr>(AGG_MIN, $3);
+    }
+    |   MIN '(' col ')' AS IDENTIFIER
+    {
+        $$ = std::make_shared<AggregateExpr>(AGG_MIN, $3, $6);
+    }
+    |   SUM '(' col ')'
+    {
+        $$ = std::make_shared<AggregateExpr>(AGG_SUM, $3);
+    }
+    |   SUM '(' col ')' AS IDENTIFIER
+    {
+        $$ = std::make_shared<AggregateExpr>(AGG_SUM, $3, $6);
+    }
+    |   AVG '(' col ')'
+    {
+        $$ = std::make_shared<AggregateExpr>(AGG_AVG, $3);
+    }
+    |   AVG '(' col ')' AS IDENTIFIER
+    {
+        $$ = std::make_shared<AggregateExpr>(AGG_AVG, $3, $6);
+    }
+    ;
+
+optGroupByClause:
+    /* epsilon */ { $$ = std::vector<std::shared_ptr<Col>>{}; }
+    |   GROUP BY groupByClause { $$ = $3; }
+    ;
+
+groupByClause:
+    col
+    {
+        $$ = std::vector<std::shared_ptr<Col>>{$1};
+    }
+    |   groupByClause ',' col
+    {
+        $$.push_back($3);
+    }
+    ;
+
+optHavingClause:
+    /* epsilon */ { $$ = std::vector<std::shared_ptr<BinaryExpr>>{}; }
+    |   HAVING havingClause { $$ = $2; }
+    ;
+
+havingClause:
+    havingCondition
+    {
+        $$ = std::vector<std::shared_ptr<BinaryExpr>>{$1};
+    }
+    |   havingClause AND havingCondition
+    {
+        $$.push_back($3);
+    }
+    ;
+
+havingCondition:
+    aggregateExpr op expr
+    {
+        // Create a column that represents the aggregate function for HAVING
+        auto agg_col = std::make_shared<Col>("", "");
+        
+        // Generate a name for the aggregate function so it can be recognized
+        switch ($1->agg_type) {
+            case AGG_COUNT:
+                agg_col->col_name = $1->col ? "COUNT(" + $1->col->col_name + ")" : "COUNT(*)";
+                break;
+            case AGG_MAX:
+                agg_col->col_name = "MAX(" + $1->col->col_name + ")";
+                break;
+            case AGG_MIN:
+                agg_col->col_name = "MIN(" + $1->col->col_name + ")";
+                break;
+            case AGG_SUM:
+                agg_col->col_name = "SUM(" + $1->col->col_name + ")";
+                break;
+            case AGG_AVG:
+                agg_col->col_name = "AVG(" + $1->col->col_name + ")";
+                break;
+        }
+        
+        $$ = std::make_shared<BinaryExpr>(agg_col, $2, $3);
+    }
+    |   col op expr
+    {
+        $$ = std::make_shared<BinaryExpr>($1, $2, $3);
+    }
+    ;
+
+optLimitClause:
+    /* epsilon */ { /* ignore */ }
+    |   LIMIT VALUE_INT
+    {
+        $$ = std::make_shared<LimitClause>($2);
+    }
     ;
 
 tbName: IDENTIFIER;

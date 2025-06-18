@@ -80,7 +80,8 @@ typedef enum PlanTag {
     T_SortMerge,   // 排序合并连接
     T_Sort,        // 排序操作
     T_Projection,  // 投影操作
-    T_Filter       // 过滤操作
+    T_Filter,      // 过滤操作
+    T_Aggregate    // 聚合操作
 } PlanTag;
 
 /**
@@ -224,14 +225,43 @@ class FilterPlan : public Plan {
 };
 
 /**
+ * @brief 排序列信息结构
+ * 表示单个排序列的信息，包含列信息和排序方向
+ */
+struct SortColumn {
+    TabCol col;         // 排序列
+    bool is_desc;       // 排序方向：true=降序，false=升序
+    
+    SortColumn(TabCol col_, bool is_desc_) : col(col_), is_desc(is_desc_) {}
+};
+
+/**
  * @brief 排序计划类
- * 用于ORDER BY子句的排序操作，对子计划的输出按指定列进行排序
- * 支持升序和降序两种排序方式
+ * 用于ORDER BY子句的排序操作，支持单列和多列排序
+ * 对子计划的输出按指定列进行排序
  */
 class SortPlan : public Plan {
    public:
     /**
-     * @brief 构造函数
+     * @brief 构造函数（多列排序）
+     * @param tag 计划类型标签(T_Sort)
+     * @param subplan 子计划，提供要排序的数据
+     * @param sort_cols 排序列列表，支持多列排序
+     */
+    SortPlan(PlanTag tag, std::shared_ptr<Plan> subplan, std::vector<SortColumn> sort_cols) {
+        Plan::tag = tag;
+        subplan_ = std::move(subplan);
+        sort_cols_ = std::move(sort_cols);
+        
+        // 为了向后兼容，如果只有一列，也设置单列字段
+        if (!sort_cols_.empty()) {
+            sel_col_ = sort_cols_[0].col;
+            is_desc_ = sort_cols_[0].is_desc;
+        }
+    }
+
+    /**
+     * @brief 构造函数（单列排序，向后兼容）
      * @param tag 计划类型标签(T_Sort)
      * @param subplan 子计划，提供要排序的数据
      * @param sel_col 排序列
@@ -242,12 +272,26 @@ class SortPlan : public Plan {
         subplan_ = std::move(subplan);
         sel_col_ = sel_col;
         is_desc_ = is_desc;
+        
+        // 创建对应的多列排序列表
+        sort_cols_.push_back(SortColumn(sel_col_, is_desc));
     }
     ~SortPlan() {}
 
-    std::shared_ptr<Plan> subplan_;  // 子计划，数据来源
-    TabCol sel_col_;                 // 排序的列
-    bool is_desc_;                   // 排序方向：true=降序，false=升序
+    // 检查是否为多列排序
+    bool is_multi_column() const {
+        return sort_cols_.size() > 1;
+    }
+
+    // 获取排序列数量
+    size_t column_count() const {
+        return sort_cols_.size();
+    }
+
+    std::shared_ptr<Plan> subplan_;             // 子计划，数据来源
+    std::vector<SortColumn> sort_cols_;         // 多列排序列表
+    TabCol sel_col_;                           // 排序的列（向后兼容）
+    bool is_desc_;                             // 排序方向（向后兼容）
 };
 
 /**
@@ -268,7 +312,7 @@ class DMLPlan : public Plan {
      */
     DMLPlan(PlanTag tag, std::shared_ptr<Plan> subplan, std::string tab_name,
             std::vector<Value> values, std::vector<Condition> conds,
-            std::vector<SetClause> set_clauses) {
+            std::vector<SetClause> set_clauses, int limit = 0) {
         Plan::tag = tag;
         subplan_ = std::move(subplan);
         tab_name_ = std::move(tab_name);
@@ -276,6 +320,7 @@ class DMLPlan : public Plan {
         conds_ = std::move(conds);
         set_clauses_ = std::move(set_clauses);
         is_select_star_ = false;  // 初始化新增的成员变量
+        limit_ = limit;
     }
 
     /**
@@ -292,7 +337,7 @@ class DMLPlan : public Plan {
     DMLPlan(PlanTag tag, std::shared_ptr<Plan> subplan, std::string tab_name,
             std::vector<Value> values, std::vector<Condition> conds,
             std::vector<SetClause> set_clauses, std::map<std::string, std::string> table_alias_map,
-            bool is_select_star = false) {
+            bool is_select_star = false, int limit = 0) {
         Plan::tag = tag;
         subplan_ = std::move(subplan);
         tab_name_ = std::move(tab_name);
@@ -301,6 +346,7 @@ class DMLPlan : public Plan {
         set_clauses_ = std::move(set_clauses);
         table_alias_map_ = std::move(table_alias_map);
         is_select_star_ = is_select_star;
+        limit_ = limit;
     }
     ~DMLPlan() {}
 
@@ -311,6 +357,7 @@ class DMLPlan : public Plan {
     std::vector<SetClause> set_clauses_;                  // SET子句列表(UPDATE使用)
     std::map<std::string, std::string> table_alias_map_;  // 表别名映射(EXPLAIN使用)
     bool is_select_star_ = false;                         // 是否为SELECT *查询(EXPLAIN使用)
+    int limit_;                                          // 限制条件
 };
 
 /**
@@ -359,6 +406,38 @@ class OtherPlan : public Plan {
     ~OtherPlan() {}
 
     std::string tab_name_;  // 表名(适用于需要表名的操作)
+};
+
+/**
+ * @brief 聚合计划类
+ * 用于聚合函数操作的执行计划，支持COUNT、MAX、MIN、SUM、AVG等聚合操作
+ * 可以与GROUP BY子句结合使用进行分组聚合，支持HAVING子句过滤
+ */
+class AggregatePlan : public Plan {
+   public:
+    /**
+     * @brief 构造函数
+     * @param subplan 子计划，提供数据源
+     * @param agg_exprs 聚合表达式列表
+     * @param group_by_cols GROUP BY列列表
+     * @param having_conds HAVING条件列表
+     */
+    AggregatePlan(std::shared_ptr<Plan> subplan, 
+                  std::vector<std::shared_ptr<ast::AggregateExpr>> agg_exprs,
+                  std::vector<TabCol> group_by_cols = {},
+                  std::vector<Condition> having_conds = {}) {
+        Plan::tag = T_Aggregate;
+        subplan_ = std::move(subplan);
+        agg_exprs_ = std::move(agg_exprs);
+        group_by_cols_ = std::move(group_by_cols);
+        having_conds_ = std::move(having_conds);
+    }
+    ~AggregatePlan() {}
+
+    std::shared_ptr<Plan> subplan_;                                     // 子计划，数据来源
+    std::vector<std::shared_ptr<ast::AggregateExpr>> agg_exprs_;       // 聚合表达式列表
+    std::vector<TabCol> group_by_cols_;                                // GROUP BY列列表
+    std::vector<Condition> having_conds_;                             // HAVING条件列表
 };
 
 /**

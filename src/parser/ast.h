@@ -347,6 +347,18 @@ struct BoolLit : public Value {
 };
 
 /**
+ * @brief 聚合函数类型枚举
+ * 定义支持的聚合函数类型
+ */
+enum AggType {
+    AGG_COUNT,  // COUNT函数
+    AGG_MAX,    // MAX函数
+    AGG_MIN,    // MIN函数
+    AGG_SUM,    // SUM函数
+    AGG_AVG     // AVG函数
+};
+
+/**
  * @brief 列引用AST节点
  *
  * 表示SQL中对表列的引用，支持带表名前缀和不带表名前缀两种形式
@@ -370,6 +382,28 @@ struct Col : public Expr {
 
     Col(std::string tab_name_, std::string col_name_, std::string alias_)
         : tab_name(std::move(tab_name_)), col_name(std::move(col_name_)), alias(std::move(alias_)) {}
+};
+
+/**
+ * @brief 聚合函数AST节点
+ *
+ * 表示SQL中的聚合函数调用
+ * 例如：COUNT(*), MAX(score), SUM(id)
+ *
+ * @param agg_type 聚合函数类型
+ * @param col 聚合的列（COUNT(*)时为nullptr）
+ * @param alias 函数别名（可为空）
+ */
+struct AggregateExpr : public Expr {
+    AggType agg_type;          // 聚合函数类型
+    std::shared_ptr<Col> col;  // 聚合的列（COUNT(*)时为nullptr）
+    std::string alias;         // 函数别名
+
+    AggregateExpr(AggType agg_type_, std::shared_ptr<Col> col_)
+        : agg_type(agg_type_), col(std::move(col_)), alias("") {}
+
+    AggregateExpr(AggType agg_type_, std::shared_ptr<Col> col_, std::string alias_)
+        : agg_type(agg_type_), col(std::move(col_)), alias(std::move(alias_)) {}
 };
 
 /**
@@ -409,20 +443,63 @@ struct BinaryExpr : public TreeNode {
 };
 
 /**
- * @brief ORDER BY子句AST节点
+ * @brief 单个排序项AST节点
  *
- * 表示SELECT语句中的ORDER BY子句，指定排序的列和排序方向
- * 例如：SELECT * FROM student ORDER BY age DESC
- * 其中 "age DESC" 就是OrderBy节点
+ * 表示ORDER BY子句中的单个排序项，包含列引用和排序方向
+ * 例如：ORDER BY name ASC, age DESC 中的 "name ASC" 和 "age DESC"
  *
- * @param cols 排序列引用
+ * @param col 排序列引用
  * @param orderby_dir 排序方向（ASC/DESC）
  */
-struct OrderBy : public TreeNode {
-    std::shared_ptr<Col> cols;  // 排序列
-    OrderByDir orderby_dir;     // 排序方向
+struct OrderByItem : public TreeNode {
+    std::shared_ptr<Col> col;  // 排序列
+    OrderByDir orderby_dir;    // 排序方向
 
-    OrderBy(std::shared_ptr<Col> cols_, OrderByDir orderby_dir_) : cols(std::move(cols_)), orderby_dir(std::move(orderby_dir_)) {}
+    OrderByItem(std::shared_ptr<Col> col_, OrderByDir orderby_dir_)
+        : col(std::move(col_)), orderby_dir(orderby_dir_) {}
+};
+
+/**
+ * @brief ORDER BY子句AST节点
+ *
+ * 表示SELECT语句中的ORDER BY子句，支持多列排序
+ * 例如：SELECT * FROM student ORDER BY age DESC, name ASC
+ *
+ * @param order_items 排序项列表，支持多列排序
+ * @param cols 排序列引用（为了向后兼容保留）
+ * @param orderby_dir 排序方向（为了向后兼容保留）
+ */
+struct OrderBy : public TreeNode {
+    std::vector<std::shared_ptr<OrderByItem>> order_items;  // 多列排序项列表
+    std::shared_ptr<Col> cols;                              // 排序列（向后兼容）
+    OrderByDir orderby_dir;                                 // 排序方向（向后兼容）
+
+    // 新的构造函数：支持多列排序
+    OrderBy(std::vector<std::shared_ptr<OrderByItem>> order_items_)
+        : order_items(std::move(order_items_)), orderby_dir(OrderBy_DEFAULT) {
+        // 为了向后兼容，如果只有一列，也设置cols和orderby_dir
+        if (!order_items.empty()) {
+            cols = order_items[0]->col;
+            orderby_dir = order_items[0]->orderby_dir;
+        }
+    }
+
+    // 向后兼容的构造函数：单列排序
+    OrderBy(std::shared_ptr<Col> cols_, OrderByDir orderby_dir_)
+        : cols(std::move(cols_)), orderby_dir(orderby_dir_) {
+        // 创建对应的order_items
+        order_items.push_back(std::make_shared<OrderByItem>(cols, orderby_dir));
+    }
+
+    // 检查是否为多列排序
+    bool is_multi_column() const {
+        return order_items.size() > 1;
+    }
+
+    // 获取排序列数量
+    size_t column_count() const {
+        return order_items.size();
+    }
 };
 
 /**
@@ -528,17 +605,34 @@ struct TableRef : public TreeNode {
 };
 
 /**
+ * @brief LIMIT子句AST节点
+ *
+ * 表示SELECT语句中的LIMIT子句，用于限制返回的记录数量
+ * 例如：SELECT * FROM student LIMIT 10
+ *
+ * @param count 限制的记录数量
+ */
+struct LimitClause : public TreeNode {
+    int count;  // 限制的记录数量
+
+    LimitClause(int count_) : count(count_) {}
+};
+
+/**
  * @brief SELECT语句AST节点
  *
- * 表示SELECT语句的完整结构，是最复杂的SQL语句类型
- * 例如：SELECT student.name AS sname, student.age FROM student AS s WHERE s.age > 18 ORDER BY s.age DESC
+ * 表示SELECT语句的完整结构，是最复杂的SQL语句类型，支持聚合函数和分组统计
+ * 例如：SELECT student.name, AVG(score) FROM student WHERE age > 18 GROUP BY name HAVING AVG(score) > 80 ORDER BY name LIMIT 10
  *
  * @param cols 选择列列表（空表示SELECT *）
  * @param table_refs 数据源表引用列表（包含表名和别名）
  * @param conds WHERE条件列表
  * @param jointree JOIN操作列表
+ * @param group_by_cols GROUP BY列列表
+ * @param having_conds HAVING条件列表
  * @param has_sort 是否包含ORDER BY子句
  * @param order ORDER BY子句信息
+ * @param limit_clause LIMIT子句信息
  */
 struct SelectStmt : public TreeNode {
     std::vector<std::shared_ptr<Col>> cols;             // 选择列列表
@@ -546,15 +640,36 @@ struct SelectStmt : public TreeNode {
     std::vector<std::shared_ptr<BinaryExpr>> conds;     // WHERE条件列表
     std::vector<std::shared_ptr<JoinExpr>> jointree;    // JOIN操作列表
 
-    bool has_sort;                   // 是否包含ORDER BY子句
-    std::shared_ptr<OrderBy> order;  // ORDER BY子句信息
+    // 聚合函数和分组统计相关
+    std::vector<std::shared_ptr<AggregateExpr>> agg_exprs;  // 聚合表达式列表
+    std::vector<std::shared_ptr<Col>> group_by_cols;        // GROUP BY列列表
+    std::vector<std::shared_ptr<BinaryExpr>> having_conds;  // HAVING条件列表
 
-    // 新的构造函数，支持表引用
+    bool has_sort;                              // 是否包含ORDER BY子句
+    std::shared_ptr<OrderBy> order;             // ORDER BY子句信息
+    std::shared_ptr<LimitClause> limit_clause;  // LIMIT子句信息
+
+    // 新的构造函数，支持聚合函数和分组统计
     SelectStmt(std::vector<std::shared_ptr<Col>> cols_,
                std::vector<std::shared_ptr<TableRef>> table_refs_,
                std::vector<std::shared_ptr<BinaryExpr>> conds_,
                std::vector<std::shared_ptr<JoinExpr>> jointree_,
-               std::shared_ptr<OrderBy> order_) : cols(std::move(cols_)), table_refs(std::move(table_refs_)), conds(std::move(conds_)), jointree(std::move(jointree_)), order(std::move(order_)) {
+               std::vector<std::shared_ptr<AggregateExpr>> agg_exprs_,
+               std::vector<std::shared_ptr<Col>> group_by_cols_,
+               std::vector<std::shared_ptr<BinaryExpr>> having_conds_,
+               std::shared_ptr<OrderBy> order_,
+               std::shared_ptr<LimitClause> limit_clause_)
+        : cols(std::move(cols_)), table_refs(std::move(table_refs_)), conds(std::move(conds_)), jointree(std::move(jointree_)), agg_exprs(std::move(agg_exprs_)), group_by_cols(std::move(group_by_cols_)), having_conds(std::move(having_conds_)), order(std::move(order_)), limit_clause(std::move(limit_clause_)) {
+        has_sort = (bool)order;  // 根据order指针是否为空判断是否有排序
+    }
+
+    // 保持向后兼容的构造函数
+    SelectStmt(std::vector<std::shared_ptr<Col>> cols_,
+               std::vector<std::shared_ptr<TableRef>> table_refs_,
+               std::vector<std::shared_ptr<BinaryExpr>> conds_,
+               std::vector<std::shared_ptr<JoinExpr>> jointree_,
+               std::shared_ptr<OrderBy> order_)
+        : cols(std::move(cols_)), table_refs(std::move(table_refs_)), conds(std::move(conds_)), jointree(std::move(jointree_)), agg_exprs({}), order(std::move(order_)) {
         has_sort = (bool)order;  // 根据order指针是否为空判断是否有排序
     }
 
@@ -602,23 +717,6 @@ struct ExplainStmt : public SelectStmt {
                 std::shared_ptr<OrderBy> order_)
         : SelectStmt(std::move(cols_), std::move(table_refs_), std::move(conds_), std::move(jointree_), std::move(order_)) {}
 };
-
-/**
- * @brief 语义值联合体
- *
- * 这是yacc解析器使用的语义值类型，用于在语法分析过程中传递各种类型的值。
- * 它包含了所有可能在语法分析中需要传递的数据类型。
- *
- * 设计说明：
- * 1. 基本类型：存储词法分析器识别的基本数据类型
- * 2. AST节点指针：存储各种AST节点的智能指针
- * 3. 容器类型：存储多个同类型元素的向量
- *
- * 使用场景：
- * - 词法分析器向语法分析器传递token值
- * - 语法分析器在构建AST时传递节点指针
- * - 处理语法规则的归约动作
- */
 struct SemValue {
     // ===== 基本数据类型 =====
     int sv_int;                        // 整数值
@@ -643,6 +741,12 @@ struct SemValue {
 
     // ===== 表达式相关 =====
     std::shared_ptr<Expr> sv_expr;  // 表达式指针
+
+    // ===== 聚合函数相关 =====
+    AggType sv_agg_type;                                       // 聚合函数类型
+    std::shared_ptr<AggregateExpr> sv_agg_expr;                // 聚合函数表达式
+    std::vector<std::shared_ptr<AggregateExpr>> sv_agg_exprs;  // 聚合表达式列表
+    std::shared_ptr<LimitClause> sv_limit_clause;              // LIMIT子句
 
     // ===== 值相关 =====
     std::shared_ptr<Value> sv_val;                // 单个值
@@ -670,7 +774,9 @@ struct SemValue {
     JoinType sv_join_type;                                 // JOIN类型
 
     // ===== ORDER BY相关 =====
-    std::shared_ptr<OrderBy> sv_orderby;  // ORDER BY子句
+    std::shared_ptr<OrderBy> sv_orderby;                         // ORDER BY子句
+    std::shared_ptr<OrderByItem> sv_orderby_item;                // 单个排序项
+    std::vector<std::shared_ptr<OrderByItem>> sv_orderby_items;  // 排序项列表
 
     // ===== 系统配置相关 =====
     SetKnobType sv_setKnobType;  // 系统配置参数类型
@@ -683,8 +789,7 @@ struct SemValue {
  * 解析完成后，整个SQL语句的AST结构都可以通过这个指针访问。
  */
 extern std::shared_ptr<ast::TreeNode> parse_tree;
-
-}  // namespace ast
+};  // namespace ast
 
 /**
  * @brief yacc语义值类型定义

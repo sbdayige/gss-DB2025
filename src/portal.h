@@ -32,6 +32,7 @@ See the Mulan PSL v2 for more details. */
 #include "common/common.h"
 #include "execution/execution_sort.h"
 #include "execution/executor_abstract.h"
+#include "execution/executor_aggregate.h"
 #include "execution/executor_delete.h"
 #include "execution/executor_explain.h"
 #include "execution/executor_filter.h"
@@ -41,7 +42,6 @@ See the Mulan PSL v2 for more details. */
 #include "execution/executor_projection.h"
 #include "execution/executor_seq_scan.h"
 #include "execution/executor_update.h"
-#include "optimizer/plan.h"
 
 /**
  * @brief 门户类型枚举
@@ -101,14 +101,14 @@ struct PortalStmt {
  */
 class Portal {
    private:
-    SmManager *sm_manager_;  ///< 系统管理器指针，用于访问表、索引等元数据
+    SmManager* sm_manager_;  ///< 系统管理器指针，用于访问表、索引等元数据
 
    public:
     /**
      * @brief 构造函数
      * @param sm_manager 系统管理器指针
      */
-    Portal(SmManager *sm_manager) : sm_manager_(sm_manager) {}
+    Portal(SmManager* sm_manager) : sm_manager_(sm_manager) {}
     ~Portal() {}
 
     /**
@@ -128,7 +128,7 @@ class Portal {
      *          - DDLPlan: 数据定义语言计划
      *          - DMLPlan: 数据操纵语言计划
      */
-    std::shared_ptr<PortalStmt> start(std::shared_ptr<Plan> plan, Context *context) {
+    std::shared_ptr<PortalStmt> start(std::shared_ptr<Plan> plan, Context* context) {
         // ===========================================
         // 计划类型识别与分发
         // ===========================================
@@ -154,13 +154,25 @@ class Portal {
                 }
 
                 case T_Select: {
-                    std::shared_ptr<ProjectionPlan> p = std::dynamic_pointer_cast<ProjectionPlan>(x->subplan_);
-
                     // 递归转换子计划为执行器树
-                    std::unique_ptr<AbstractExecutor> root = convert_plan_executor(p, context);
+                    std::unique_ptr<AbstractExecutor> root = convert_plan_executor(x->subplan_, context);
+
+                    // 检查是否是投影计划，如果是则获取投影列，否则使用执行器的列信息
+                    std::vector<TabCol> sel_cols;
+                    if (auto p = std::dynamic_pointer_cast<ProjectionPlan>(x->subplan_)) {
+                        sel_cols = std::move(p->sel_cols_);
+                    } else {
+                        // 对于非投影计划（如聚合计划），从执行器中获取列信息
+                        if (root) {
+                            const auto& exec_cols = root->cols();
+                            for (const auto& col : exec_cols) {
+                                sel_cols.push_back({col.tab_name, col.name});
+                            }
+                        }
+                    }
 
                     // 创建SELECT门户语句，包含投影列和执行器树
-                    return std::make_shared<PortalStmt>(PORTAL_ONE_SELECT, std::move(p->sel_cols_), std::move(root), plan);
+                    return std::make_shared<PortalStmt>(PORTAL_ONE_SELECT, std::move(sel_cols), std::move(root), plan);
                 }
 
                 case T_Update: {
@@ -244,7 +256,7 @@ class Portal {
      *          - PORTAL_MULTI_QUERY: DDL操作，执行结构变更
      *          - PORTAL_CMD_UTILITY: 工具命令，执行管理操作
      */
-    void run(std::shared_ptr<PortalStmt> portal, QlManager *ql, txn_id_t *txn_id, Context *context) {
+    void run(std::shared_ptr<PortalStmt> portal, QlManager* ql, txn_id_t* txn_id, Context* context) {
         // ===========================================
         // 门户类型分发执行
         // ===========================================
@@ -253,7 +265,12 @@ class Portal {
             case PORTAL_ONE_SELECT: {
                 // SELECT查询执行：遍历执行器树，输出结果集
                 // 使用投影列信息格式化输出
-                ql->select_from(std::move(portal->root), std::move(portal->sel_cols), context);
+                // 获取DML计划中的limit值
+                int limit = 0;
+                if (auto dml_plan = std::dynamic_pointer_cast<DMLPlan>(portal->plan)) {
+                    limit = dml_plan->limit_;
+                }
+                ql->select_from(std::move(portal->root), std::move(portal->sel_cols), context, limit);
                 break;
             }
 
@@ -324,7 +341,7 @@ class Portal {
      *       2. 再创建当前层级的执行器
      *       3. 建立执行器之间的父子关系
      */
-    std::unique_ptr<AbstractExecutor> convert_plan_executor(std::shared_ptr<Plan> plan, Context *context) {
+    std::unique_ptr<AbstractExecutor> convert_plan_executor(std::shared_ptr<Plan> plan, Context* context) {
         // ===========================================
         // 计划类型识别与执行器创建
         // ===========================================
@@ -370,8 +387,32 @@ class Portal {
             // 排序计划转换
             // ===============================
             // 递归转换子计划，创建排序执行器
-            return std::make_unique<SortExecutor>(convert_plan_executor(x->subplan_, context),
-                                                  x->sel_col_, x->is_desc_);
+            if (x->is_multi_column()) {
+                // 多列排序：构建列列表和排序方向列表
+                std::vector<TabCol> sort_tab_cols;
+                std::vector<bool> sort_directions;
+
+                for (const auto& sort_col : x->sort_cols_) {
+                    sort_tab_cols.push_back(sort_col.col);
+                    sort_directions.push_back(sort_col.is_desc);
+                }
+
+                return std::make_unique<SortExecutor>(convert_plan_executor(x->subplan_, context),
+                                                      sort_tab_cols, sort_directions);
+            } else {
+                // 单列排序：使用向后兼容的构造函数
+                return std::make_unique<SortExecutor>(convert_plan_executor(x->subplan_, context),
+                                                      x->sel_col_, x->is_desc_);
+            }
+        } else if (auto x = std::dynamic_pointer_cast<AggregatePlan>(plan)) {
+            // ===============================
+            // 聚合计划转换
+            // ===============================
+            // 递归转换子计划，创建聚合执行器
+            auto subplan_executor = convert_plan_executor(x->subplan_, context);
+
+            // 创建聚合执行器，传递GROUP BY列信息和HAVING条件
+            return std::make_unique<AggregateExecutor>(std::move(subplan_executor), x->agg_exprs_, x->group_by_cols_, x->having_conds_);
         }
         // 未识别的计划类型，返回空指针
         return nullptr;
