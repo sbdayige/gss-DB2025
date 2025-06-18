@@ -1112,6 +1112,34 @@ std::shared_ptr<Plan> Planner::insert_project_nodes(std::shared_ptr<Plan> plan,
             }
         }
 
+        for (const auto &needed_col : needed_columns) {
+            size_t dot_pos = needed_col.find('.');
+            if (dot_pos != std::string::npos) {
+                std::string tab_name = needed_col.substr(0, dot_pos);
+                std::string col_name = needed_col.substr(dot_pos + 1);
+
+                if (tab_name == table_name) {
+                    TabCol tab_col;
+                    tab_col.tab_name = tab_name;
+                    tab_col.col_name = col_name;
+
+                    // 避免重复添加
+                    bool already_exists = false;
+                    for (const auto &existing_col : table_needed_cols) {
+                        if (existing_col.tab_name == tab_col.tab_name &&
+                            existing_col.col_name == tab_col.col_name) {
+                            already_exists = true;
+                            break;
+                        }
+                    }
+                    if (!already_exists) {
+                        table_needed_cols.push_back(tab_col);
+                        std::cout << "[DEBUG] Added needed column to scan: " << needed_col << std::endl;
+                    }
+                }
+            }
+        }
+
         // 添加JOIN条件中需要的列（但不包括WHERE过滤条件中的列）
         // 检查是否有JOIN操作，如果有，需要添加JOIN条件中涉及的列
         std::set<std::string> join_columns;
