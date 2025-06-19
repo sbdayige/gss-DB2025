@@ -71,25 +71,24 @@ void SetTransaction(txn_id_t *txn_id, Context *context) {
     if (context->txn_ == nullptr ||
         context->txn_->get_state() == TransactionState::COMMITTED ||
         context->txn_->get_state() == TransactionState::ABORTED) {
-        // std::cerr << "DEBUG: Transaction is null or already
-        // committed/aborted, creating a new transaction." << std::endl;
-        // context->txn_ = txn_manager->begin(nullptr, context->log_mgr_);
-        // std::cerr << "DEBUG: New transaction created with ID: "
-        //           << context->txn_->get_transaction_id() << std::endl;
-        // *txn_id = context->txn_->get_transaction_id();
-        // std::cerr<< "DEBUG: Transaction ID updated to: " << *txn_id <<
-        // std::endl; context->txn_->set_txn_mode(false);
+        std::cerr << "DEBUG: Transaction is null or already committed/aborted, creating a new transaction." << std::endl;
+        context->txn_ = txn_manager->begin(nullptr, context->log_mgr_);
+        std::cerr << "DEBUG: New transaction created with ID: "
+                  << context->txn_->get_transaction_id() << std::endl;
+        *txn_id = context->txn_->get_transaction_id();
+        std::cerr << "DEBUG: Transaction ID updated to: " << *txn_id << std::endl;
+        context->txn_->set_txn_mode(false);
         // 禁用事务：如果事务为空，则不创建新事务，这会使得后续操作因缺少事务对象而失败或跳过事务相关逻辑
-        if (context->txn_ == nullptr) {
-            std::cerr << "DEBUG: Transaction is null and transaction creation "
-                         "is disabled."
-                      << std::endl;
-        } else if (context->txn_->get_state() == TransactionState::COMMITTED ||
-                   context->txn_->get_state() == TransactionState::ABORTED) {
-            std::cerr << "DEBUG: Transaction is already committed/aborted and "
-                         "transaction creation is disabled."
-                      << std::endl;
-        }
+        // if (context->txn_ == nullptr) {
+        //     std::cerr << "DEBUG: Transaction is null and transaction creation "
+        //                  "is disabled."
+        //               << std::endl;
+        // } else if (context->txn_->get_state() == TransactionState::COMMITTED ||
+        //            context->txn_->get_state() == TransactionState::ABORTED) {
+        //     std::cerr << "DEBUG: Transaction is already committed/aborted and "
+        //                  "transaction creation is disabled."
+        //               << std::endl;
+        // }
     }
 }
 

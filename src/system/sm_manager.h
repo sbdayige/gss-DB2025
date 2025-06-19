@@ -79,4 +79,10 @@ class SmManager {
     void drop_index(const std::string& tab_name, const std::vector<std::string>& col_names, Context* context);
 
     void drop_index(const std::string& tab_name, const std::vector<ColMeta>& col_names, Context* context);
+
+    RmFileHandle* get_file_handle(const std::string& tab_name) const;
+
+    IxIndexHandle* get_index_handle(const std::string& index_name) const;
+
+    bool contains_table(const std::string& tab_name) const;
 };

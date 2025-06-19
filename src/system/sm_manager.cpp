@@ -417,3 +417,16 @@ void SmManager::drop_index(const std::string& tab_name, const std::vector<ColMet
     }
     drop_index(tab_name, col_names, context);
 }
+
+RmFileHandle* SmManager::get_file_handle(const std::string& tab_name) const {
+    return fhs_.at(tab_name).get();
+}
+
+IxIndexHandle* SmManager::get_index_handle(
+    const std::string& index_name) const {
+    return ihs_.at(index_name).get();
+}
+
+bool SmManager::contains_table(const std::string& tab_name) const {
+    return db_.is_table(tab_name);
+}
