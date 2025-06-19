@@ -99,6 +99,12 @@ class DeleteExecutor : public AbstractExecutor {
             // 获取要删除的记录
             auto rec = fh_->get_record(rid, context_);
 
+            // 记录删除操作到事务日志（在实际删除之前）
+            if (context_ && context_->txn_) {
+                WriteRecord* write_record = new WriteRecord(WType::DELETE_TUPLE, tab_name_, rid, *rec);
+                context_->txn_->append_write_record(write_record);
+            }
+
             // 删除记录索引项
             delete_index(rec.get(), rid);
 
