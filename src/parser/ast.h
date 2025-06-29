@@ -407,6 +407,37 @@ struct AggregateExpr : public Expr {
 };
 
 /**
+ * @brief 算术操作符枚举
+ * 定义算术表达式中支持的运算符
+ */
+enum ArithOp {
+    ARITH_OP_ADD,  // 加法 +
+    ARITH_OP_SUB,  // 减法 -
+    ARITH_OP_MUL,  // 乘法 *
+    ARITH_OP_DIV   // 除法 /
+};
+
+/**
+ * @brief 算术表达式AST节点
+ *
+ * 表示SQL中的算术表达式，支持基本的数学运算
+ * 例如：UPDATE student SET score = score + 10 WHERE id = 1
+ * 其中 "score + 10" 就是一个ArithExpr节点
+ *
+ * @param lhs 左操作数（可以是列引用或值）
+ * @param op 算术操作符
+ * @param rhs 右操作数（可以是列引用或值）
+ */
+struct ArithExpr : public Expr {
+    std::shared_ptr<Expr> lhs;  // 左操作数
+    ArithOp op;                 // 算术操作符
+    std::shared_ptr<Expr> rhs;  // 右操作数
+
+    ArithExpr(std::shared_ptr<Expr> lhs_, ArithOp op_, std::shared_ptr<Expr> rhs_)
+        : lhs(std::move(lhs_)), op(op_), rhs(std::move(rhs_)) {}
+};
+
+/**
  * @brief 赋值子句AST节点
  *
  * 表示UPDATE语句中的SET子句中的单个赋值操作
@@ -417,10 +448,11 @@ struct AggregateExpr : public Expr {
  * @param val 赋值的值
  */
 struct SetClause : public TreeNode {
-    std::string col_name;        // 列名
-    std::shared_ptr<Value> val;  // 赋值的值
+    std::string col_name;
+    std::shared_ptr<Expr> val;  // Changed from Value to Expr
 
-    SetClause(std::string col_name_, std::shared_ptr<Value> val_) : col_name(std::move(col_name_)), val(std::move(val_)) {}
+    SetClause(std::string col_name_, std::shared_ptr<Expr> val_)  // Changed from Value to Expr
+        : col_name(std::move(col_name_)), val(std::move(val_)) {}
 };
 
 /**

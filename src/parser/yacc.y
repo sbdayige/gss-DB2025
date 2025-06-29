@@ -30,6 +30,10 @@ using namespace ast;
 %token LEQ NEQ GEQ T_EOF
 %token EXPLAIN
 
+// arithmetic operators
+%left '+' '-'
+%left '*' '/'
+
 // type-specific tokens
 %token <sv_str> IDENTIFIER VALUE_STRING
 %token <sv_int> VALUE_INT
@@ -171,6 +175,7 @@ dml:
     }
     |   UPDATE tbName SET setClauses optWhereClause
     {
+        printf("YACC DEBUG: Parsing UPDATE statement for table: %s\n", $2.c_str());
         $$ = std::make_shared<UpdateStmt>($2, $4, $5);
     }
     |   SELECT selector FROM baseTableList joinList optWhereClause optGroupByClause optHavingClause opt_order_clause optLimitClause
@@ -444,6 +449,27 @@ expr:
     {
         $$ = std::static_pointer_cast<Expr>($1);
     }
+    |   expr '+' expr
+    {
+        printf("YACC DEBUG: Parsing arithmetic addition\n");
+        $$ = std::make_shared<ArithExpr>($1, ARITH_OP_ADD, $3);
+    }
+    |   expr '-' expr
+    {
+        $$ = std::make_shared<ArithExpr>($1, ARITH_OP_SUB, $3);
+    }
+    |   expr '*' expr
+    {
+        $$ = std::make_shared<ArithExpr>($1, ARITH_OP_MUL, $3);
+    }
+    |   expr '/' expr
+    {
+        $$ = std::make_shared<ArithExpr>($1, ARITH_OP_DIV, $3);
+    }
+    |   '(' expr ')'
+    {
+        $$ = $2;
+    }
     ;
 
 setClauses:
@@ -458,7 +484,7 @@ setClauses:
     ;
 
 setClause:
-        colName '=' value
+        colName '=' expr
     {
         $$ = std::make_shared<SetClause>($1, $3);
     }

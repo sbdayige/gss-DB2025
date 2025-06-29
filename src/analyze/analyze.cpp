@@ -316,33 +316,85 @@ std::shared_ptr<Query> Analyze::do_analyze(std::shared_ptr<ast::TreeNode> parse)
             // 聚合函数的列名验证将在执行阶段处理
         }
     } else if (auto x = std::dynamic_pointer_cast<ast::UpdateStmt>(parse)) {
-        /** TODO: */
-        query->tables.push_back(x->tab_name);
-
-        // 检查表是否存在
-        if (!sm_manager_->db_.is_table(x->tab_name)) {
+        if (!sm_manager_->db_.is_table(x->tab_name)) {  // 检查表是否存在
             throw TableNotFoundError(x->tab_name);
         }
+        query->tables.push_back(x->tab_name);
+        // 获取相关表的所有列，用于后续校验
+        std::vector<ColMeta> all_cols;
+        get_all_cols(query->tables, all_cols);
+        // 准备SET子句
+        query->set_clauses.reserve(x->set_clauses.size());
+        // 处理每个SET赋值
+        for (auto &sv_set_clause : x->set_clauses) {
+            SetClause set_clause;
+            set_clause.lhs.tab_name = x->tab_name;              // 设置左侧列的表名
+            set_clause.lhs.col_name = sv_set_clause->col_name;  // 设置左侧列名
 
-        // 处理需要更新的列和值
-        for (const auto &set_clause : x->set_clauses) {
-            SetClause update_clause = {.lhs = {x->tab_name, set_clause->col_name}, .rhs = convert_sv_value(set_clause->val)};
-
-            // 类型转换
-            TabMeta &tab = sm_manager_->db_.get_table(x->tab_name);
-            auto col = tab.get_col(set_clause->col_name);
-            if (col->type != update_clause.rhs.type) {
-                if (!can_cast_type(update_clause.rhs.type, col->type)) {
-                    throw IncompatibleTypeError(coltype2str(update_clause.rhs.type), coltype2str(col->type));
-                }
+            // 分析右侧表达式
+            if (auto val = std::dynamic_pointer_cast<ast::Value>(sv_set_clause->val)) {
+                // 简单值赋值
+                set_clause.rhs_type = SetRhsType::SET_RHS_VALUE;
+                set_clause.rhs_val = convert_sv_value(val);
+            } else if (auto col = std::dynamic_pointer_cast<ast::Col>(sv_set_clause->val)) {
+                // 列引用赋值
+                set_clause.rhs_type = SetRhsType::SET_RHS_COL;
+                set_clause.rhs_col = {col->tab_name, col->col_name};
+            } else if (auto arith_expr = std::dynamic_pointer_cast<ast::ArithExpr>(sv_set_clause->val)) {
+                // 算术表达式赋值
+                set_clause.rhs_type = SetRhsType::SET_RHS_EXPR;
+                set_clause.rhs_expr = arith_expr;
+            } else {
+                throw RMDBError("Unsupported right-hand side type in UPDATE statement");
             }
-
-            query->set_clauses.push_back(update_clause);
+            query->set_clauses.push_back(std::move(set_clause));  // 使用 move 提高效率
         }
 
-        // 处理where条件
+        // 处理WHERE条件
         get_clause(x->conds, query->conds);
-        check_clause(query->tables, query->conds);
+        check_clause(query->tables, query->conds);  // 检查WHERE条件的有效性
+
+        // 检查每个SET子句的有效性和类型兼容性
+        for (auto &set_clause : query->set_clauses) {
+            set_clause.lhs = check_column(all_cols, set_clause.lhs);  // 检查列是否存在
+
+            if (set_clause.rhs_type == SetRhsType::SET_RHS_VALUE) {
+                TabMeta &tab = sm_manager_->db_.get_table(set_clause.lhs.tab_name);
+                auto col = tab.get_col(set_clause.lhs.col_name);
+                // 允许数值类型之间的转换(INT与FLOAT)
+                bool is_numeric =
+                    (col->type == ColType::TYPE_INT || col->type == ColType::TYPE_FLOAT) &&
+                    (set_clause.rhs_val.type == ColType::TYPE_INT || set_clause.rhs_val.type == ColType::TYPE_FLOAT);
+                if (col->type != set_clause.rhs_val.type && !is_numeric) {
+                    throw IncompatibleTypeError(coltype2str(col->type), coltype2str(set_clause.rhs_val.type));
+                }
+                set_clause.rhs_val.init_raw(col->len);  // 初始化值的原始数据
+            } else if (set_clause.rhs_type == SetRhsType::SET_RHS_COL) {
+                // 检查右侧列是否存在
+                set_clause.rhs_col = check_column(all_cols, set_clause.rhs_col);
+                // 类型兼容校验：允许 INT↔FLOAT，其他必须完全一致
+                TabMeta &lhs_tab = sm_manager_->db_.get_table(set_clause.lhs.tab_name);
+                auto l_col = lhs_tab.get_col(set_clause.lhs.col_name);
+                TabMeta &rhs_tab = sm_manager_->db_.get_table(set_clause.rhs_col.tab_name);
+                auto r_col = rhs_tab.get_col(set_clause.rhs_col.col_name);
+
+                bool is_numeric = (l_col->type == ColType::TYPE_INT || l_col->type == ColType::TYPE_FLOAT) &&
+                                  (r_col->type == ColType::TYPE_INT || r_col->type == ColType::TYPE_FLOAT);
+                if (l_col->type != r_col->type && !is_numeric) {
+                    throw IncompatibleTypeError(coltype2str(l_col->type), coltype2str(r_col->type));
+                }
+            } else if (set_clause.rhs_type == SetRhsType::SET_RHS_EXPR) {
+                // 验证算术表达式
+                validate_arith_expr(set_clause.rhs_expr, {set_clause.lhs.tab_name});
+
+                // 检查目标列类型是否支持算术表达式
+                TabMeta &tab = sm_manager_->db_.get_table(set_clause.lhs.tab_name);
+                auto col = tab.get_col(set_clause.lhs.col_name);
+                if (col->type == ColType::TYPE_STRING) {
+                    throw IncompatibleTypeError(coltype2str(col->type), "numeric type for arithmetic result");
+                }
+            }
+        }
     } else if (auto x = std::dynamic_pointer_cast<ast::DeleteStmt>(parse)) {
         query->tables.push_back(x->tab_name);
 
@@ -634,5 +686,59 @@ void Analyze::cast_value(Value &val, ColType to) {
         // do not things
     } else {
         throw IncompatibleTypeError(coltype2str(val.type), coltype2str(to));
+    }
+}
+
+void Analyze::validate_arith_expr(std::shared_ptr<ast::ArithExpr> arith_expr, const std::vector<std::string> &tab_names) {
+    // 获取所有表的列信息
+    std::vector<ColMeta> all_cols;
+    get_all_cols(tab_names, all_cols);
+
+    // 验证左操作数
+    if (auto lhs_col = std::dynamic_pointer_cast<ast::Col>(arith_expr->lhs)) {
+        TabCol lhs_tab_col = {lhs_col->tab_name, lhs_col->col_name};
+        lhs_tab_col = check_column(all_cols, lhs_tab_col);
+
+        // 检查列类型是否支持算术运算
+        TabMeta &tab = sm_manager_->db_.get_table(lhs_tab_col.tab_name);
+        auto col = tab.get_col(lhs_tab_col.col_name);
+        if (col->type != TYPE_INT && col->type != TYPE_FLOAT) {
+            throw IncompatibleTypeError(coltype2str(col->type), "numeric type for arithmetic operation");
+        }
+    } else if (auto lhs_val = std::dynamic_pointer_cast<ast::Value>(arith_expr->lhs)) {
+        // 验证值类型是否支持算术运算
+        if (auto int_lit = std::dynamic_pointer_cast<ast::IntLit>(lhs_val)) {
+            // INT类型支持算术运算
+        } else if (auto float_lit = std::dynamic_pointer_cast<ast::FloatLit>(lhs_val)) {
+            // FLOAT类型支持算术运算
+        } else {
+            throw IncompatibleTypeError("non-numeric literal", "numeric type for arithmetic operation");
+        }
+    } else if (auto nested_arith = std::dynamic_pointer_cast<ast::ArithExpr>(arith_expr->lhs)) {
+        // 递归验证嵌套的算术表达式
+        validate_arith_expr(nested_arith, tab_names);
+    }
+
+    // 验证右操作数（逻辑与左操作数相同）
+    if (auto rhs_col = std::dynamic_pointer_cast<ast::Col>(arith_expr->rhs)) {
+        TabCol rhs_tab_col = {rhs_col->tab_name, rhs_col->col_name};
+        rhs_tab_col = check_column(all_cols, rhs_tab_col);
+
+        TabMeta &tab = sm_manager_->db_.get_table(rhs_tab_col.tab_name);
+        auto col = tab.get_col(rhs_tab_col.col_name);
+        if (col->type != TYPE_INT && col->type != TYPE_FLOAT) {
+            throw IncompatibleTypeError(coltype2str(col->type), "numeric type for arithmetic operation");
+        }
+    } else if (auto rhs_val = std::dynamic_pointer_cast<ast::Value>(arith_expr->rhs)) {
+        if (auto int_lit = std::dynamic_pointer_cast<ast::IntLit>(rhs_val)) {
+            // INT类型支持算术运算
+        } else if (auto float_lit = std::dynamic_pointer_cast<ast::FloatLit>(rhs_val)) {
+            // FLOAT类型支持算术运算
+        } else {
+            throw IncompatibleTypeError("non-numeric literal", "numeric type for arithmetic operation");
+        }
+    } else if (auto nested_arith = std::dynamic_pointer_cast<ast::ArithExpr>(arith_expr->rhs)) {
+        // 递归验证嵌套的算术表达式
+        validate_arith_expr(nested_arith, tab_names);
     }
 }

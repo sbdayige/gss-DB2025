@@ -36,10 +36,10 @@ white_space [ \t]+
 new_line "\r"|"\n"|"\r\n"
 sign "+"|"-"
 identifier {alpha}(_|{alpha}|{digit})*
-value_int {sign}?{digit}+
-value_float {sign}?{digit}+\.({digit}+)?
+value_int {digit}+
+value_float {digit}+\.({digit}+)?
 value_string '[^']*'
-single_op ";"|"("|")"|","|"*"|"="|">"|"<"|"."
+single_op ";"|"("|")"|","|"*"|"="|">"|"<"|"."|"+"|"-"|"/"
 
 %x STATE_COMMENT
 
@@ -116,9 +116,13 @@ single_op ";"|"("|")"|","|"*"|"="|">"|"<"|"."
 "<=" { return LEQ; }
 "<>" { return NEQ; }
 "!=" { return NEQ; }
-{single_op} { return yytext[0]; }
+{single_op} { 
+    printf("LEX DEBUG: Found single operator: '%s'\n", yytext);
+    return yytext[0]; 
+}
     /* id */
 {identifier} {
+    printf("LEX DEBUG: Found identifier: '%s'\n", yytext);
     yylval->sv_str = yytext;
     return IDENTIFIER;
 }
@@ -128,6 +132,7 @@ single_op ";"|"("|")"|","|"*"|"="|">"|"<"|"."
     return VALUE_INT;
 }
 {value_float} {
+    printf("LEX DEBUG: Found float: '%s'\n", yytext);
     yylval->sv_float = atof(yytext);
     return VALUE_FLOAT;
 }

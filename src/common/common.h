@@ -21,6 +21,14 @@ See the Mulan PSL v2 for more details. */
 #include "defs.h"
 #include "record/rm_defs.h"
 
+// 前向声明
+namespace ast {
+struct ArithExpr;
+}
+
+// 为了避免循环依赖，我们使用前向声明
+// 在使用时需要包含完整的 ast.h 头文件
+
 struct TabCol {
     std::string tab_name;
     std::string col_name;
@@ -107,6 +115,9 @@ struct Condition {
 };
 
 struct SetClause {
-    TabCol lhs;
-    Value rhs;
+    TabCol lhs;                                // 要更新的列
+    SetRhsType rhs_type;                       // 右侧操作数类型
+    Value rhs_val;                             // 右侧值 (当 rhs_type == SET_RHS_VALUE 时有效)
+    TabCol rhs_col;                            // 右侧列 (当 rhs_type == SET_RHS_COL 时有效)
+    std::shared_ptr<ast::ArithExpr> rhs_expr;  // 右侧算术表达式 (当 rhs_type == SET_RHS_EXPR 时有效)
 };

@@ -9,6 +9,10 @@ MERCHANTABILITY OR FIT FOR A PARTICULAR PURPOSE.
 See the Mulan PSL v2 for more details. */
 
 #pragma once
+#include <memory>
+#include <vector>
+
+#include "execution/execution_common.h"  // 添加包含
 #include "execution_defs.h"
 #include "execution_manager.h"
 #include "executor_abstract.h"
@@ -214,9 +218,33 @@ class UpdateExecutor : public AbstractExecutor {
             // 优化的SET子句处理
             for (const auto& set_clause : set_clauses_) {
                 const auto& col = col_map[set_clause.lhs];
+                Value value;  // 声明 value 变量
 
-                // 复制值以避免修改原始数据
-                Value value = set_clause.rhs;
+                // 根据 rhs_type 获取值
+                if (set_clause.rhs_type == SetRhsType::SET_RHS_VALUE) {
+                    // 简单值赋值
+                    value = set_clause.rhs_val;
+                } else if (set_clause.rhs_type == SetRhsType::SET_RHS_EXPR) {
+                    // 算术表达式赋值
+                    ExprTerm temp_expr_term(set_clause.rhs_expr);
+                    value = EvaluateExpr(temp_expr_term, *old_rec, tab_.cols);
+                } else if (set_clause.rhs_type == SetRhsType::SET_RHS_COL) {
+                    // 列引用赋值
+                    const ColMeta* rhs_col_meta = nullptr;
+                    for (const auto& meta : tab_.cols) {
+                        if (meta.tab_name == set_clause.rhs_col.tab_name && meta.name == set_clause.rhs_col.col_name) {
+                            rhs_col_meta = &meta;
+                            break;
+                        }
+                    }
+                    if (!rhs_col_meta) {
+                        throw RMDBError("RHS column not found in SET clause: " + set_clause.rhs_col.tab_name + "." + set_clause.rhs_col.col_name);
+                    }
+                    value = GetColumnValue(*old_rec, *rhs_col_meta);
+                } else {
+                    throw RMDBError("Unsupported SetRhsType");
+                }
+
                 value.raw.reset();
 
                 // 优化的类型转换

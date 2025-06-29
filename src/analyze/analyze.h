@@ -71,4 +71,5 @@ class Analyze {
     CompOp convert_sv_comp_op(ast::SvCompOp op);
     bool can_cast_type(ColType from, ColType to);
     void cast_value(Value &val, ColType to);
+    void validate_arith_expr(std::shared_ptr<ast::ArithExpr> arith_expr, const std::vector<std::string> &tab_names);
 };
