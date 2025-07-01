@@ -561,6 +561,12 @@ void Analyze::get_clause(const std::vector<std::shared_ptr<ast::BinaryExpr>> &sv
         } else if (auto rhs_col = std::dynamic_pointer_cast<ast::Col>(expr->rhs)) {
             cond.is_rhs_val = false;
             cond.rhs_col = {.tab_name = rhs_col->tab_name, .col_name = rhs_col->col_name};
+        } else if (auto rhs_arith = std::dynamic_pointer_cast<ast::ArithExpr>(expr->rhs)) {
+            // 处理算术表达式（例如一元减号 -1.0）
+            cond.is_rhs_val = true;
+            cond.rhs_val = evaluate_arith_expr(rhs_arith);
+        } else {
+            throw InternalError("Unexpected expression type in WHERE clause");
         }
         conds.push_back(cond);
     }
@@ -741,4 +747,83 @@ void Analyze::validate_arith_expr(std::shared_ptr<ast::ArithExpr> arith_expr, co
         // 递归验证嵌套的算术表达式
         validate_arith_expr(nested_arith, tab_names);
     }
+}
+
+Value Analyze::evaluate_arith_expr(const std::shared_ptr<ast::ArithExpr> &arith_expr) {
+    Value result;
+
+    // 获取左操作数的值
+    Value lhs_val;
+    if (auto lhs_lit = std::dynamic_pointer_cast<ast::Value>(arith_expr->lhs)) {
+        lhs_val = convert_sv_value(lhs_lit);
+    } else if (auto lhs_arith = std::dynamic_pointer_cast<ast::ArithExpr>(arith_expr->lhs)) {
+        // 递归计算嵌套的算术表达式
+        lhs_val = evaluate_arith_expr(lhs_arith);
+    } else {
+        throw InternalError("Cannot evaluate non-constant arithmetic expression in WHERE clause");
+    }
+
+    // 获取右操作数的值
+    Value rhs_val;
+    if (auto rhs_lit = std::dynamic_pointer_cast<ast::Value>(arith_expr->rhs)) {
+        rhs_val = convert_sv_value(rhs_lit);
+    } else if (auto rhs_arith = std::dynamic_pointer_cast<ast::ArithExpr>(arith_expr->rhs)) {
+        // 递归计算嵌套的算术表达式
+        rhs_val = evaluate_arith_expr(rhs_arith);
+    } else {
+        throw InternalError("Cannot evaluate non-constant arithmetic expression in WHERE clause");
+    }
+
+    // 执行算术运算
+    switch (arith_expr->op) {
+        case ast::ARITH_OP_ADD:
+            if (lhs_val.type == TYPE_INT && rhs_val.type == TYPE_INT) {
+                result.set_int(lhs_val.int_val + rhs_val.int_val);
+            } else {
+                // 转换为浮点数运算
+                float lhs_float = (lhs_val.type == TYPE_INT) ? lhs_val.int_val : lhs_val.float_val;
+                float rhs_float = (rhs_val.type == TYPE_INT) ? rhs_val.int_val : rhs_val.float_val;
+                result.set_float(lhs_float + rhs_float);
+            }
+            break;
+
+        case ast::ARITH_OP_SUB:
+            if (lhs_val.type == TYPE_INT && rhs_val.type == TYPE_INT) {
+                result.set_int(lhs_val.int_val - rhs_val.int_val);
+            } else {
+                // 转换为浮点数运算
+                float lhs_float = (lhs_val.type == TYPE_INT) ? lhs_val.int_val : lhs_val.float_val;
+                float rhs_float = (rhs_val.type == TYPE_INT) ? rhs_val.int_val : rhs_val.float_val;
+                result.set_float(lhs_float - rhs_float);
+            }
+            break;
+
+        case ast::ARITH_OP_MUL:
+            if (lhs_val.type == TYPE_INT && rhs_val.type == TYPE_INT) {
+                result.set_int(lhs_val.int_val * rhs_val.int_val);
+            } else {
+                // 转换为浮点数运算
+                float lhs_float = (lhs_val.type == TYPE_INT) ? lhs_val.int_val : lhs_val.float_val;
+                float rhs_float = (rhs_val.type == TYPE_INT) ? rhs_val.int_val : rhs_val.float_val;
+                result.set_float(lhs_float * rhs_float);
+            }
+            break;
+
+        case ast::ARITH_OP_DIV:
+            // 除法总是返回浮点数
+            {
+                float lhs_float = (lhs_val.type == TYPE_INT) ? lhs_val.int_val : lhs_val.float_val;
+                float rhs_float = (rhs_val.type == TYPE_INT) ? rhs_val.int_val : rhs_val.float_val;
+                if (rhs_float == 0.0) {
+                    throw InternalError("Division by zero in arithmetic expression");
+                }
+                result.set_float(lhs_float / rhs_float);
+            }
+            break;
+
+        default:
+            throw InternalError("Unknown arithmetic operator");
+    }
+
+    return result;
 }
