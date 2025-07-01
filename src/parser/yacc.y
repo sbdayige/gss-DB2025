@@ -37,6 +37,7 @@ using namespace ast;
 // arithmetic operators
 %left '+' '-'
 %left '*' '/'
+%right UMINUS  // 一元减号优先级最高
 
 // type-specific tokens
 %token <sv_str> IDENTIFIER VALUE_STRING
@@ -469,6 +470,12 @@ expr:
     |   expr '/' expr
     {
         $$ = std::make_shared<ArithExpr>($1, ARITH_OP_DIV, $3);
+    }
+    |   '-' expr %prec UMINUS
+    {
+        // 一元减号（负号）
+        auto zero = std::make_shared<IntLit>(0);
+        $$ = std::make_shared<ArithExpr>(zero, ARITH_OP_SUB, $2);
     }
     |   '(' expr ')'
     {

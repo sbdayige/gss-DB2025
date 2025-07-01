@@ -54,5 +54,5 @@ runC.sh
 test.sh
 *_test_db/
 lex.yy.cpp
-src/parser/yacc.tab.cppsrc/parser/yacc.tab.h
-src/parser/yacc.tab.cpp
+src/parser/lex.yy.*
+src/parser/yacc.tab.*
