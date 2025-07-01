@@ -170,7 +170,7 @@ class InsertExecutor : public AbstractExecutor {
         rid_ = fh_->insert_record(rec.data, context_);
         // 记录插入操作到事务日志
         if (context_ && context_->txn_) {
-            WriteRecord* write_record = new WriteRecord(WType::INSERT_TUPLE, tab_name_, rid_);
+            WriteRecord* write_record = new WriteRecord(WType::INSERT_TUPLE, tab_name_, rid_, rec);
             context_->txn_->append_write_record(write_record);
         }
         // 索引插入，失败时回滚

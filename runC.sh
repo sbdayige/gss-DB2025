@@ -9,15 +9,13 @@ fi
 # 创建测试SQL文件
 
 cat > test_commands.sql << EOF
-create table warehouse (id int, name char(8));
-create index warehouse (id);
-show index from warehouse;
-create index warehouse (id,name);
-show index from warehouse;
-drop index warehouse (id);
-drop index warehouse (id,name);
-show index from warehouse;
-drop table warehouse;
+create table student (id int, name char(8), score float);
+insert into student values (1, 'xiaohong', 90.0);
+begin;
+insert into student values (2, 'xiaoming', 99.0);
+delete from student where id = 2;
+abort;
+select * from student;
 EOF
 
 echo "正在启动数据库客户端并执行测试命令..."

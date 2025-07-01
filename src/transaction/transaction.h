@@ -16,8 +16,42 @@ See the Mulan PSL v2 for more details. */
 #include <string>
 #include <thread>
 #include <unordered_set>
+#include <vector>
 
-#include "txn_defs.h"
+#include "common/common.h"
+#include "record/rm_defs.h"
+#include "transaction/txn_defs.h"
+
+/** 表示此tuple的前一个版本的链接 */
+struct UndoLink {
+    /* 之前的版本可以在其中的事务中找到 */
+    txn_id_t prev_txn_{INVALID_TXN_ID};
+    /* 在 `prev_txn_` 中前一个版本的日志索引 */
+    int prev_log_idx_{0};
+
+    friend auto operator==(const UndoLink &a, const UndoLink &b) {
+        return a.prev_txn_ == b.prev_txn_ && a.prev_log_idx_ == b.prev_log_idx_;
+    }
+
+    friend auto operator!=(const UndoLink &a, const UndoLink &b) { return !(a == b); }
+
+    /* Checks if the undo link points to something. */
+    bool IsValid() { return prev_txn_ != INVALID_TXN_ID; }
+};
+
+struct UndoLog {
+    /* 此日志是否为删除标记 */
+    bool is_deleted_;
+    /* 此撤销日志修改的字段 */
+    std::vector<bool> modified_fields_;
+    /* 修改后的字段 */
+    std::vector<Value> tuple_;
+    RmRecord *tuple_test_;
+    /* 此撤销日志的时间戳 */
+    timestamp_t ts_{INVALID_TS};
+    /* 撤销日志的前一个版本 */
+    UndoLink prev_version_{};
+};
 
 class Transaction {
    public:
@@ -29,6 +63,7 @@ class Transaction {
         index_deleted_page_set_ = std::make_shared<std::deque<Page *>>();
         prev_lsn_ = INVALID_LSN;
         thread_id_ = std::this_thread::get_id();
+        lock_gap_set_ = std::make_shared<std::unordered_set<int>>();
     }
 
     ~Transaction() = default;
@@ -62,13 +97,43 @@ class Transaction {
 
     inline std::shared_ptr<std::unordered_set<LockDataId>> get_lock_set() { return lock_set_; }
 
+    inline timestamp_t get_read_ts() const { return read_ts_; }
+    inline timestamp_t get_commit_ts() const { return commit_ts_; }
+
+    /** 修改现有的撤销日志 */
+    inline auto ModifyUndoLog(int log_idx, UndoLog new_log) {
+        std::scoped_lock<std::mutex> lck(latch_);
+        undo_logs_[log_idx] = std::move(new_log);
+    }
+
+    /** @return 此事务中撤销日志的索引 */
+    inline auto AppendUndoLog(UndoLog log) -> UndoLink {
+        std::scoped_lock<std::mutex> lck(latch_);
+        undo_logs_.emplace_back(std::move(log));
+        return {txn_id_, static_cast<int>(undo_logs_.size() - 1)};
+    }
+    inline auto GetUndoLog(size_t log_id) -> UndoLog {
+        std::scoped_lock<std::mutex> lck(latch_);
+        return undo_logs_[log_id];
+    }
+
+    /** @return 撤销日志的数量 */
+    inline auto GetUndoLogNum() -> size_t {
+        std::scoped_lock<std::mutex> lck(latch_);
+        return undo_logs_.size();
+    }
+
+
+    inline std::shared_ptr<std::unordered_set<int>> get_lock_gap_set() { return lock_gap_set_; }
+
     inline void clear() {
         write_set_->clear();
         lock_set_->clear();
+        lock_gap_set_->clear();
         index_latch_page_set_->clear();
         index_deleted_page_set_->clear();
     }
-
+    
    private:
     bool txn_mode_;                   // 用于标识当前事务为显式事务还是单条SQL语句的隐式事务
     TransactionState state_;          // 事务状态
@@ -82,4 +147,15 @@ class Transaction {
     std::shared_ptr<std::unordered_set<LockDataId>> lock_set_;    // 事务申请的所有锁
     std::shared_ptr<std::deque<Page *>> index_latch_page_set_;    // 维护事务执行过程中加锁的索引页面
     std::shared_ptr<std::deque<Page *>> index_deleted_page_set_;  // 维护事务执行过程中删除的索引页面
+    std::shared_ptr<std::unordered_set<int>> lock_gap_set_;   
+    std::atomic<timestamp_t> read_ts_{0};
+    /** 提交时间戳 */
+    std::atomic<timestamp_t> commit_ts_{INVALID_TS};
+    /**
+     * @brief 存储撤销日志。
+     * 其他撤销日志/表堆将存储 (txn_id, index) 对，因此只能向此vector中追加内容或就地更新内容，而不能删除任何内容。
+     */
+    std::vector<UndoLog> undo_logs_;
+    /** 用于访问事务级撤销日志的锁。 */
+    std::mutex latch_;
 };

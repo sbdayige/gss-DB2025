@@ -17,13 +17,22 @@ See the Mulan PSL v2 for more details. */
 #include "record/rm_defs.h"
 
 /* 标识事务状态 */
-enum class TransactionState { DEFAULT, GROWING, SHRINKING, COMMITTED, ABORTED };
+enum class TransactionState { DEFAULT,
+                              GROWING,
+                              SHRINKING,
+                              COMMITTED,
+                              ABORTED };
 
 /* 系统的隔离级别，当前赛题中为可串行化隔离级别 */
-enum class IsolationLevel { READ_UNCOMMITTED, REPEATABLE_READ, READ_COMMITTED, SERIALIZABLE };
+enum class IsolationLevel { READ_UNCOMMITTED,
+                            REPEATABLE_READ,
+                            READ_COMMITTED,
+                            SERIALIZABLE };
 
 /* 事务写操作类型，包括插入、删除、更新三种操作 */
-enum class WType { INSERT_TUPLE = 0, DELETE_TUPLE, UPDATE_TUPLE};
+enum class WType { INSERT_TUPLE = 0,
+                   DELETE_TUPLE,
+                   UPDATE_TUPLE };
 
 /**
  * @brief 事务的写操作记录，用于事务的回滚
@@ -66,7 +75,8 @@ class WriteRecord {
 };
 
 /* 多粒度锁，加锁对象的类型，包括记录和表 */
-enum class LockDataType { TABLE = 0, RECORD = 1 };
+enum class LockDataType { TABLE = 0,
+                          RECORD = 1 };
 
 /**
  * @description: 加锁对象的唯一标识
@@ -117,7 +127,9 @@ struct std::hash<LockDataId> {
 };
 
 /* 事务回滚原因 */
-enum class AbortReason { LOCK_ON_SHIRINKING = 0, UPGRADE_CONFLICT, DEADLOCK_PREVENTION };
+enum class AbortReason { LOCK_ON_SHIRINKING = 0,
+                         UPGRADE_CONFLICT,
+                         DEADLOCK_PREVENTION };
 
 /* 事务回滚异常，在rmdb.cpp中进行处理 */
 class TransactionAbortException : public std::exception {
@@ -151,4 +163,9 @@ class TransactionAbortException : public std::exception {
             } break;
         }
     }
+};
+struct GapLockRequest {
+    txn_id_t txn_id_;
+    std::vector<Condition> conds;
+    GapLockRequest(txn_id_t txn_id, std::vector<Condition> conds) : txn_id_(txn_id), conds(std::move(conds)) {}
 };
