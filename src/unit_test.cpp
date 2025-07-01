@@ -617,8 +617,8 @@ TEST(RecordManagerTest, SimpleTest) {
     size_t upd_cnt = 0;
     size_t del_cnt = 0;
     for (int round = 0; round < 1000; round++) {
-        double insert_prob = 1. - mock.size() / 250.;
-        double dice = rand() * 1. / RAND_MAX;
+        float insert_prob = 1. - mock.size() / 250.;
+        float dice = rand() * 1. / RAND_MAX;
         if (mock.empty() || dice < insert_prob) {
             rand_buf(file_handle->file_hdr_.record_size, write_buf);
             Rid rid = file_handle->insert_record(write_buf, nullptr);
@@ -656,7 +656,9 @@ TEST(RecordManagerTest, SimpleTest) {
         check_equal(file_handle.get(), mock);
     }
     assert(mock.size() == add_cnt - del_cnt);
-    std::cout << "insert " << add_cnt << '\n' << "delete " << del_cnt << '\n' << "update " << upd_cnt << '\n';
+    std::cout << "insert " << add_cnt << '\n'
+              << "delete " << del_cnt << '\n'
+              << "update " << upd_cnt << '\n';
     // clean up
     rm_manager->close_file(file_handle.get());
     rm_manager->destroy_file(filename);
