@@ -648,7 +648,6 @@ opt_asc_desc:
 set_knob_type:
     ENABLE_NESTLOOP { $$ = EnableNestLoop; }
     |   ENABLE_SORTMERGE { $$ = EnableSortMerge; }
-    |   OUTPUT_FILE { $$ = OutputFile; }
     ;
 
 aggregateExpr:
