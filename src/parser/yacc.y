@@ -21,14 +21,18 @@ using namespace ast;
 %define parse.error verbose
 
 // keywords
-%token SHOW TABLES CREATE TABLE DROP DESC INSERT INTO VALUES DELETE FROM ASC ORDER BY
+%token SHOW TABLES CREATE TABLE DROP DESC INSERT INTO VALUES DELETE FROM ASC ORDER BY 
 %token WHERE UPDATE SET SELECT INT CHAR FLOAT INDEX AND JOIN INNER LEFT RIGHT FULL SEMI
 %token ON AS EXIT HELP TXN_BEGIN TXN_COMMIT TXN_ABORT TXN_ROLLBACK ORDER_BY 
-%token ENABLE_NESTLOOP ENABLE_SORTMERGE
+%token ENABLE_NESTLOOP ENABLE_SORTMERGE 
 %token GROUP HAVING LIMIT COUNT MAX MIN SUM AVG
 // non-keywords
 %token LEQ NEQ GEQ T_EOF
 %token EXPLAIN
+
+// 优先级和结合性规则
+%right JOIN  // JOIN 右结合，优先级较高
+%left INNER LEFT RIGHT FULL SEMI  // JOIN类型左结合，优先级较低
 
 // arithmetic operators
 %left '+' '-'
@@ -55,7 +59,7 @@ using namespace ast;
 %type <sv_cols> colList selector groupByClause optGroupByClause
 %type <sv_col> selectExpr
 %type <sv_table_ref> tableRef
-%type <sv_table_refs> baseTableList tableList
+%type <sv_table_refs> baseTableList
 %type <sv_join_exprs> joinList
 %type <sv_join_expr> joinExpr
 %type <sv_join_type> joinType
@@ -513,45 +517,7 @@ tableRef:
     }
     ;
 
-tableList:
-        tableRef
-    {
-        $$ = std::vector<std::shared_ptr<TableRef>>{$1};
-    }
-    |   tableList ',' tableRef
-    {
-        $$.push_back($3);
-    }
-    |   tableList joinType JOIN tableRef ON whereClause
-    {
-        // 创建JOIN表达式并添加到表列表
-        auto join_expr = std::make_shared<JoinExpr>(
-            $$.back()->tab_name,  // 左表名
-            $4->tab_name,         // 右表名
-            $6,                   // 连接条件列表（支持AND连接）
-            $2                    // JOIN类型
-        );
-        // 将JOIN表达式存储在特殊的表引用中
-        // 这里我们需要修改语义动作来支持JOIN
-        $$.push_back($4);
-    }
-    |   tableList JOIN tableRef ON whereClause
-    {
-        // 默认为INNER JOIN
-        auto join_expr = std::make_shared<JoinExpr>(
-            $$.back()->tab_name,  // 左表名
-            $3->tab_name,         // 右表名
-            $5,                   // 连接条件列表（支持AND连接）
-            INNER_JOIN            // 默认为内连接
-        );
-        $$.push_back($3);
-    }
-    |   tableList JOIN tableRef
-    {
-        // 兼容原来的隐式JOIN语法
-        $$.push_back($3);
-    }
-    ;
+
 
 joinType:
         INNER
@@ -592,10 +558,6 @@ joinList:
     {
         $$ = std::vector<std::shared_ptr<JoinExpr>>{};
     }
-    |   joinExpr
-    {
-        $$ = std::vector<std::shared_ptr<JoinExpr>>{$1};
-    }
     |   joinList joinExpr
     {
         $$.push_back($2);
@@ -605,11 +567,20 @@ joinList:
 joinExpr:
         joinType JOIN tableRef ON whereClause
     {
-        // 这里需要获取左表名，暂时使用空字符串
         $$ = std::make_shared<JoinExpr>(
             "",           // 左表名，在语义分析阶段确定
             $3,           // 右表引用（包含别名）
             $5,           // 连接条件列表（支持AND连接）
+            $1            // JOIN类型
+        );
+    }
+    |   joinType JOIN tableRef
+    {
+        // JOIN without ON clause - 支持将连接条件放在WHERE子句中
+        $$ = std::make_shared<JoinExpr>(
+            "",           // 左表名，在语义分析阶段确定
+            $3,           // 右表引用（包含别名）
+            std::vector<std::shared_ptr<BinaryExpr>>{}, // 空的连接条件
             $1            // JOIN类型
         );
     }
@@ -623,14 +594,14 @@ joinExpr:
             INNER_JOIN    // 默认为内连接
         );
     }
-    |   SEMI JOIN tableRef ON whereClause
+    |   JOIN tableRef
     {
-        // SEMI JOIN
+        // JOIN without ON clause - 默认为INNER JOIN
         $$ = std::make_shared<JoinExpr>(
             "",           // 左表名，在语义分析阶段确定
-            $3,           // 右表引用（包含别名）
-            $5,           // 连接条件列表（支持AND连接）
-            SEMI_JOIN     // 半连接
+            $2,           // 右表引用（包含别名）
+            std::vector<std::shared_ptr<BinaryExpr>>{}, // 空的连接条件
+            INNER_JOIN    // 默认为内连接
         );
     }
     ;
@@ -647,11 +618,6 @@ order_clause:
     orderByList
     { 
         $$ = std::make_shared<OrderBy>($1);
-    }
-    |   col  opt_asc_desc 
-    { 
-        // 向后兼容：单列排序
-        $$ = std::make_shared<OrderBy>($1, $2);
     }
     ;   
 
@@ -682,6 +648,7 @@ opt_asc_desc:
 set_knob_type:
     ENABLE_NESTLOOP { $$ = EnableNestLoop; }
     |   ENABLE_SORTMERGE { $$ = EnableSortMerge; }
+    |   OUTPUT_FILE { $$ = OutputFile; }
     ;
 
 aggregateExpr:
