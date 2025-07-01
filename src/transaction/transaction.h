@@ -98,7 +98,9 @@ class Transaction {
     inline std::shared_ptr<std::unordered_set<LockDataId>> get_lock_set() { return lock_set_; }
 
     inline timestamp_t get_read_ts() const { return read_ts_; }
+    inline void set_read_ts(timestamp_t read_ts) { read_ts_ = read_ts; }
     inline timestamp_t get_commit_ts() const { return commit_ts_; }
+    inline void set_commit_ts(timestamp_t commit_ts) { commit_ts_ = commit_ts; }
 
     /** 修改现有的撤销日志 */
     inline auto ModifyUndoLog(int log_idx, UndoLog new_log) {
@@ -123,7 +125,6 @@ class Transaction {
         return undo_logs_.size();
     }
 
-
     inline std::shared_ptr<std::unordered_set<int>> get_lock_gap_set() { return lock_gap_set_; }
 
     inline void clear() {
@@ -133,7 +134,7 @@ class Transaction {
         index_latch_page_set_->clear();
         index_deleted_page_set_->clear();
     }
-    
+
    private:
     bool txn_mode_;                   // 用于标识当前事务为显式事务还是单条SQL语句的隐式事务
     TransactionState state_;          // 事务状态
@@ -147,7 +148,7 @@ class Transaction {
     std::shared_ptr<std::unordered_set<LockDataId>> lock_set_;    // 事务申请的所有锁
     std::shared_ptr<std::deque<Page *>> index_latch_page_set_;    // 维护事务执行过程中加锁的索引页面
     std::shared_ptr<std::deque<Page *>> index_deleted_page_set_;  // 维护事务执行过程中删除的索引页面
-    std::shared_ptr<std::unordered_set<int>> lock_gap_set_;   
+    std::shared_ptr<std::unordered_set<int>> lock_gap_set_;
     std::atomic<timestamp_t> read_ts_{0};
     /** 提交时间戳 */
     std::atomic<timestamp_t> commit_ts_{INVALID_TS};

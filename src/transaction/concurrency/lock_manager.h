@@ -19,7 +19,7 @@ static const std::string GroupLockModeStr[10] = {"NON_LOCK", "IS", "IX", "S", "X
 class LockManager {
     /* 加锁类型，包括共享锁、排他锁、意向共享锁、意向排他锁、SIX（意向排他锁+共享锁） */
     enum class LockMode { SHARED,
-                          EXLUCSIVE,
+                          EXCLUSIVE,
                           INTENTION_SHARED,
                           INTENTION_EXCLUSIVE,
                           S_IX };

@@ -89,6 +89,22 @@ class TransactionManager {
         return res;
     }
 
+    /**
+     * @description: 安全地查找事务ID为txn_id的事务对象（用于MVCC场景）
+     * @return {Transaction*} 事务对象的指针，如果不存在则返回nullptr
+     * @param {txn_id_t} txn_id 事务ID
+     */
+    Transaction *find_transaction(txn_id_t txn_id) {
+        if (txn_id == INVALID_TXN_ID) return nullptr;
+
+        std::unique_lock<std::mutex> lock(latch_);
+        auto it = TransactionManager::txn_map.find(txn_id);
+        if (it != TransactionManager::txn_map.end()) {
+            return it->second;
+        }
+        return nullptr;
+    }
+
     static std::unordered_map<txn_id_t, Transaction *> txn_map;  // 全局事务表，存放事务ID与事务对象的映射关系
     std::shared_mutex txn_map_mutex_;
     /** ------------------------以下函数仅可能在MVCC当中使用------------------------------------------*/
@@ -126,6 +142,21 @@ class TransactionManager {
 
     /** @brief 垃圾回收。仅在所有事务都未访问时调用。 */
     void GarbageCollection();
+
+    /** @brief MVCC: 检查写入冲突，支持快照隔离级别 */
+    bool CheckWriteConflict(Transaction *txn, const Rid &rid);
+
+    /** @brief MVCC: 为事务分配读时间戳 */
+    void AssignReadTimestamp(Transaction *txn);
+
+    /** @brief MVCC: 为事务分配提交时间戳 */
+    timestamp_t AssignCommitTimestamp(Transaction *txn);
+
+    /** @brief MVCC: 获取元组的最新版本及其事务信息 */
+    std::pair<bool, txn_id_t> GetLatestVersionInfo(const Rid &rid);
+
+    /** @brief MVCC: 检查版本可见性 */
+    bool IsVersionVisible(Transaction *txn, timestamp_t version_ts, txn_id_t version_txn_id);
 
     struct PageVersionInfo {
         std::shared_mutex mutex_;

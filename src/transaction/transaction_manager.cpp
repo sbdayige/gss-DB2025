@@ -60,6 +60,7 @@ Transaction* TransactionManager::begin(Transaction* txn, LogManager* log_manager
     // MVCC相关设置
     if (concurrency_mode_ == ConcurrencyMode::MVCC) {
         running_txns_.AddTxn(start_ts);  // 添加事务到水位线
+        AssignReadTimestamp(txn);        // 分配读时间戳
     }
 
     return txn;
@@ -216,7 +217,6 @@ void TransactionManager::abort(Transaction* txn, LogManager* log_manager) {
                 }
                 ih->insert_entry(key, rid, txn);
             }
-
         }
     }
 
@@ -386,4 +386,106 @@ timestamp_t TransactionManager::GetWatermark() {
 /** @brief 垃圾回收。仅在所有事务都未访问时调用。 */
 void TransactionManager::GarbageCollection() {
     // 留空，按用户要求不实现GC
+}
+
+/** @brief MVCC: 检查写入冲突，支持快照隔离级别 */
+bool TransactionManager::CheckWriteConflict(Transaction* txn, const Rid& rid) {
+    if (concurrency_mode_ != ConcurrencyMode::MVCC) {
+        return true;  // 非MVCC模式下不检查写入冲突
+    }
+
+    // 获取元组的最新版本信息
+    auto [has_conflict, latest_txn_id] = GetLatestVersionInfo(rid);
+
+    if (!has_conflict) {
+        return true;  // 没有冲突
+    }
+
+    // 情况1：最新版本属于未提交的事务
+    std::unique_lock<std::mutex> lock(latch_);
+    auto it = txn_map.find(latest_txn_id);
+    if (it != txn_map.end()) {
+        Transaction* latest_txn = it->second;
+        lock.unlock();
+
+        if (latest_txn->get_transaction_id() == txn->get_transaction_id()) {
+            return true;  // 是同一个事务，允许写入
+        }
+
+        if (latest_txn->get_state() != TransactionState::COMMITTED &&
+            latest_txn->get_state() != TransactionState::ABORTED) {
+            // 另一个未提交的事务持有该元组
+            return false;  // 写入冲突
+        }
+    }
+    lock.unlock();
+
+    // 情况2：最新版本属于已提交的事务，检查提交时间戳
+    timestamp_t latest_commit_ts = last_commit_ts_.load();
+    if (latest_commit_ts > txn->get_read_ts()) {
+        // 已提交事务的提交时间戳大于当前事务的读时间戳
+        return false;  // 写入冲突
+    }
+
+    return true;  // 无冲突
+}
+
+/** @brief MVCC: 为事务分配读时间戳 */
+void TransactionManager::AssignReadTimestamp(Transaction* txn) {
+    if (concurrency_mode_ == ConcurrencyMode::MVCC) {
+        timestamp_t read_ts = txn->get_start_ts();
+        txn->set_read_ts(read_ts);
+    }
+}
+
+/** @brief MVCC: 为事务分配提交时间戳 */
+timestamp_t TransactionManager::AssignCommitTimestamp(Transaction* txn) {
+    if (concurrency_mode_ == ConcurrencyMode::MVCC) {
+        timestamp_t commit_ts = next_timestamp_.fetch_add(1);
+        return commit_ts;
+    }
+    return INVALID_TS;
+}
+
+/** @brief MVCC: 获取元组的最新版本及其事务信息 */
+std::pair<bool, txn_id_t> TransactionManager::GetLatestVersionInfo(const Rid& rid) {
+    auto version_link = GetVersionLink(rid);
+    if (!version_link.has_value()) {
+        return {false, INVALID_TXN_ID};  // 没有版本信息
+    }
+
+    if (version_link->in_progress_) {
+        return {true, version_link->prev_.prev_txn_};  // 有正在进行的事务
+    }
+
+    return {false, INVALID_TXN_ID};  // 无冲突
+}
+
+/** @brief MVCC: 检查版本可见性 */
+bool TransactionManager::IsVersionVisible(Transaction* txn, timestamp_t version_ts, txn_id_t version_txn_id) {
+    if (concurrency_mode_ != ConcurrencyMode::MVCC) {
+        return true;  // 非MVCC模式下所有版本都可见
+    }
+
+    // 如果是同一个事务，版本可见
+    if (version_txn_id == txn->get_transaction_id()) {
+        return true;
+    }
+
+    // 检查版本事务是否已提交
+    std::unique_lock<std::mutex> lock(latch_);
+    auto it = txn_map.find(version_txn_id);
+    if (it != txn_map.end()) {
+        Transaction* version_txn = it->second;
+        lock.unlock();
+
+        // 如果版本事务未提交，版本不可见
+        if (version_txn->get_state() != TransactionState::COMMITTED) {
+            return false;
+        }
+    }
+    lock.unlock();
+
+    // 如果版本时间戳小于等于当前事务的读时间戳，版本可见
+    return version_ts <= txn->get_read_ts();
 }
