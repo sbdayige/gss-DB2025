@@ -318,6 +318,14 @@ value:
     {
         $$ = std::make_shared<BoolLit>($1);
     }
+    |   '-' VALUE_INT %prec UMINUS
+    {
+        $$ = std::make_shared<IntLit>(-$2);
+    }
+    |   '-' VALUE_FLOAT %prec UMINUS
+    {
+        $$ = std::make_shared<FloatLit>(-$2);
+    }
     ;
 
 condition:
