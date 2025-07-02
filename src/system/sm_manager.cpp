@@ -151,8 +151,13 @@ void SmManager::close_db() {
  */
 void SmManager::show_tables(Context* context) {
     std::fstream outfile;
-    outfile.open("output.txt", std::ios::out | std::ios::app);
-    outfile << "| Tables |\n";
+    extern bool output_file_enabled;
+    if (output_file_enabled) {
+        outfile.open("output.txt", std::ios::out | std::ios::app);
+    }
+    if (output_file_enabled) {
+        outfile << "| Tables |\n";
+    }
     RecordPrinter printer(1);
     printer.print_separator(context);
     printer.print_record({"Tables"}, context);
@@ -160,7 +165,9 @@ void SmManager::show_tables(Context* context) {
     for (auto& entry : db_.tabs_) {
         auto& tab = entry.second;
         printer.print_record({tab.name}, context);
-        outfile << "| " << tab.name << " |\n";
+        if (output_file_enabled) {
+            outfile << "| " << tab.name << " |\n";
+        }
     }
     printer.print_separator(context);
     outfile.close();
@@ -268,7 +275,11 @@ void SmManager::drop_table(const std::string& tab_name, Context* context) {
  */
 void SmManager::show_index(const std::string& tab_name, Context* context) {
     TabMeta& tab = db_.get_table(tab_name);
-    std::fstream outfile("output.txt", std::ios::out | std::ios::app);
+    extern bool output_file_enabled;
+    std::fstream outfile;
+    if (output_file_enabled) {
+        outfile.open("output.txt", std::ios::out | std::ios::app);
+    }
 
     // 设置表格列标题
     const std::vector<std::string> captions = {"Table", "Unique", "KeyName"};
@@ -294,7 +305,9 @@ void SmManager::show_index(const std::string& tab_name, Context* context) {
         printer.print_record(index_info, context);
 
         // 写入文件
-        outfile << "| " << tab_name << " | unique | " << col_names << " |\n";
+        if (output_file_enabled) {
+            outfile << "| " << tab_name << " | unique | " << col_names << " |\n";
+        }
     }
 
     // 打印表尾

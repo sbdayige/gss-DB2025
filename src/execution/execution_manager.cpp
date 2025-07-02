@@ -135,15 +135,18 @@ void QlManager::run_cmd_utility(std::shared_ptr<Plan> plan, txn_id_t *txn_id, Co
                 memcpy(context->data_send_ + *(context->offset_), plan_output.c_str(), plan_output.length());
                 *(context->offset_) += plan_output.length();
 
-                // 同时将EXPLAIN结果写入output.txt文件
-                std::fstream outfile;
-                outfile.open("output.txt", std::ios::out | std::ios::app);
-                if (outfile.is_open()) {
-                    outfile << plan_output;
-                    if (!plan_output.empty() && plan_output.back() != '\n') {
-                        outfile << "\n";
+                // 同时将EXPLAIN结果写入output.txt文件（受 output_file_enabled 控制）
+                extern bool output_file_enabled;
+                if (output_file_enabled) {
+                    std::fstream outfile;
+                    outfile.open("output.txt", std::ios::out | std::ios::app);
+                    if (outfile.is_open()) {
+                        outfile << plan_output;
+                        if (!plan_output.empty() && plan_output.back() != '\n') {
+                            outfile << "\n";
+                        }
+                        outfile.close();
                     }
-                    outfile.close();
                 }
             }
         }
@@ -179,14 +182,17 @@ void QlManager::select_from(std::unique_ptr<AbstractExecutor> executorTreeRoot, 
     rec_printer.print_separator(context);
     rec_printer.print_record(captions, context);
     rec_printer.print_separator(context);
-    // print header into file
+    // print header into file（受 output_file_enabled 控制）
+    extern bool output_file_enabled;
     std::fstream outfile;
-    outfile.open("output.txt", std::ios::out | std::ios::app);
-    outfile << "|";
-    for (int i = 0; i < captions.size(); ++i) {
-        outfile << " " << captions[i] << " |";
+    if (output_file_enabled) {
+        outfile.open("output.txt", std::ios::out | std::ios::app);
+        outfile << "|";
+        for (int i = 0; i < captions.size(); ++i) {
+            outfile << " " << captions[i] << " |";
+        }
+        outfile << "\n";
     }
-    outfile << "\n";
     // Print records
     size_t num_rec = 0;
     // 执行query_plan
@@ -213,15 +219,19 @@ void QlManager::select_from(std::unique_ptr<AbstractExecutor> executorTreeRoot, 
         }
         // print record into buffer
         rec_printer.print_record(columns, context);
-        // print record into file
-        outfile << "|";
-        for (int i = 0; i < columns.size(); ++i) {
-            outfile << " " << columns[i] << " |";
+        // print record into file（受 output_file_enabled 控制）
+        if (output_file_enabled) {
+            outfile << "|";
+            for (int i = 0; i < columns.size(); ++i) {
+                outfile << " " << columns[i] << " |";
+            }
+            outfile << "\n";
         }
-        outfile << "\n";
         num_rec++;
     }
-    outfile.close();
+    if (output_file_enabled) {
+        outfile.close();
+    }
     // Print footer into buffer
     rec_printer.print_separator(context);
     // Print record count into buffer
