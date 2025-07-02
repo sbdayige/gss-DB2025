@@ -19,127 +19,117 @@ See the Mulan PSL v2 for more details. */
  * @description: analyze阶段，需要获得脏页表（DPT）和未完成的事务列表（ATT）
  */
 void RecoveryManager::analyze() {
-    std::cout << "Starting Recovery Analyze Phase..." << std::endl;
+    std::cout << "========== RECOVERY ANALYZE PHASE ==========" << std::endl;
     
-    // 清空状态
+    // 初始化
     undo_list_.clear();
     redo_list_.clear();
     
-    // 确定扫描起始位置
-    lsn_t start_lsn = 0;
+    // 查找最后一个检查点
+    lsn_t checkpoint_lsn = INVALID_LSN;
+    lsn_t scan_start_lsn = 0;
+    
+    // 尝试从restart.log文件读取检查点信息
     std::string restart_file = "restart.log";
-    
-    // 尝试读取最后一个检查点
     if (disk_manager_->is_file(restart_file)) {
-        int restart_fd = disk_manager_->open_file(restart_file);
-        char checkpoint_data[sizeof(lsn_t)];
         try {
+            int restart_fd = disk_manager_->open_file(restart_file);
+            char checkpoint_data[sizeof(lsn_t)];
             disk_manager_->read_page(restart_fd, 0, checkpoint_data, sizeof(lsn_t));
-            start_lsn = *reinterpret_cast<lsn_t*>(checkpoint_data);
-            std::cout << "Found checkpoint at LSN: " << start_lsn << std::endl;
-        } catch (...) {
-            start_lsn = 0; // 检查点文件损坏，从头开始
+            checkpoint_lsn = *reinterpret_cast<lsn_t*>(checkpoint_data);
+            scan_start_lsn = checkpoint_lsn;
+            std::cout << "Found checkpoint at LSN: " << checkpoint_lsn << std::endl;
+            disk_manager_->close_file(restart_fd);
+        } catch (const std::exception& e) {
+            std::cout << "Failed to read checkpoint file: " << e.what() << std::endl;
+            scan_start_lsn = 0;
         }
-        disk_manager_->close_file(restart_fd);
+    } else {
+        std::cout << "No checkpoint found, starting from beginning" << std::endl;
+        scan_start_lsn = 0;
     }
     
-    // 扫描日志
-    char log_data[LOG_BUFFER_SIZE];
-    int offset = 0; // 从头开始扫描
-    int bytes_read = disk_manager_->read_log(log_data, LOG_BUFFER_SIZE, offset);
+    // 扫描日志文件
+    std::map<txn_id_t, lsn_t> active_txns; // 活跃事务表，记录每个事务的最后一个LSN
     
-    int current_offset = 0;
-    while (current_offset < bytes_read) {
-        if (current_offset + LOG_HEADER_SIZE > bytes_read) break; // 防止读取越界
-        
-        // 首先读取日志头部
-        LogRecord temp_record;
-        temp_record.deserialize(log_data + current_offset);
-        
-        if (temp_record.log_tot_len_ == 0 || temp_record.log_tot_len_ > LOG_BUFFER_SIZE) break; // 无效记录
-        if (current_offset + temp_record.log_tot_len_ > bytes_read) break; // 防止读取越界
-        
-        switch (temp_record.log_type_) {
-            case LogType::begin:
-                undo_list_.insert(temp_record.log_tid_);
-                break;
-                
-            case LogType::commit:
-                if (undo_list_.count(temp_record.log_tid_)) {
-                    undo_list_.erase(temp_record.log_tid_);
-                    redo_list_.insert(temp_record.log_tid_);
-                }
-                break;
-                
-            case LogType::ABORT:
-                undo_list_.erase(temp_record.log_tid_);
-                break;
-                
-            case LogType::CHECKPOINT:
-                // 检查点记录，继续扫描
-                break;
-                
-            default:
-                // INSERT/DELETE/UPDATE记录，不影响事务状态
-                break;
-        }
-        
-        current_offset += temp_record.log_tot_len_;
-    }
-    
-    std::cout << "Analyze phase completed. Undo list size: " << undo_list_.size() 
-              << ", Redo list size: " << redo_list_.size() << std::endl;
-}
-
-/**
- * @description: 重做所有未落盘的操作
- */
-void RecoveryManager::redo() {
-    std::cout << "Starting Recovery Redo Phase..." << std::endl;
-    
-    if (redo_list_.empty()) {
-        std::cout << "No transactions to redo." << std::endl;
+    // 读取日志文件
+    if (!disk_manager_->is_file("db.log")) {
+        std::cout << "No log file found, recovery complete" << std::endl;
         return;
     }
     
-    // 重新扫描日志，重做已提交事务的操作
-    char log_data[LOG_BUFFER_SIZE];
-    int bytes_read = disk_manager_->read_log(log_data, LOG_BUFFER_SIZE, 0);
+    char log_buffer[LOG_BUFFER_SIZE];
+    int total_bytes_read = disk_manager_->read_log(log_buffer, LOG_BUFFER_SIZE, 0);
+    
+    if (total_bytes_read <= 0) {
+        std::cout << "Empty log file, recovery complete" << std::endl;
+        return;
+    }
     
     int current_offset = 0;
-    while (current_offset < bytes_read) {
-        if (current_offset + LOG_HEADER_SIZE > bytes_read) break;
+    int logs_processed = 0;
+    
+    std::cout << "Scanning log from LSN: " << scan_start_lsn << std::endl;
+    
+    // 扫描日志记录
+    while (current_offset < total_bytes_read) {
+        if (current_offset + LOG_HEADER_SIZE > total_bytes_read) {
+            break; // 不够读取一个完整的日志头
+        }
         
+        // 创建临时日志记录来读取头部信息
         LogRecord temp_record;
-        temp_record.deserialize(log_data + current_offset);
+        temp_record.deserialize(log_buffer + current_offset);
         
-        if (temp_record.log_tot_len_ == 0 || temp_record.log_tot_len_ > LOG_BUFFER_SIZE) break;
-        if (current_offset + temp_record.log_tot_len_ > bytes_read) break;
+        // 检查日志记录的有效性
+        if (temp_record.log_tot_len_ == 0 || 
+            temp_record.log_tot_len_ > LOG_BUFFER_SIZE ||
+            current_offset + temp_record.log_tot_len_ > total_bytes_read) {
+            std::cout << "Invalid log record at offset " << current_offset << std::endl;
+            break;
+        }
         
-        // 只重做已提交事务的操作
-        if (redo_list_.count(temp_record.log_tid_)) {
-            std::cout << "Redoing operation: type=" << LogTypeStr[temp_record.log_type_] << ", txn_id=" << temp_record.log_tid_ << std::endl;
+        // 只处理检查点之后的日志
+        if (temp_record.lsn_ >= scan_start_lsn) {
+            logs_processed++;
+            
+            std::cout << "Processing log: LSN=" << temp_record.lsn_ 
+                      << ", type=" << LogTypeStr[temp_record.log_type_] 
+                      << ", txn_id=" << temp_record.log_tid_ << std::endl;
+            
+            // 根据日志类型更新事务状态
             switch (temp_record.log_type_) {
-                case LogType::INSERT: {
-                    InsertLogRecord insert_log;
-                    insert_log.deserialize(log_data + current_offset);
-                    redo_insert(&insert_log);
+                case LogType::begin:
+                    // 事务开始
+                    active_txns[temp_record.log_tid_] = temp_record.lsn_;
                     break;
-                }
-                case LogType::DELETE: {
-                    DeleteLogRecord delete_log;
-                    delete_log.deserialize(log_data + current_offset);
-                    redo_delete(&delete_log);
+                    
+                case LogType::commit:
+                    // 事务提交
+                    if (active_txns.find(temp_record.log_tid_) != active_txns.end()) {
+                        redo_list_.insert(temp_record.log_tid_);
+                        active_txns.erase(temp_record.log_tid_);
+                    }
                     break;
-                }
-                case LogType::UPDATE: {
-                    UpdateLogRecord update_log;
-                    update_log.deserialize(log_data + current_offset);
-                    redo_update(&update_log);
+                    
+                case LogType::ABORT:
+                    // 事务回滚
+                    active_txns.erase(temp_record.log_tid_);
                     break;
-                }
+                    
+                case LogType::INSERT:
+                case LogType::DELETE:
+                case LogType::UPDATE:
+                    // 数据操作，记录活跃事务
+                    active_txns[temp_record.log_tid_] = temp_record.lsn_;
+                    break;
+                    
+                case LogType::CHECKPOINT:
+                    // 检查点记录
+                    std::cout << "Found checkpoint record at LSN: " << temp_record.lsn_ << std::endl;
+                    break;
+                    
                 default:
-                    std::cout << "Skipping redo for log type: " << LogTypeStr[temp_record.log_type_] << std::endl;
                     break;
             }
         }
@@ -147,44 +137,161 @@ void RecoveryManager::redo() {
         current_offset += temp_record.log_tot_len_;
     }
     
-    std::cout << "Redo phase completed." << std::endl;
+    // 分析结束，所有仍在active_txns中的事务都是未完成的，需要回滚
+    for (const auto& txn : active_txns) {
+        undo_list_.insert(txn.first);
+    }
+    
+    std::cout << "Analyze phase completed:" << std::endl;
+    std::cout << "- Total logs processed: " << logs_processed << std::endl;
+    std::cout << "- Transactions to redo: " << redo_list_.size() << std::endl;
+    std::cout << "- Transactions to undo: " << undo_list_.size() << std::endl;
+    
+    if (!redo_list_.empty()) {
+        std::cout << "Redo list: ";
+        for (auto tid : redo_list_) {
+            std::cout << tid << " ";
+        }
+        std::cout << std::endl;
+    }
+    
+    if (!undo_list_.empty()) {
+        std::cout << "Undo list: ";
+        for (auto tid : undo_list_) {
+            std::cout << tid << " ";
+        }
+        std::cout << std::endl;
+    }
+}
+
+/**
+ * @description: 重做所有未落盘的操作
+ */
+void RecoveryManager::redo() {
+    std::cout << "========== RECOVERY REDO PHASE ==========" << std::endl;
+    
+    if (redo_list_.empty()) {
+        std::cout << "No transactions to redo" << std::endl;
+        return;
+    }
+    
+    // 重新读取日志文件进行重做
+    char log_buffer[LOG_BUFFER_SIZE];
+    int total_bytes_read = disk_manager_->read_log(log_buffer, LOG_BUFFER_SIZE, 0);
+    
+    if (total_bytes_read <= 0) {
+        std::cout << "No log data to redo" << std::endl;
+        return;
+    }
+    
+    int current_offset = 0;
+    int operations_redone = 0;
+    
+    // 扫描日志并重做已提交事务的操作
+    while (current_offset < total_bytes_read) {
+        if (current_offset + LOG_HEADER_SIZE > total_bytes_read) {
+            break;
+        }
+        
+        LogRecord temp_record;
+        temp_record.deserialize(log_buffer + current_offset);
+        
+        if (temp_record.log_tot_len_ == 0 || 
+            temp_record.log_tot_len_ > LOG_BUFFER_SIZE ||
+            current_offset + temp_record.log_tot_len_ > total_bytes_read) {
+            break;
+        }
+        
+        // 只重做已提交事务的数据操作
+        if (redo_list_.find(temp_record.log_tid_) != redo_list_.end()) {
+            switch (temp_record.log_type_) {
+                case LogType::INSERT: {
+                    InsertLogRecord insert_log;
+                    insert_log.deserialize(log_buffer + current_offset);
+                    std::cout << "Redoing INSERT: LSN=" << insert_log.lsn_ 
+                              << ", txn_id=" << insert_log.log_tid_ << std::endl;
+                    redo_insert(&insert_log);
+                    operations_redone++;
+                    break;
+                }
+                case LogType::DELETE: {
+                    DeleteLogRecord delete_log;
+                    delete_log.deserialize(log_buffer + current_offset);
+                    std::cout << "Redoing DELETE: LSN=" << delete_log.lsn_ 
+                              << ", txn_id=" << delete_log.log_tid_ << std::endl;
+                    redo_delete(&delete_log);
+                    operations_redone++;
+                    break;
+                }
+                case LogType::UPDATE: {
+                    UpdateLogRecord update_log;
+                    update_log.deserialize(log_buffer + current_offset);
+                    std::cout << "Redoing UPDATE: LSN=" << update_log.lsn_ 
+                              << ", txn_id=" << update_log.log_tid_ << std::endl;
+                    redo_update(&update_log);
+                    operations_redone++;
+                    break;
+                }
+                default:
+                    // 非数据操作，跳过
+                    break;
+            }
+        }
+        
+        current_offset += temp_record.log_tot_len_;
+    }
+    
+    std::cout << "Redo phase completed. Operations redone: " << operations_redone << std::endl;
 }
 
 /**
  * @description: 回滚未完成的事务
  */
 void RecoveryManager::undo() {
-    std::cout << "Starting Recovery Undo Phase..." << std::endl;
+    std::cout << "========== RECOVERY UNDO PHASE ==========" << std::endl;
     
     if (undo_list_.empty()) {
-        std::cout << "No transactions to undo." << std::endl;
+        std::cout << "No transactions to undo" << std::endl;
         return;
     }
     
     // 收集需要回滚的操作（按LSN倒序）
     std::vector<std::pair<LogType, std::vector<char>>> undo_operations;
     
-    char log_data[LOG_BUFFER_SIZE];
-    int bytes_read = disk_manager_->read_log(log_data, LOG_BUFFER_SIZE, 0);
+    char log_buffer[LOG_BUFFER_SIZE];
+    int total_bytes_read = disk_manager_->read_log(log_buffer, LOG_BUFFER_SIZE, 0);
+    
+    if (total_bytes_read <= 0) {
+        std::cout << "No log data to undo" << std::endl;
+        return;
+    }
     
     int current_offset = 0;
-    while (current_offset < bytes_read) {
-        if (current_offset + LOG_HEADER_SIZE > bytes_read) break;
+    
+    // 收集未完成事务的所有数据操作
+    while (current_offset < total_bytes_read) {
+        if (current_offset + LOG_HEADER_SIZE > total_bytes_read) {
+            break;
+        }
         
         LogRecord temp_record;
-        temp_record.deserialize(log_data + current_offset);
+        temp_record.deserialize(log_buffer + current_offset);
         
-        if (temp_record.log_tot_len_ == 0 || temp_record.log_tot_len_ > LOG_BUFFER_SIZE) break;
-        if (current_offset + temp_record.log_tot_len_ > bytes_read) break;
+        if (temp_record.log_tot_len_ == 0 || 
+            temp_record.log_tot_len_ > LOG_BUFFER_SIZE ||
+            current_offset + temp_record.log_tot_len_ > total_bytes_read) {
+            break;
+        }
         
-        // 收集未完成事务的操作
-        if (undo_list_.count(temp_record.log_tid_)) {
+        // 收集需要回滚的事务的数据操作
+        if (undo_list_.find(temp_record.log_tid_) != undo_list_.end()) {
             if (temp_record.log_type_ == LogType::INSERT || 
                 temp_record.log_type_ == LogType::DELETE || 
                 temp_record.log_type_ == LogType::UPDATE) {
-                // 保存整个日志记录的拷贝
+                
+                // 保存整个日志记录
                 std::vector<char> log_copy(temp_record.log_tot_len_);
-                memcpy(log_copy.data(), log_data + current_offset, temp_record.log_tot_len_);
+                memcpy(log_copy.data(), log_buffer + current_offset, temp_record.log_tot_len_);
                 undo_operations.push_back({temp_record.log_type_, std::move(log_copy)});
             }
         }
@@ -192,27 +299,38 @@ void RecoveryManager::undo() {
         current_offset += temp_record.log_tot_len_;
     }
     
-    // 按LSN倒序执行回滚
+    // 按LSN倒序执行回滚（ARIES要求）
     std::reverse(undo_operations.begin(), undo_operations.end());
+    
+    int operations_undone = 0;
     
     for (auto& operation : undo_operations) {
         switch (operation.first) {
             case LogType::INSERT: {
                 InsertLogRecord insert_log;
                 insert_log.deserialize(operation.second.data());
+                std::cout << "Undoing INSERT: LSN=" << insert_log.lsn_ 
+                          << ", txn_id=" << insert_log.log_tid_ << std::endl;
                 undo_insert(&insert_log);
+                operations_undone++;
                 break;
             }
             case LogType::DELETE: {
                 DeleteLogRecord delete_log;
                 delete_log.deserialize(operation.second.data());
+                std::cout << "Undoing DELETE: LSN=" << delete_log.lsn_ 
+                          << ", txn_id=" << delete_log.log_tid_ << std::endl;
                 undo_delete(&delete_log);
+                operations_undone++;
                 break;
             }
             case LogType::UPDATE: {
                 UpdateLogRecord update_log;
                 update_log.deserialize(operation.second.data());
+                std::cout << "Undoing UPDATE: LSN=" << update_log.lsn_ 
+                          << ", txn_id=" << update_log.log_tid_ << std::endl;
                 undo_update(&update_log);
+                operations_undone++;
                 break;
             }
             default:
@@ -220,45 +338,43 @@ void RecoveryManager::undo() {
         }
     }
     
-    std::cout << "Undo phase completed." << std::endl;
+    std::cout << "Undo phase completed. Operations undone: " << operations_undone << std::endl;
 }
 
 /**
  * @description: 重做插入操作
  */
 void RecoveryManager::redo_insert(InsertLogRecord* log_record) {
-    std::string table_name(log_record->table_name_, log_record->table_name_size_);
-    std::cout << "Redo insert: table=" << table_name << ", rid=(" << log_record->rid_.page_no << "," << log_record->rid_.slot_no << ")" << std::endl;
-    auto fh = sm_manager_->get_file_handle(table_name);
-    
     try {
-        // 先检查页面是否存在，如果不存在则说明需要重新插入
-        bool record_exists = false;
+        std::string table_name(log_record->table_name_, log_record->table_name_size_);
+        auto fh = sm_manager_->get_file_handle(table_name);
+        
+        // 检查记录是否已存在
         try {
-            record_exists = fh->is_record(log_record->rid_);
-        } catch (const std::exception& e) {
-            // 页面不存在或其他错误，说明记录不存在
-            record_exists = false;
+            bool exists = fh->is_record(log_record->rid_);
+            if (exists) {
+                std::cout << "Record already exists at rid=(" << log_record->rid_.page_no 
+                          << "," << log_record->rid_.slot_no << "), skipping redo insert" << std::endl;
+                return;
+            }
+        } catch (...) {
+            // 页面或记录不存在，继续插入
         }
         
-        if (record_exists) {
-            std::cout << "Record already exists at rid=(" << log_record->rid_.page_no << "," << log_record->rid_.slot_no << "), skipping redo insert" << std::endl;
-            return;
-        }
-        
-        // 记录不存在，尝试使用原始位置插入
+        // 尝试在指定位置插入
         try {
             fh->insert_record(log_record->rid_, log_record->insert_value_.data);
-            std::cout << "Successfully redid insert for table=" << table_name << ", rid=(" << log_record->rid_.page_no << "," << log_record->rid_.slot_no << ")" << std::endl;
-        } catch (const std::exception& e) {
-            // 如果指定位置插入失败，使用普通插入方法（让系统自动分配RID）
-            std::cout << "Failed to insert at specific RID, trying auto-allocation: " << e.what() << std::endl;
+            std::cout << "Successfully redid insert at specific RID" << std::endl;
+        } catch (...) {
+            // 指定位置插入失败，使用自动分配
             Context dummy_context(nullptr, nullptr, nullptr);
             Rid new_rid = fh->insert_record(log_record->insert_value_.data, &dummy_context);
-            std::cout << "Successfully redid insert with auto-allocated rid=(" << new_rid.page_no << "," << new_rid.slot_no << ")" << std::endl;
+            std::cout << "Successfully redid insert with auto-allocated RID: (" 
+                      << new_rid.page_no << "," << new_rid.slot_no << ")" << std::endl;
         }
+        
     } catch (const std::exception& e) {
-        std::cout << "Failed to redo insert completely: " << e.what() << std::endl;
+        std::cout << "Failed to redo insert: " << e.what() << std::endl;
     }
 }
 
@@ -269,9 +385,25 @@ void RecoveryManager::redo_delete(DeleteLogRecord* log_record) {
     try {
         std::string table_name(log_record->table_name_, log_record->table_name_size_);
         auto fh = sm_manager_->get_file_handle(table_name);
+        
+        // 检查记录是否存在
+        try {
+            bool exists = fh->is_record(log_record->rid_);
+            if (!exists) {
+                std::cout << "Record already deleted at rid=(" << log_record->rid_.page_no 
+                          << "," << log_record->rid_.slot_no << "), skipping redo delete" << std::endl;
+                return;
+            }
+        } catch (...) {
+            // 记录不存在，跳过删除
+            return;
+        }
+        
         fh->delete_record(log_record->rid_, nullptr);
-    } catch (...) {
-        // 记录可能已被删除，忽略错误
+        std::cout << "Successfully redid delete" << std::endl;
+        
+    } catch (const std::exception& e) {
+        std::cout << "Failed to redo delete: " << e.what() << std::endl;
     }
 }
 
@@ -282,9 +414,25 @@ void RecoveryManager::redo_update(UpdateLogRecord* log_record) {
     try {
         std::string table_name(log_record->table_name_, log_record->table_name_size_);
         auto fh = sm_manager_->get_file_handle(table_name);
+        
+        // 检查记录是否存在
+        try {
+            bool exists = fh->is_record(log_record->rid_);
+            if (!exists) {
+                std::cout << "Record does not exist for update at rid=(" << log_record->rid_.page_no 
+                          << "," << log_record->rid_.slot_no << "), skipping redo update" << std::endl;
+                return;
+            }
+        } catch (...) {
+            // 记录不存在，跳过更新
+            return;
+        }
+        
         fh->update_record(log_record->rid_, log_record->after_value_.data, nullptr);
-    } catch (...) {
-        // 更新可能失败，忽略错误
+        std::cout << "Successfully redid update" << std::endl;
+        
+    } catch (const std::exception& e) {
+        std::cout << "Failed to redo update: " << e.what() << std::endl;
     }
 }
 
@@ -295,9 +443,25 @@ void RecoveryManager::undo_insert(InsertLogRecord* log_record) {
     try {
         std::string table_name(log_record->table_name_, log_record->table_name_size_);
         auto fh = sm_manager_->get_file_handle(table_name);
+        
+        // 检查记录是否存在
+        try {
+            bool exists = fh->is_record(log_record->rid_);
+            if (!exists) {
+                std::cout << "Record already removed for undo insert at rid=(" << log_record->rid_.page_no 
+                          << "," << log_record->rid_.slot_no << ")" << std::endl;
+                return;
+            }
+        } catch (...) {
+            // 记录不存在，已经被删除
+            return;
+        }
+        
         fh->delete_record(log_record->rid_, nullptr);
-    } catch (...) {
-        // 记录可能已被删除，忽略错误
+        std::cout << "Successfully undid insert by deleting record" << std::endl;
+        
+    } catch (const std::exception& e) {
+        std::cout << "Failed to undo insert: " << e.what() << std::endl;
     }
 }
 
@@ -308,9 +472,33 @@ void RecoveryManager::undo_delete(DeleteLogRecord* log_record) {
     try {
         std::string table_name(log_record->table_name_, log_record->table_name_size_);
         auto fh = sm_manager_->get_file_handle(table_name);
-        fh->insert_record(log_record->rid_, log_record->delete_value_.data);
-    } catch (...) {
-        // 插入可能失败，忽略错误
+        
+        // 检查记录是否已存在
+        try {
+            bool exists = fh->is_record(log_record->rid_);
+            if (exists) {
+                std::cout << "Record already exists for undo delete at rid=(" << log_record->rid_.page_no 
+                          << "," << log_record->rid_.slot_no << ")" << std::endl;
+                return;
+            }
+        } catch (...) {
+            // 记录不存在，继续插入
+        }
+        
+        // 尝试在原位置重新插入
+        try {
+            fh->insert_record(log_record->rid_, log_record->delete_value_.data);
+            std::cout << "Successfully undid delete by reinserting record" << std::endl;
+        } catch (...) {
+            // 原位置插入失败，使用自动分配
+            Context dummy_context(nullptr, nullptr, nullptr);
+            Rid new_rid = fh->insert_record(log_record->delete_value_.data, &dummy_context);
+            std::cout << "Successfully undid delete with auto-allocated RID: (" 
+                      << new_rid.page_no << "," << new_rid.slot_no << ")" << std::endl;
+        }
+        
+    } catch (const std::exception& e) {
+        std::cout << "Failed to undo delete: " << e.what() << std::endl;
     }
 }
 
@@ -321,8 +509,24 @@ void RecoveryManager::undo_update(UpdateLogRecord* log_record) {
     try {
         std::string table_name(log_record->table_name_, log_record->table_name_size_);
         auto fh = sm_manager_->get_file_handle(table_name);
+        
+        // 检查记录是否存在
+        try {
+            bool exists = fh->is_record(log_record->rid_);
+            if (!exists) {
+                std::cout << "Record does not exist for undo update at rid=(" << log_record->rid_.page_no 
+                          << "," << log_record->rid_.slot_no << ")" << std::endl;
+                return;
+            }
+        } catch (...) {
+            // 记录不存在，跳过
+            return;
+        }
+        
         fh->update_record(log_record->rid_, log_record->before_value_.data, nullptr);
-    } catch (...) {
-        // 更新可能失败，忽略错误
+        std::cout << "Successfully undid update by restoring old value" << std::endl;
+        
+    } catch (const std::exception& e) {
+        std::cout << "Failed to undo update: " << e.what() << std::endl;
     }
 }
