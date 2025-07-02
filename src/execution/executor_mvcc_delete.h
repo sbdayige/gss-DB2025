@@ -15,6 +15,7 @@ See the Mulan PSL v2 for more details. */
 #include "executor_abstract.h"
 #include "index/ix.h"
 #include "system/sm.h"
+#include "recovery/log_manager.h"
 
 class MvccDeleteExecutor : public AbstractExecutor {
    private:
@@ -99,6 +100,14 @@ class MvccDeleteExecutor : public AbstractExecutor {
 
             MarkRecordAsDeleted(rid);
             std::cout << "DEBUG: Marked record as deleted" << std::endl;
+            
+            // WAL: 记录DELETE日志
+            if (context_ && context_->txn_ && context_->log_mgr_) {
+                DeleteLogRecord log_record(context_->txn_->get_transaction_id(), delete_record, rid, tab_name_);
+                log_record.prev_lsn_ = context_->txn_->get_prev_lsn();
+                lsn_t lsn = context_->log_mgr_->add_log_to_buffer(&log_record);
+                context_->txn_->set_prev_lsn(lsn);
+            }
 
             DeleteFromIndices(delete_record, rid);
             std::cout << "DEBUG: Deleted from indices" << std::endl;

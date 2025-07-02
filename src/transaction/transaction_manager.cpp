@@ -63,6 +63,13 @@ Transaction* TransactionManager::begin(Transaction* txn, LogManager* log_manager
         AssignReadTimestamp(txn);        // 分配读时间戳
     }
 
+    // 记录BEGIN日志
+    if (log_manager != nullptr) {
+        BeginLogRecord log_record(txn->get_transaction_id());
+        lsn_t lsn = log_manager->add_log_to_buffer(&log_record);
+        txn->set_prev_lsn(lsn);
+    }
+
     return txn;
 }
 
@@ -104,6 +111,14 @@ void TransactionManager::commit(Transaction* txn, LogManager* log_manager) {
 
     // 清空事务相关的集合
     txn->clear();
+
+    // 记录COMMIT日志
+    if (log_manager != nullptr) {
+        CommitLogRecord log_record(txn->get_transaction_id());
+        log_record.prev_lsn_ = txn->get_prev_lsn();
+        log_manager->add_log_to_buffer(&log_record);
+        log_manager->flush_log_to_disk();  // 提交时强制刷盘
+    }
 
     // MVCC相关清理
     if (concurrency_mode_ == ConcurrencyMode::MVCC) {
@@ -238,6 +253,14 @@ void TransactionManager::abort(Transaction* txn, LogManager* log_manager) {
 
     // 清空事务状态并设置为ABORTED
     txn->set_state(TransactionState::ABORTED);
+
+    // 记录ABORT日志
+    if (log_manager != nullptr) {
+        AbortLogRecord log_record(txn->get_transaction_id());
+        log_record.prev_lsn_ = txn->get_prev_lsn();
+        log_manager->add_log_to_buffer(&log_record);
+        log_manager->flush_log_to_disk();  // 中止时强制刷盘
+    }
 
     // MVCC相关清理
     if (concurrency_mode_ == ConcurrencyMode::MVCC) {

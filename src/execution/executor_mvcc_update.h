@@ -17,6 +17,7 @@ See the Mulan PSL v2 for more details. */
 #include "index/ix.h"
 #include "parser/ast.h"
 #include "system/sm.h"
+#include "recovery/log_manager.h"
 
 class MvccUpdateExecutor : public AbstractExecutor {
    private:
@@ -190,6 +191,14 @@ class MvccUpdateExecutor : public AbstractExecutor {
 
             // 8. 更新记录
             fh_->update_record(rid, record->data, context_);
+            
+            // WAL: 记录UPDATE日志
+            if (context_ && context_->txn_ && context_->log_mgr_) {
+                UpdateLogRecord log_record(context_->txn_->get_transaction_id(), old_record, *record, rid, tab_name_);
+                log_record.prev_lsn_ = context_->txn_->get_prev_lsn();
+                lsn_t lsn = context_->log_mgr_->add_log_to_buffer(&log_record);
+                context_->txn_->set_prev_lsn(lsn);
+            }
 
             // 9. 记录事务写集
             WriteRecord *write_record = new WriteRecord(WType::UPDATE_TUPLE, tab_name_, rid, old_record);

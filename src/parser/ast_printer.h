@@ -226,6 +226,14 @@ namespace ast
             {
                 std::cout << "ROLLBACK\n";
             }
+            else if (auto x = std::dynamic_pointer_cast<CreateStaticCheckpoint>(node))
+            {
+                std::cout << "CREATE STATIC_CHECKPOINT\n";
+            }
+            else if (auto x = std::dynamic_pointer_cast<Crash>(node))
+            {
+                std::cout << "CRASH\n";
+            }
             else
             {
                 assert(0);

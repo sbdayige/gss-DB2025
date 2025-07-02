@@ -15,6 +15,7 @@ See the Mulan PSL v2 for more details. */
 #include "executor_abstract.h"
 #include "index/ix.h"
 #include "system/sm.h"
+#include "recovery/log_manager.h"
 
 class MvccInsertExecutor : public AbstractExecutor {
    private:
@@ -82,6 +83,14 @@ class MvccInsertExecutor : public AbstractExecutor {
         std::cout << "DEBUG: Before insert_record - file pages: " << fh_->get_file_hdr().num_pages << std::endl;
 
         rid_ = fh_->insert_record(rec.data, context_);
+        
+        // WAL: 记录INSERT日志
+        if (context_ && context_->txn_ && context_->log_mgr_) {
+            InsertLogRecord log_record(context_->txn_->get_transaction_id(), rec, rid_, tab_name_);
+            log_record.prev_lsn_ = context_->txn_->get_prev_lsn();
+            lsn_t lsn = context_->log_mgr_->add_log_to_buffer(&log_record);
+            context_->txn_->set_prev_lsn(lsn);
+        }
 
         std::cout << "DEBUG: After insert_record - file pages: " << fh_->get_file_hdr().num_pages << std::endl;
 

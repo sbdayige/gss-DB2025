@@ -62,6 +62,8 @@ typedef enum PlanTag {
     T_CreateIndex,  // 创建索引命令
     T_DropIndex,    // 删除索引命令
     T_SetKnob,      // 设置系统参数命令
+    T_CreateStaticCheckpoint, // 创建静态检查点命令
+    T_Crash,                  // 系统崩溃命令
     // DML语句类型
     T_Insert,  // 插入数据命令
     T_Update,  // 更新数据命令

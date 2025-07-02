@@ -25,7 +25,8 @@ enum LogType : int {
     DELETE,
     begin,
     commit,
-    ABORT
+    ABORT,
+    CHECKPOINT
 };
 static std::string LogTypeStr[] = {
     "UPDATE",
@@ -33,7 +34,8 @@ static std::string LogTypeStr[] = {
     "DELETE",
     "BEGIN",
     "COMMIT",
-    "ABORT"};
+    "ABORT",
+    "CHECKPOINT"};
 
 class LogRecord {
    public:
@@ -155,6 +157,33 @@ class AbortLogRecord : public LogRecord {
 
     void format_print() override {
         std::cout << "log type in abort_function: " << LogTypeStr[log_type_] << "\n";
+        LogRecord::format_print();
+    }
+};
+
+/**
+ * @brief checkpoint操作的日志记录
+ */
+class CheckpointLogRecord : public LogRecord {
+   public:
+    CheckpointLogRecord() {
+        log_type_ = LogType::CHECKPOINT;
+        lsn_ = INVALID_LSN;
+        log_tot_len_ = LOG_HEADER_SIZE;
+        log_tid_ = INVALID_TXN_ID;
+        prev_lsn_ = INVALID_LSN;
+    }
+
+    void serialize(char* dest) const override {
+        LogRecord::serialize(dest);
+    }
+
+    void deserialize(const char* src) override {
+        LogRecord::deserialize(src);
+    }
+
+    void format_print() override {
+        std::cout << "log type in checkpoint_function: " << LogTypeStr[log_type_] << "\n";
         LogRecord::format_print();
     }
 };
@@ -390,14 +419,18 @@ class LogBuffer {
 /* 日志管理器，负责把日志写入日志缓冲区，以及把日志缓冲区中的内容写入磁盘中 */
 class LogManager {
    public:
-    LogManager(DiskManager* disk_manager) { disk_manager_ = disk_manager; }
+    LogManager(DiskManager* disk_manager) { disk_manager_ = disk_manager; persist_lsn_ = INVALID_LSN; }
 
     lsn_t add_log_to_buffer(LogRecord* log_record);
     void flush_log_to_disk();
+    void create_static_checkpoint();
 
     LogBuffer* get_log_buffer() { return &log_buffer_; }
+    lsn_t get_persist_lsn() { return persist_lsn_; }
 
    private:
+    void flush_log_to_disk_internal();  // 内部刷盘方法，调用时已持有锁
+    
     std::atomic<lsn_t> global_lsn_{0};  // 全局lsn，递增，用于为每条记录分发lsn
     std::mutex latch_;                  // 用于对log_buffer_的互斥访问
     LogBuffer log_buffer_;              // 日志缓冲区

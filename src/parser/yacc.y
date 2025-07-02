@@ -24,7 +24,7 @@ using namespace ast;
 %token SHOW TABLES CREATE TABLE DROP DESC INSERT INTO VALUES DELETE FROM ASC ORDER BY 
 %token WHERE UPDATE SET SELECT INT CHAR FLOAT INDEX AND JOIN INNER LEFT RIGHT FULL SEMI
 %token ON AS EXIT HELP TXN_BEGIN TXN_COMMIT TXN_ABORT TXN_ROLLBACK ORDER_BY 
-%token ENABLE_NESTLOOP ENABLE_SORTMERGE 
+%token ENABLE_NESTLOOP ENABLE_SORTMERGE STATIC_CHECKPOINT CRASH
 %token GROUP HAVING LIMIT COUNT MAX MIN SUM AVG
 // non-keywords
 %token LEQ NEQ GEQ T_EOF
@@ -166,6 +166,14 @@ ddl:
     |   DROP INDEX tbName '(' colNameList ')'
     {
         $$ = std::make_shared<DropIndex>($3, $5);
+    }
+    |   CREATE STATIC_CHECKPOINT
+    {
+        $$ = std::make_shared<CreateStaticCheckpoint>();
+    }
+    |   CRASH
+    {
+        $$ = std::make_shared<Crash>();
     }
     ;
 

@@ -117,6 +117,25 @@ void QlManager::run_cmd_utility(std::shared_ptr<Plan> plan, txn_id_t *txn_id, Co
                 txn_mgr_->abort(context->txn_, context->log_mgr_);
                 break;
             }
+            case T_CreateStaticCheckpoint: {
+                // 创建静态检查点
+                if (context->log_mgr_) {
+                    context->log_mgr_->create_static_checkpoint();
+                    std::string msg = "Static checkpoint created successfully.\n";
+                    memcpy(context->data_send_ + *(context->offset_), msg.c_str(), msg.length());
+                    *(context->offset_) = msg.length();
+                }
+                break;
+            }
+            case T_Crash: {
+                // 模拟系统崩溃
+                std::string msg = "System crashed by user command.\n";
+                memcpy(context->data_send_ + *(context->offset_), msg.c_str(), msg.length());
+                *(context->offset_) = msg.length();
+                // 强制退出程序模拟崩溃
+                exit(0);
+                break;
+            }
             default:
                 throw InternalError("Unexpected field type");
                 break;

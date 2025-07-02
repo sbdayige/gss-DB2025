@@ -140,6 +140,20 @@ struct TxnRollback : public TreeNode {
 };
 
 /**
+ * @brief 创建静态检查点命令AST节点
+ * 表示CREATE STATIC_CHECKPOINT命令
+ */
+struct CreateStaticCheckpoint : public TreeNode {
+};
+
+/**
+ * @brief 系统崩溃命令AST节点
+ * 表示CRASH命令，用于测试故障恢复功能
+ */
+struct Crash : public TreeNode {
+};
+
+/**
  * @brief 类型长度信息AST节点
  *
  * 存储数据类型及其长度信息。
