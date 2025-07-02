@@ -1,0 +1,8 @@
+| id | num |
+| 1 | 1 |
+failure
+failure
+| id | num |
+| 1 | 1 |
+| id | name | amount |
+| 1 | Alice | 100.500000 |
