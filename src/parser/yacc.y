@@ -180,7 +180,6 @@ dml:
     }
     |   UPDATE tbName SET setClauses optWhereClause
     {
-        printf("YACC DEBUG: Parsing UPDATE statement for table: %s\n", $2.c_str());
         $$ = std::make_shared<UpdateStmt>($2, $4, $5);
     }
     |   SELECT selector FROM baseTableList joinList optWhereClause optGroupByClause optHavingClause opt_order_clause optLimitClause

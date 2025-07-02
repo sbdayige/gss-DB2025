@@ -54,7 +54,7 @@ Transaction* TransactionManager::begin(Transaction* txn, LogManager* log_manager
 
     timestamp_t start_ts = next_timestamp_.fetch_add(1);
     txn->set_start_ts(start_ts);  // 设置事务开始时间戳
-    txn->set_txn_mode(false);
+    // 不要强制设置txn_mode，保持调用者设置的值
     txn->set_state(TransactionState::DEFAULT);
 
     // MVCC相关设置

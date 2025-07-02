@@ -42,6 +42,12 @@ See the Mulan PSL v2 for more details. */
 #include "execution/executor_projection.h"
 #include "execution/executor_seq_scan.h"
 #include "execution/executor_update.h"
+// MVCC执行器头文件
+#include "execution/executor_mvcc_delete.h"
+#include "execution/executor_mvcc_index_scan.h"
+#include "execution/executor_mvcc_insert.h"
+#include "execution/executor_mvcc_select.h"
+#include "execution/executor_mvcc_update.h"
 
 /**
  * @brief 门户类型枚举
@@ -101,14 +107,16 @@ struct PortalStmt {
  */
 class Portal {
    private:
-    SmManager* sm_manager_;  ///< 系统管理器指针，用于访问表、索引等元数据
+    SmManager* sm_manager_;        ///< 系统管理器指针，用于访问表、索引等元数据
+    TransactionManager* txn_mgr_;  ///< 事务管理器指针，用于MVCC执行器
 
    public:
     /**
      * @brief 构造函数
      * @param sm_manager 系统管理器指针
+     * @param txn_mgr 事务管理器指针
      */
-    Portal(SmManager* sm_manager) : sm_manager_(sm_manager) {}
+    Portal(SmManager* sm_manager, TransactionManager* txn_mgr) : sm_manager_(sm_manager), txn_mgr_(txn_mgr) {}
     ~Portal() {}
 
     /**
@@ -177,54 +185,65 @@ class Portal {
 
                 case T_Update: {
                     // ===============================
-                    // UPDATE语句处理
+                    // UPDATE语句处理 - MVCC版本
                     // ===============================
-
-                    // 第一步：执行扫描计划，收集需要更新的记录ID
                     std::unique_ptr<AbstractExecutor> scan = convert_plan_executor(x->subplan_, context);
                     std::vector<Rid> rids;
 
-                    // 遍历扫描结果，收集所有符合条件的记录ID
-                    for (scan->beginTuple(); !scan->is_end(); scan->nextTuple()) {
-                        rids.push_back(scan->rid());
+                    scan->beginTuple();
+                    int max_iterations = 1000;  // 防止无限循环
+                    int iteration = 0;
+
+                    while (!scan->is_end() && iteration < max_iterations) {
+                        Rid current_rid = scan->rid();
+                        rids.push_back(current_rid);
+                        scan->nextTuple();
+                        iteration++;
+
+                        // 检测是否卡在同一个记录
+                        if (iteration > 10 && !rids.empty()) {
+                            Rid last_rid = rids.back();
+                            if (current_rid.page_no == last_rid.page_no && current_rid.slot_no == last_rid.slot_no) {
+                                break;
+                            }
+                        }
                     }
 
-                    // 第二步：创建UPDATE执行器，传入收集到的记录ID
-                    std::unique_ptr<AbstractExecutor> root = std::make_unique<UpdateExecutor>(sm_manager_,
-                                                                                              x->tab_name_, x->set_clauses_, x->conds_, rids, context);
+                    std::unique_ptr<AbstractExecutor> root = std::make_unique<MvccUpdateExecutor>(sm_manager_, txn_mgr_,
+                                                                                                  x->tab_name_, x->set_clauses_, x->conds_, rids, context);
 
                     return std::make_shared<PortalStmt>(PORTAL_DML_WITHOUT_SELECT, std::vector<TabCol>(), std::move(root), plan);
                 }
                 case T_Delete: {
                     // ===============================
-                    // DELETE语句处理
+                    // DELETE语句处理 - MVCC版本
                     // ===============================
 
-                    // 第一步：执行扫描计划，收集需要删除的记录ID
                     std::unique_ptr<AbstractExecutor> scan = convert_plan_executor(x->subplan_, context);
+
                     std::vector<Rid> rids;
 
-                    // 遍历扫描结果，收集所有符合条件的记录ID
-                    for (scan->beginTuple(); !scan->is_end(); scan->nextTuple()) {
-                        rids.push_back(scan->rid());
+                    try {
+                        for (scan->beginTuple(); !scan->is_end(); scan->nextTuple()) {
+                            rids.push_back(scan->rid());
+                        }
+                    } catch (const std::exception& e) {
+                        throw;
                     }
-
-                    // 第二步：创建DELETE执行器，传入收集到的记录ID
                     std::unique_ptr<AbstractExecutor> root =
-                        std::make_unique<DeleteExecutor>(sm_manager_, x->tab_name_, x->conds_, rids, context);
+                        std::make_unique<MvccDeleteExecutor>(sm_manager_, txn_mgr_, x->tab_name_, x->conds_, rids, context);
 
                     return std::make_shared<PortalStmt>(PORTAL_DML_WITHOUT_SELECT, std::vector<TabCol>(), std::move(root), plan);
                 }
 
                 case T_Insert: {
                     // ===============================
-                    // INSERT语句处理
+                    // INSERT语句处理 - MVCC版本
                     // ===============================
 
-                    // INSERT操作相对简单，直接创建插入执行器
-                    // 不需要预先扫描，直接插入指定的值
+                    // 使用MVCC插入执行器，支持快照隔离和写入冲突检测
                     std::unique_ptr<AbstractExecutor> root =
-                        std::make_unique<InsertExecutor>(sm_manager_, x->tab_name_, x->values_, context);
+                        std::make_unique<MvccInsertExecutor>(sm_manager_, txn_mgr_, x->tab_name_, x->values_, context);
 
                     return std::make_shared<PortalStmt>(PORTAL_DML_WITHOUT_SELECT, std::vector<TabCol>(), std::move(root), plan);
                 }
@@ -355,14 +374,24 @@ class Portal {
                                                         x->sel_cols_);
         } else if (auto x = std::dynamic_pointer_cast<ScanPlan>(plan)) {
             // ===============================
-            // 扫描计划转换
+            // 扫描计划转换 - MVCC版本
             // ===============================
             if (x->tag == T_SeqScan) {
-                // 顺序扫描：遍历表中所有记录
-                return std::make_unique<SeqScanExecutor>(sm_manager_, x->tab_name_, x->conds_, context);
+                try {
+                    auto executor = std::make_unique<MvccSelectExecutor>(sm_manager_, txn_mgr_, x->tab_name_, x->conds_, x->cols_, context);
+                    return executor;
+                } catch (const std::exception& e) {
+                    throw;
+                }
             } else {
-                // 索引扫描：利用索引快速定位记录
-                return std::make_unique<IndexScanExecutor>(sm_manager_, x->tab_name_, x->conds_, x->index_col_names_, context);
+                try {
+                    // 需要根据index_col_names生成index_name
+                    std::string index_name = sm_manager_->get_ix_manager()->get_index_name(x->tab_name_, x->index_col_names_);
+                    auto executor = std::make_unique<MvccIndexScanExecutor>(sm_manager_, txn_mgr_, x->tab_name_, x->conds_, x->cols_, index_name, context);
+                    return executor;
+                } catch (const std::exception& e) {
+                    throw;
+                }
             }
         } else if (auto x = std::dynamic_pointer_cast<JoinPlan>(plan)) {
             // ===============================

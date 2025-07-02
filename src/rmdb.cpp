@@ -52,7 +52,7 @@ auto ql_manager =
 auto log_manager = std::make_unique<LogManager>(disk_manager.get());
 auto recovery = std::make_unique<RecoveryManager>(
     disk_manager.get(), buffer_pool_manager.get(), sm_manager.get());
-auto portal = std::make_unique<Portal>(sm_manager.get());
+auto portal = std::make_unique<Portal>(sm_manager.get(), txn_manager.get());
 auto analyze = std::make_unique<Analyze>(sm_manager.get());
 pthread_mutex_t *buffer_mutex;
 pthread_mutex_t *sockfd_mutex;
