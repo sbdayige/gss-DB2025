@@ -274,23 +274,17 @@ std::shared_ptr<Plan> Planner::make_one_rel(std::shared_ptr<Query> query) {
 
             // 确定连接类型 - 检查当前表是否与已连接表之间有特定的JOIN类型
             JoinType current_join_type = INNER_JOIN;  // 默认为内连接
-            std::cout << "[DEBUG] Looking for JOIN type for table: " << next_table << std::endl;
-
             // 遍历已连接的表，找到与当前表的连接类型
             for (size_t j = 0; j < i; j++) {
                 auto join_key = std::make_pair(tables[j], next_table);
-                std::cout << "[DEBUG] Checking key: " << tables[j] << " -> " << next_table << std::endl;
                 if (join_type_map.find(join_key) != join_type_map.end()) {
                     current_join_type = join_type_map[join_key];
-                    std::cout << "[DEBUG] Found JOIN type: " << current_join_type << std::endl;
                     break;
                 }
                 // 也检查反向连接
                 auto reverse_join_key = std::make_pair(next_table, tables[j]);
-                std::cout << "[DEBUG] Checking reverse key: " << next_table << " -> " << tables[j] << std::endl;
                 if (join_type_map.find(reverse_join_key) != join_type_map.end()) {
                     current_join_type = join_type_map[reverse_join_key];
-                    std::cout << "[DEBUG] Found reverse JOIN type: " << current_join_type << std::endl;
                     break;
                 }
             }

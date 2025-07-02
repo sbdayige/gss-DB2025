@@ -79,11 +79,8 @@ class MvccInsertExecutor : public AbstractExecutor {
 
             delete[] key;
         }
-        std::cout << "DEBUG: Before insert_record - file pages: " << fh_->get_file_hdr().num_pages << std::endl;
 
         rid_ = fh_->insert_record(rec.data, context_);
-
-        std::cout << "DEBUG: After insert_record - file pages: " << fh_->get_file_hdr().num_pages << std::endl;
 
         for (auto &index : tab_.indexes) {
             auto ih = sm_manager_->ihs_.at(sm_manager_->get_ix_manager()->get_index_name(tab_name_, index.cols)).get();

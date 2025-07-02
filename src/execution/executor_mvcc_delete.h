@@ -41,18 +41,12 @@ class MvccDeleteExecutor : public AbstractExecutor {
     }
 
     std::unique_ptr<RmRecord> Next() override {
-        std::cout << "DEBUG: MvccDeleteExecutor::Next() started, processing " << rids_.size() << " records" << std::endl;
-
         for (auto &rid : rids_) {
-            std::cout << "DEBUG: Processing DELETE for rid: " << rid.page_no << "," << rid.slot_no << std::endl;
-
             if (!CheckWriteConflict(rid)) {
-                std::cout << "DEBUG: Write conflict detected for rid: " << rid.page_no << "," << rid.slot_no << std::endl;
                 throw TransactionAbortException(context_->txn_->get_transaction_id(), AbortReason::DEADLOCK_PREVENTION);
             }
 
             auto record = fh_->get_record(rid, context_);
-            std::cout << "DEBUG: Retrieved record for deletion" << std::endl;
 
             auto delete_record = *record;
             records_.push_back(std::make_unique<RmRecord>(delete_record));
@@ -60,7 +54,6 @@ class MvccDeleteExecutor : public AbstractExecutor {
             undo_log.is_deleted_ = true;  // 表示这是删除操作
             undo_log.tuple_test_ = new RmRecord(delete_record);
             undo_log.ts_ = context_->txn_->get_start_ts();
-            std::cout << "DEBUG: Created undo log with is_deleted_ = true" << std::endl;
 
             // 填充修改字段信息（删除操作影响所有字段）
             undo_log.modified_fields_.resize(tab_.cols.size(), true);
@@ -82,12 +75,10 @@ class MvccDeleteExecutor : public AbstractExecutor {
             }
 
             context_->txn_->AppendUndoLog(undo_log);
-            std::cout << "DEBUG: Appended undo log to transaction" << std::endl;
 
             UndoLink new_link;
             new_link.prev_txn_ = context_->txn_->get_transaction_id();
             new_link.prev_log_idx_ = context_->txn_->GetUndoLogNum() - 1;
-            std::cout << "DEBUG: Created new undo link: txn=" << new_link.prev_txn_ << ", log_idx=" << new_link.prev_log_idx_ << std::endl;
 
             auto old_link = txn_mgr_->GetUndoLink(rid);
             VersionUndoLink version_link;
@@ -95,20 +86,15 @@ class MvccDeleteExecutor : public AbstractExecutor {
             version_link.in_progress_ = true;
 
             txn_mgr_->UpdateVersionLink(rid, version_link, [](std::optional<VersionUndoLink>) { return true; });
-            std::cout << "DEBUG: Updated version link for rid: " << rid.page_no << "," << rid.slot_no << std::endl;
 
             MarkRecordAsDeleted(rid);
-            std::cout << "DEBUG: Marked record as deleted" << std::endl;
 
             DeleteFromIndices(delete_record, rid);
-            std::cout << "DEBUG: Deleted from indices" << std::endl;
 
             WriteRecord *write_record = new WriteRecord(WType::DELETE_TUPLE, tab_name_, rid, delete_record);
             context_->txn_->append_write_record(write_record);
-            std::cout << "DEBUG: Added write record to transaction" << std::endl;
         }
 
-        std::cout << "DEBUG: MvccDeleteExecutor::Next() completed successfully" << std::endl;
         return nullptr;
     }
 

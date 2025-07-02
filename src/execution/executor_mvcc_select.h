@@ -113,10 +113,6 @@ class MvccSelectExecutor : public AbstractExecutor {
                 try {
                     auto page_handle = fh_->fetch_page_handle(1);
                     auto bitmap = page_handle.bitmap;
-                    for (int i = 0; i < file_hdr.num_records_per_page; i++) {
-                        std::cout << (Bitmap::is_set(bitmap, i) ? "1" : "0");
-                    }
-                    std::cout << std::endl;
 
                     int next_bit = Bitmap::next_bit(true, bitmap, file_hdr.num_records_per_page, 0);
 
@@ -154,71 +150,54 @@ class MvccSelectExecutor : public AbstractExecutor {
             throw;
         }
     }
-
     bool IsVisible(const Rid &rid, Transaction *txn) {
-        std::cout << "DEBUG: Checking visibility for rid: " << rid.page_no << "," << rid.slot_no << " in txn: " << txn->get_transaction_id() << std::endl;
-
         // 检查记录版本是否对当前事务可见
         auto version_link = txn_mgr_->GetVersionLink(rid);
         if (!version_link.has_value()) {
-            std::cout << "DEBUG: No version link, record is visible" << std::endl;
             // 没有版本链，说明是基础版本，可见
             return true;
         }
 
         // 检查版本链中的事务状态
         auto prev_txn_id = version_link->prev_.prev_txn_;
-        std::cout << "DEBUG: Version link prev_txn_id: " << prev_txn_id << std::endl;
 
         if (prev_txn_id == INVALID_TXN_ID) {
-            std::cout << "DEBUG: Invalid txn_id, record is visible" << std::endl;
             return true;
         }
 
         if (prev_txn_id == txn->get_transaction_id()) {
-            std::cout << "DEBUG: Same transaction, checking delete status..." << std::endl;
             // 自己的修改，检查是否被删除
             auto undo_log = GetUndoLog(version_link->prev_);
             if (undo_log && undo_log->is_deleted_) {
-                std::cout << "DEBUG: Record deleted by same transaction, not visible" << std::endl;
                 return false;  // 被自己删除了，不可见
             }
-            std::cout << "DEBUG: Record modified by same transaction, visible" << std::endl;
             return true;
         }
 
         // 检查其他事务的状态
         auto prev_txn = txn_mgr_->find_transaction(prev_txn_id);
         if (!prev_txn) {
-            std::cout << "DEBUG: Previous transaction not found, record is visible" << std::endl;
-            // 事务不存在，可能已经提交或回滚
+            // 事务不存在，可能已经提交或回滚，记录可见（返回基础版本）
             return true;
         }
 
-        std::cout << "DEBUG: Previous transaction state: " << (int)prev_txn->get_state() << std::endl;
-
         if (prev_txn->get_state() == TransactionState::COMMITTED) {
             // 已提交的事务，检查时间戳
-            std::cout << "DEBUG: Previous transaction committed, checking timestamps..." << std::endl;
-            std::cout << "DEBUG: prev_commit_ts: " << prev_txn->get_commit_ts() << ", current_read_ts: " << txn->get_read_ts() << std::endl;
-
             if (prev_txn->get_commit_ts() <= txn->get_read_ts()) {
-                // 检查是否是删除操作
+                // 在快照时间内，检查是否是删除操作
                 auto undo_log = GetUndoLog(version_link->prev_);
                 if (undo_log && undo_log->is_deleted_) {
-                    std::cout << "DEBUG: Record was deleted by committed transaction, not visible" << std::endl;
                     return false;  // 已被删除，不可见
                 }
-                std::cout << "DEBUG: Record modified by committed transaction, visible" << std::endl;
                 return true;
+            } else {
+                // 时间戳冲突，记录对当前事务不可见（应该看到更早的版本）
+                return true;  // 仍然可见，但会返回更早的版本
             }
-            std::cout << "DEBUG: Timestamp conflict, record not visible" << std::endl;
-            return false;  // 时间戳冲突，不可见
+        } else {
+            // 未提交的事务，记录对当前事务不可见（应该看到更早的版本）
+            return true;  // 仍然可见，但会返回更早的版本
         }
-
-        std::cout << "DEBUG: Previous transaction not committed, record not visible" << std::endl;
-        // 未提交的事务，不可见
-        return false;
     }
 
     std::unique_ptr<RmRecord> GetVisibleVersion(const Rid &rid, Transaction *txn) {
@@ -243,8 +222,8 @@ class MvccSelectExecutor : public AbstractExecutor {
                     if (undo_log->is_deleted_) {
                         return nullptr;  // 被删除
                     } else {
-                        // 返回更新前的版本（使用tuple_test_）
-                        return std::make_unique<RmRecord>(*undo_log->tuple_test_);
+                        // 对于同一事务的修改，返回表中的当前版本（更新后的值），而不是UndoLog中的旧值
+                        return fh_->get_record(rid, context_);
                     }
                 }
                 break;
@@ -262,11 +241,28 @@ class MvccSelectExecutor : public AbstractExecutor {
                         if (undo_log->is_deleted_) {
                             return nullptr;  // 被删除
                         } else {
-                            return std::make_unique<RmRecord>(*undo_log->tuple_test_);
+                            // 对于其他已提交事务的修改，返回表中的当前版本（更新后的值）
+                            return fh_->get_record(rid, context_);
                         }
                     }
                     break;
+                } else {
+                    // 未提交或时间戳冲突的事务，应该返回UndoLog中的更新前版本
+                    auto undo_log = GetUndoLog(current_link);
+                    if (undo_log) {
+                        if (undo_log->is_deleted_) {
+                            // 如果是删除操作，且事务未提交，则记录仍可见（返回删除前的版本）
+                            return std::make_unique<RmRecord>(*undo_log->tuple_test_);
+                        } else {
+                            // 如果是更新操作，且事务未提交，则返回更新前的版本
+                            return std::make_unique<RmRecord>(*undo_log->tuple_test_);
+                        }
+                    }
+                    // 如果没有UndoLog，继续查找更早的版本
                 }
+            } else {
+                // 事务不存在，可能已经提交或回滚，返回当前版本
+                return fh_->get_record(rid, context_);
             }
 
             // 继续查找更早的版本
@@ -278,7 +274,7 @@ class MvccSelectExecutor : public AbstractExecutor {
             }
         }
 
-        // 返回基础版本
+        // 返回基础版本（原始记录）
         return fh_->get_record(rid, context_);
     }
 

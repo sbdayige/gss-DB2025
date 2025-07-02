@@ -87,6 +87,24 @@ void TransactionManager::commit(Transaction* txn, LogManager* log_manager) {
     if (concurrency_mode_ == ConcurrencyMode::MVCC) {
         commit_ts = next_timestamp_.fetch_add(1);
         last_commit_ts_.store(std::max(last_commit_ts_.load(), commit_ts));
+        txn->set_commit_ts(commit_ts);  // 设置事务的提交时间戳
+
+        // 更新所有相关版本链的状态为已完成
+        auto write_set = txn->get_write_set();
+        for (auto write_record : *write_set) {
+            auto version_link_opt = GetVersionLink(write_record->GetRid());
+            if (version_link_opt.has_value() &&
+                version_link_opt->prev_.prev_txn_ == txn->get_transaction_id() &&
+                version_link_opt->in_progress_) {
+                // 创建新的版本链，设置in_progress为false
+                VersionUndoLink updated_link = version_link_opt.value();
+                updated_link.in_progress_ = false;
+
+                // 更新版本链状态
+                UpdateVersionLink(write_record->GetRid(), updated_link,
+                                  [](std::optional<VersionUndoLink>) { return true; });
+            }
+        }
     }
 
     std::shared_ptr<std::unordered_set<LockDataId>> lock_set = txn->get_lock_set();

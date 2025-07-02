@@ -45,36 +45,25 @@ class MvccUpdateExecutor : public AbstractExecutor {
     }
 
     std::unique_ptr<RmRecord> Next() override {
-        std::cout << "DEBUG: MvccUpdateExecutor::Next() started, processing " << rids_.size() << " records" << std::endl;
-
         // MVCC Update Logic
 
         for (auto &rid : rids_) {
-            std::cout << "DEBUG: Processing UPDATE for rid: " << rid.page_no << "," << rid.slot_no << std::endl;
-
             // 1. MVCC写入冲突检测
             if (!CheckWriteConflict(rid)) {
-                std::cout << "DEBUG: Write conflict detected for rid: " << rid.page_no << "," << rid.slot_no << std::endl;
                 throw TransactionAbortException(context_->txn_->get_transaction_id(), AbortReason::DEADLOCK_PREVENTION);
             }
-            std::cout << "DEBUG: Write conflict check passed" << std::endl;
 
             // 2. 获取当前记录
             auto record = fh_->get_record(rid, context_);
-            std::cout << "DEBUG: Retrieved record for update" << std::endl;
 
             auto old_record = *record;
             records_.push_back(std::make_unique<RmRecord>(old_record));
-            std::cout << "DEBUG: Saved old record, processing " << set_clauses_.size() << " set clauses" << std::endl;
 
             // 3. 构造新记录
             for (auto &set_clause : set_clauses_) {
-                std::cout << "DEBUG: Processing set clause for column: " << set_clause.lhs.col_name << std::endl;
-
                 auto lhs_col = tab_.get_col(set_clause.lhs.col_name);
 
                 if (set_clause.rhs_type == SET_RHS_VALUE) {
-                    std::cout << "DEBUG: Processing direct value assignment" << std::endl;
                     // 直接赋值
                     if (lhs_col->type != set_clause.rhs_val.type) {
                         throw IncompatibleTypeError(coltype2str(lhs_col->type), coltype2str(set_clause.rhs_val.type));
@@ -84,7 +73,6 @@ class MvccUpdateExecutor : public AbstractExecutor {
                     memcpy(record->data + lhs_col->offset, set_clause.rhs_val.raw->data, lhs_col->len);
 
                 } else if (set_clause.rhs_type == SET_RHS_COL) {
-                    std::cout << "DEBUG: Processing column assignment" << std::endl;
                     // 列赋值
                     auto rhs_col = tab_.get_col(set_clause.rhs_col.col_name);
                     if (lhs_col->type != rhs_col->type) {
@@ -94,10 +82,8 @@ class MvccUpdateExecutor : public AbstractExecutor {
                     memcpy(record->data + lhs_col->offset, record->data + rhs_col->offset, lhs_col->len);
 
                 } else if (set_clause.rhs_type == SET_RHS_EXPR) {
-                    std::cout << "DEBUG: Processing expression assignment" << std::endl;
                     // 表达式赋值（使用execution_common中的表达式求值器）
                     Value expr_result = EvaluateArithExpr(set_clause.rhs_expr, *record, tab_.cols);
-                    std::cout << "DEBUG: Expression evaluated, result type: " << (int)expr_result.type << std::endl;
 
                     // 类型检查和转换
                     if (lhs_col->type == TYPE_INT && expr_result.type == TYPE_FLOAT) {
@@ -194,10 +180,8 @@ class MvccUpdateExecutor : public AbstractExecutor {
             // 9. 记录事务写集
             WriteRecord *write_record = new WriteRecord(WType::UPDATE_TUPLE, tab_name_, rid, old_record);
             context_->txn_->append_write_record(write_record);
-            std::cout << "DEBUG: Update completed for rid: " << rid.page_no << "," << rid.slot_no << std::endl;
         }
 
-        std::cout << "DEBUG: MvccUpdateExecutor::Next() completed successfully" << std::endl;
         return nullptr;
     }
 
