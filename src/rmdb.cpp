@@ -44,7 +44,7 @@ auto sm_manager =
                                 rm_manager.get(), ix_manager.get());
 auto lock_manager = std::make_unique<LockManager>();
 auto txn_manager =
-    std::make_unique<TransactionManager>(lock_manager.get(), sm_manager.get());
+    std::make_unique<TransactionManager>(lock_manager.get(), sm_manager.get(), ConcurrencyMode::MVCC);
 auto planner = std::make_unique<Planner>(sm_manager.get());
 auto optimizer = std::make_unique<Optimizer>(sm_manager.get(), planner.get());
 auto ql_manager =
