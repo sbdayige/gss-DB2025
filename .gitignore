@@ -52,7 +52,9 @@ Thumbs.db
 runS.sh
 runC.sh
 test.sh
-*_test_db/
-lex.yy.cpp
+
 src/parser/lex.yy.*
 src/parser/yacc.tab.*
+
+*_test_db/
+cmake-build-debug-wsl/
