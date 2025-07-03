@@ -198,7 +198,7 @@ class MvccUpdateExecutor : public AbstractExecutor {
             // 7. 更新索引
             UpdateIndicesForMvcc(old_record, *record, rid);
 
-            // 8. 更新记录
+            // 8. 更新记录（MVCC中物理记录保存最新版本）
             fh_->update_record(rid, record->data, context_);
 
             // 9. 记录事务写集
