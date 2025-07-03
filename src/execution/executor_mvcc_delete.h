@@ -131,8 +131,37 @@ class MvccDeleteExecutor : public AbstractExecutor {
 
    private:
     bool CheckWriteConflict(const Rid &rid) {
-        // 直接调用事务管理器的标准写冲突检测逻辑，保证所有in_progress和已提交但未可见的版本都能检测到
-        return txn_mgr_->CheckWriteConflict(context_->txn_, rid);
+        auto version_link = txn_mgr_->GetVersionLink(rid);
+        if (!version_link.has_value()) {
+            return true;  // 没有版本链，可以删除
+        }
+        auto prev_txn_id = version_link->prev_.prev_txn_;
+        if (prev_txn_id == INVALID_TXN_ID) {
+            return true;  // 基础版本，可以删除
+        }
+
+        if (prev_txn_id == context_->txn_->get_transaction_id()) {
+            return true;  // 自己的修改，可以删除
+        }
+
+        // 检查其他事务的状态
+        auto prev_txn = txn_mgr_->find_transaction(prev_txn_id);
+        if (!prev_txn) {
+            return true;  // 事务不存在，可能已经提交
+        }
+
+        if (prev_txn->get_state() == TransactionState::COMMITTED) {
+            // 已提交的事务，检查时间戳冲突
+            if (prev_txn->get_commit_ts() > context_->txn_->get_read_ts()) {
+                return false;  // 写入冲突
+            }
+            return true;
+        } else if (prev_txn->get_state() == TransactionState::ABORTED) {
+            return true;  // ABORTED的事务不应该造成冲突
+        }
+
+        // 未提交的事务，写入冲突
+        return false;
     }
 
     void MarkRecordAsDeleted(const Rid &rid) {
