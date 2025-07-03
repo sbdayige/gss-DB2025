@@ -56,3 +56,4 @@ test.sh
 lex.yy.cpp
 src/parser/lex.yy.*
 src/parser/yacc.tab.*
+cmake-build-debug-wsl/
