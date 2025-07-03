@@ -44,7 +44,7 @@ auto sm_manager =
                                 rm_manager.get(), ix_manager.get());
 auto lock_manager = std::make_unique<LockManager>();
 auto txn_manager =
-    std::make_unique<TransactionManager>(lock_manager.get(), sm_manager.get());
+    std::make_unique<TransactionManager>(lock_manager.get(), sm_manager.get(), ConcurrencyMode::MVCC);
 auto planner = std::make_unique<Planner>(sm_manager.get());
 auto optimizer = std::make_unique<Optimizer>(sm_manager.get(), planner.get());
 auto ql_manager =
@@ -92,6 +92,9 @@ void SetTransaction(txn_id_t *txn_id, Context *context) {
     }
 }
 
+// 控制是否写入 output.txt 的全局变量，默认开启
+bool output_file_enabled = true;
+
 void *client_handler(void *sock_fd) {
     int fd = *((int *)sock_fd);
     pthread_mutex_unlock(sockfd_mutex);
@@ -135,9 +138,34 @@ void *client_handler(void *sock_fd) {
             std::cout << "Server crash" << std::endl;
             exit(1);
         }
+        if (strncmp(data_recv, "set output_file off", 19) == 0) {
+            output_file_enabled = false;
+            std::cout << "Output file writing disabled by client command." << std::endl;
+            // 给客户端返回确认信息
+            std::string str = "output_file off\n";
+            memcpy(data_send, str.c_str(), str.length());
+            data_send[str.length()] = '\0';
+            offset = str.length();
+            if (write(fd, data_send, offset + 1) == -1) {
+                break;
+            }
+            continue;
+        }
+        if (strncmp(data_recv, "set output_file on", 18) == 0) {
+            output_file_enabled = true;
+            std::cout << "Output file writing enabled by client command." << std::endl;
+            // 给客户端返回确认信息
+            std::string str = "output_file on\n";
+            memcpy(data_send, str.c_str(), str.length());
+            data_send[str.length()] = '\0';
+            offset = str.length();
+            if (write(fd, data_send, offset + 1) == -1) {
+                break;
+            }
+            continue;
+        }
 
-        std::cout << "Read from client " << fd << ": " << data_recv
-                  << std::endl;
+        std::cout << "Read from client " << fd << ": " << data_recv << std::endl;
 
         memset(data_send, '\0', BUFFER_LENGTH);
         offset = 0;
@@ -184,10 +212,12 @@ void *client_handler(void *sock_fd) {
                     txn_manager->abort(context->txn_, log_manager.get());
                     std::cout << e.GetInfo() << std::endl;
 
-                    std::fstream outfile;
-                    outfile.open("output.txt", std::ios::out | std::ios::app);
-                    outfile << str;
-                    outfile.close();
+                    if (output_file_enabled) {
+                        std::fstream outfile;
+                        outfile.open("output.txt", std::ios::out | std::ios::app);
+                        outfile << str;
+                        outfile.close();
+                    }
                 } catch (RMDBError &e) {
                     // 遇到异常，需要打印failure到output.txt文件中，并发异常信息返回给客户端
                     // 遇到异常，打印异常信息
@@ -198,10 +228,12 @@ void *client_handler(void *sock_fd) {
                     offset = e.get_msg_len() + 1;
 
                     // 将报错信息写入output.txt
-                    std::fstream outfile;
-                    outfile.open("output.txt", std::ios::out | std::ios::app);
-                    outfile << "failure\n";
-                    outfile.close();
+                    if (output_file_enabled) {
+                        std::fstream outfile;
+                        outfile.open("output.txt", std::ios::out | std::ios::app);
+                        outfile << "failure\n";
+                        outfile.close();
+                    }
                 }
             }
         } else {
@@ -212,10 +244,12 @@ void *client_handler(void *sock_fd) {
             offset = str.length();
 
             // 将报错信息写入output.txt
-            std::fstream outfile;
-            outfile.open("output.txt", std::ios::out | std::ios::app);
-            outfile << "failure\n";
-            outfile.close();
+            if (output_file_enabled) {
+                std::fstream outfile;
+                outfile.open("output.txt", std::ios::out | std::ios::app);
+                outfile << "failure\n";
+                outfile.close();
+            }
         }
         if (finish_analyze == false) {
             yy_delete_buffer(buf);

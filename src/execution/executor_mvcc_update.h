@@ -43,49 +43,50 @@ class MvccUpdateExecutor : public AbstractExecutor {
         conds_ = conds;
         rids_ = rids;
         context_ = context;
+
+        // 间隙锁：如果没有找到匹配的记录，需要对WHERE条件加间隙锁
+        // 防止其他事务插入满足条件的记录
+        if (!conds_.empty()) {
+            int tab_fd = fh_->GetFd();
+            context_->lock_mgr_->lock_gap(context_->txn_, tab_fd, conds_);
+        }
     }
 
     std::unique_ptr<RmRecord> Next() override {
-        std::cout << "DEBUG: MvccUpdateExecutor::Next() started, processing " << rids_.size() << " records" << std::endl;
-
         // MVCC Update Logic
 
         for (auto &rid : rids_) {
-            std::cout << "DEBUG: Processing UPDATE for rid: " << rid.page_no << "," << rid.slot_no << std::endl;
-
             // 1. MVCC写入冲突检测
             if (!CheckWriteConflict(rid)) {
-                std::cout << "DEBUG: Write conflict detected for rid: " << rid.page_no << "," << rid.slot_no << std::endl;
                 throw TransactionAbortException(context_->txn_->get_transaction_id(), AbortReason::DEADLOCK_PREVENTION);
             }
-            std::cout << "DEBUG: Write conflict check passed" << std::endl;
 
             // 2. 获取当前记录
             auto record = fh_->get_record(rid, context_);
-            std::cout << "DEBUG: Retrieved record for update" << std::endl;
 
             auto old_record = *record;
             records_.push_back(std::make_unique<RmRecord>(old_record));
-            std::cout << "DEBUG: Saved old record, processing " << set_clauses_.size() << " set clauses" << std::endl;
 
             // 3. 构造新记录
             for (auto &set_clause : set_clauses_) {
-                std::cout << "DEBUG: Processing set clause for column: " << set_clause.lhs.col_name << std::endl;
-
                 auto lhs_col = tab_.get_col(set_clause.lhs.col_name);
 
                 if (set_clause.rhs_type == SET_RHS_VALUE) {
-                    std::cout << "DEBUG: Processing direct value assignment" << std::endl;
-                    // 直接赋值
-                    if (lhs_col->type != set_clause.rhs_val.type) {
+                    if (lhs_col->type == TYPE_INT && set_clause.rhs_val.type == TYPE_FLOAT) {
+                        int v = (int)set_clause.rhs_val.float_val;
+                        memcpy(record->data + lhs_col->offset, &v, lhs_col->len);
+                    } else if (lhs_col->type == TYPE_FLOAT && set_clause.rhs_val.type == TYPE_INT) {
+                        float v = (float)set_clause.rhs_val.int_val;
+                        memcpy(record->data + lhs_col->offset, &v, lhs_col->len);
+                    } else if (lhs_col->type != set_clause.rhs_val.type) {
                         throw IncompatibleTypeError(coltype2str(lhs_col->type), coltype2str(set_clause.rhs_val.type));
+                    } else {
+                        if (!set_clause.rhs_val.raw) {
+                            set_clause.rhs_val.init_raw(lhs_col->len);
+                        }
+                        memcpy(record->data + lhs_col->offset, set_clause.rhs_val.raw->data, lhs_col->len);
                     }
-
-                    set_clause.rhs_val.init_raw(lhs_col->len);
-                    memcpy(record->data + lhs_col->offset, set_clause.rhs_val.raw->data, lhs_col->len);
-
                 } else if (set_clause.rhs_type == SET_RHS_COL) {
-                    std::cout << "DEBUG: Processing column assignment" << std::endl;
                     // 列赋值
                     auto rhs_col = tab_.get_col(set_clause.rhs_col.col_name);
                     if (lhs_col->type != rhs_col->type) {
@@ -95,10 +96,8 @@ class MvccUpdateExecutor : public AbstractExecutor {
                     memcpy(record->data + lhs_col->offset, record->data + rhs_col->offset, lhs_col->len);
 
                 } else if (set_clause.rhs_type == SET_RHS_EXPR) {
-                    std::cout << "DEBUG: Processing expression assignment" << std::endl;
                     // 表达式赋值（使用execution_common中的表达式求值器）
                     Value expr_result = EvaluateArithExpr(set_clause.rhs_expr, *record, tab_.cols);
-                    std::cout << "DEBUG: Expression evaluated, result type: " << (int)expr_result.type << std::endl;
 
                     // 类型检查和转换
                     if (lhs_col->type == TYPE_INT && expr_result.type == TYPE_FLOAT) {
@@ -144,7 +143,18 @@ class MvccUpdateExecutor : public AbstractExecutor {
             UndoLog undo_log;
             undo_log.is_deleted_ = false;  // 表示这是更新操作
             undo_log.tuple_test_ = new RmRecord(old_record);
-            undo_log.ts_ = context_->txn_->get_start_ts();  // 填充修改字段信息和旧值
+            undo_log.ts_ = context_->txn_->get_start_ts();
+
+            // 设置前一个版本链接
+            auto old_version_link = txn_mgr_->GetVersionLink(rid);
+            if (old_version_link.has_value()) {
+                undo_log.prev_version_ = old_version_link->prev_;
+            } else {
+                undo_log.prev_version_.prev_txn_ = INVALID_TXN_ID;
+                undo_log.prev_version_.prev_log_idx_ = -1;
+            }
+
+            // 填充修改字段信息和旧值
             undo_log.modified_fields_.resize(tab_.cols.size(), false);
             undo_log.tuple_.clear();
             for (size_t i = 0; i < tab_.cols.size(); ++i) {
@@ -189,7 +199,7 @@ class MvccUpdateExecutor : public AbstractExecutor {
             // 7. 更新索引
             UpdateIndicesForMvcc(old_record, *record, rid);
 
-            // 8. 更新记录
+            // 8. 更新记录（MVCC中物理记录保存最新版本）
             fh_->update_record(rid, record->data, context_);
             
             // WAL: 记录UPDATE日志
@@ -203,10 +213,8 @@ class MvccUpdateExecutor : public AbstractExecutor {
             // 9. 记录事务写集
             WriteRecord *write_record = new WriteRecord(WType::UPDATE_TUPLE, tab_name_, rid, old_record);
             context_->txn_->append_write_record(write_record);
-            std::cout << "DEBUG: Update completed for rid: " << rid.page_no << "," << rid.slot_no << std::endl;
         }
 
-        std::cout << "DEBUG: MvccUpdateExecutor::Next() completed successfully" << std::endl;
         return nullptr;
     }
 
@@ -224,6 +232,7 @@ class MvccUpdateExecutor : public AbstractExecutor {
         }
 
         auto prev_txn_id = version_link->prev_.prev_txn_;
+
         if (prev_txn_id == INVALID_TXN_ID) {
             return true;  // 基础版本，可以更新
         }
@@ -239,14 +248,15 @@ class MvccUpdateExecutor : public AbstractExecutor {
         }
 
         if (prev_txn->get_state() == TransactionState::COMMITTED) {
-            // 已提交的事务，检查时间戳冲突
             if (prev_txn->get_commit_ts() > context_->txn_->get_read_ts()) {
                 return false;  // 写入冲突
             }
             return true;
+        } else if (prev_txn->get_state() == TransactionState::ABORTED) {
+            return true;  // ABORTED的事务不应该造成冲突
         }
 
-        // 未提交的事务，写入冲突
+        // 未提交的事务造成写入冲突
         return false;
     }
 
@@ -269,30 +279,38 @@ class MvccUpdateExecutor : public AbstractExecutor {
     }
 
     bool IsVisible(const Rid &rid, Transaction *txn) {
+        // UPDATE操作需要看到所有记录以便进行写冲突检测
+        // 即使记录被其他事务修改，也应该可见，但会在CheckWriteConflict中检测冲突
         auto version_link = txn_mgr_->GetVersionLink(rid);
         if (!version_link.has_value()) {
-            return true;
+            return true;  // 没有版本链，记录可见
         }
 
         auto prev_txn_id = version_link->prev_.prev_txn_;
         if (prev_txn_id == INVALID_TXN_ID) {
-            return true;
+            return true;  // 无效事务ID，记录可见
         }
 
         if (prev_txn_id == txn->get_transaction_id()) {
-            return true;
+            // 自己的修改，检查是否被删除
+            auto undo_log = GetUndoLog(version_link->prev_);
+            if (undo_log && undo_log->is_deleted_) {
+                return false;  // 被自己删除了，不可见
+            }
+            return true;  // 自己的修改，可见
         }
 
-        auto prev_txn = txn_mgr_->find_transaction(prev_txn_id);
-        if (!prev_txn) {
-            return true;
-        }
+        // 对于其他事务的修改，UPDATE操作应该能看到记录以便进行写冲突检测
+        // 实际的冲突检测在CheckWriteConflict中进行
+        return true;
+    }
 
-        if (prev_txn->get_state() == TransactionState::COMMITTED) {
-            return prev_txn->get_commit_ts() < txn->get_read_ts();
+    std::unique_ptr<UndoLog> GetUndoLog(const UndoLink &link) {
+        auto undo_log_opt = txn_mgr_->GetUndoLogOptional(link);
+        if (undo_log_opt.has_value()) {
+            return std::make_unique<UndoLog>(undo_log_opt.value());
         }
-
-        return false;
+        return nullptr;
     }
 
     void UpdateIndicesForMvcc(const RmRecord &old_record, const RmRecord &new_record, const Rid &rid) {

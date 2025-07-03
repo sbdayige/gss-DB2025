@@ -94,6 +94,24 @@ void TransactionManager::commit(Transaction* txn, LogManager* log_manager) {
     if (concurrency_mode_ == ConcurrencyMode::MVCC) {
         commit_ts = next_timestamp_.fetch_add(1);
         last_commit_ts_.store(std::max(last_commit_ts_.load(), commit_ts));
+        txn->set_commit_ts(commit_ts);  // 设置事务的提交时间戳
+
+        // 更新所有相关版本链的状态为已完成
+        auto write_set = txn->get_write_set();
+        for (auto write_record : *write_set) {
+            auto version_link_opt = GetVersionLink(write_record->GetRid());
+            if (version_link_opt.has_value() &&
+                version_link_opt->prev_.prev_txn_ == txn->get_transaction_id() &&
+                version_link_opt->in_progress_) {
+                // 创建新的版本链，设置in_progress为false
+                VersionUndoLink updated_link = version_link_opt.value();
+                updated_link.in_progress_ = false;
+
+                // 更新版本链状态
+                UpdateVersionLink(write_record->GetRid(), updated_link,
+                                  [](std::optional<VersionUndoLink>) { return true; });
+            }
+        }
     }
 
     std::shared_ptr<std::unordered_set<LockDataId>> lock_set = txn->get_lock_set();
@@ -211,26 +229,50 @@ void TransactionManager::abort(Transaction* txn, LogManager* log_manager) {
             handle->update_record(rid, old_rec.data, &context);
 
         } else if (write_type == WType::DELETE_TUPLE) {
-            // 对于DELETE操作，重新插入被删除的记录
+            // 对于DELETE操作的回滚处理
             auto rec = (*iter)->GetRecord();
 
-            // 重新插入记录
-            handle->insert_record(rid, rec.data);
+            if (concurrency_mode_ == ConcurrencyMode::MVCC) {
+                // MVCC模式：DELETE操作没有物理删除记录，只是在版本链中标记删除
+                // 回滚时只需要清除版本链中的删除标记，不需要重新插入记录
 
-            // 重新插入索引项
-            for (const auto& index : sm_manager_->db_.get_table(table_name).indexes) {
-                auto ix_name = sm_manager_->get_ix_manager()->get_index_name(table_name, index.cols);
-                auto* ih = sm_manager_->ihs_.at(ix_name).get();
+                // 清除版本链（这会在下面的版本链清理中自动处理）
+                // 这里只需要恢复索引项
+                for (const auto& index : sm_manager_->db_.get_table(table_name).indexes) {
+                    auto ix_name = sm_manager_->get_ix_manager()->get_index_name(table_name, index.cols);
+                    auto* ih = sm_manager_->ihs_.at(ix_name).get();
 
-                // 构造索引键值
-                std::vector<char> key_buffer(index.col_tot_len);
-                char* key = key_buffer.data();
-                int offset = 0;
-                for (int j = 0; j < index.col_num; ++j) {
-                    memcpy(key + offset, rec.data + index.cols[j].offset, index.cols[j].len);
-                    offset += index.cols[j].len;
+                    // 构造索引键值并重新插入
+                    std::vector<char> key_buffer(index.col_tot_len);
+                    char* key = key_buffer.data();
+                    int offset = 0;
+                    for (int j = 0; j < index.col_num; ++j) {
+                        memcpy(key + offset, rec.data + index.cols[j].offset, index.cols[j].len);
+                        offset += index.cols[j].len;
+                    }
+                    ih->insert_entry(key, rid, txn);
                 }
-                ih->insert_entry(key, rid, txn);
+            } else {
+                // 非MVCC模式：DELETE操作物理删除了记录，回滚时需要重新插入
+
+                // 重新插入记录
+                handle->insert_record(rid, rec.data);
+
+                // 重新插入索引项
+                for (const auto& index : sm_manager_->db_.get_table(table_name).indexes) {
+                    auto ix_name = sm_manager_->get_ix_manager()->get_index_name(table_name, index.cols);
+                    auto* ih = sm_manager_->ihs_.at(ix_name).get();
+
+                    // 构造索引键值
+                    std::vector<char> key_buffer(index.col_tot_len);
+                    char* key = key_buffer.data();
+                    int offset = 0;
+                    for (int j = 0; j < index.col_num; ++j) {
+                        memcpy(key + offset, rec.data + index.cols[j].offset, index.cols[j].len);
+                        offset += index.cols[j].len;
+                    }
+                    ih->insert_entry(key, rid, txn);
+                }
             }
         }
     }
@@ -265,6 +307,30 @@ void TransactionManager::abort(Transaction* txn, LogManager* log_manager) {
     // MVCC相关清理
     if (concurrency_mode_ == ConcurrencyMode::MVCC) {
         running_txns_.RemoveTxn(txn->get_read_ts());  // 从水位线中移除事务
+
+        // 清理版本链：恢复到该事务修改前的状态
+        auto write_set = txn->get_write_set();
+        for (auto iter = write_set->rbegin(); iter != write_set->rend(); iter++) {
+            const auto rid = (*iter)->GetRid();
+
+            // 获取当前版本链
+            auto current_version_link = GetVersionLink(rid);
+            if (current_version_link.has_value() &&
+                current_version_link->prev_.prev_txn_ == txn->get_transaction_id()) {
+                // 如果当前版本链的最新版本确实是该事务创建的，则恢复到前一个版本
+                auto undo_log_opt = GetUndoLogOptional(current_version_link->prev_);
+                if (undo_log_opt.has_value() && undo_log_opt->prev_version_.IsValid()) {
+                    // 恢复到前一个版本
+                    VersionUndoLink prev_version_link;
+                    prev_version_link.prev_ = undo_log_opt->prev_version_;
+                    prev_version_link.in_progress_ = false;
+                    UpdateVersionLink(rid, prev_version_link, [](std::optional<VersionUndoLink>) { return true; });
+                } else {
+                    // 没有前一个版本，删除版本链
+                    UpdateVersionLink(rid, std::nullopt, [](std::optional<VersionUndoLink>) { return true; });
+                }
+            }
+        }
     }
 }
 
