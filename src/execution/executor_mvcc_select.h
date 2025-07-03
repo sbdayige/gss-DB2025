@@ -58,8 +58,8 @@ class MvccSelectExecutor : public AbstractExecutor {
             return nullptr;
         }
 
-        // 返回投影后的记录
-        auto &record = buffer_[tuple_idx_++];
+        // 返回投影后的记录，但不推进游标（游标由nextTuple推进）
+        auto &record = buffer_[tuple_idx_];
         return ProjectRecord(*record);
     }
 
@@ -94,7 +94,8 @@ class MvccSelectExecutor : public AbstractExecutor {
     }
 
     bool is_end() const override {
-        return tuple_idx_ >= buffer_.size();
+        bool end = tuple_idx_ >= buffer_.size();
+        return end;
     }
 
     std::string getType() { return "MvccSelectExecutor"; }
@@ -129,16 +130,15 @@ class MvccSelectExecutor : public AbstractExecutor {
 
                 auto rid = scan.rid();
 
-                // 1. 检查记录的MVCC可见性
-                if (!IsVisible(rid, context_->txn_)) {
-                    scan.next();
-                    continue;
-                }
+                // 1. 获取对当前事务可见的记录版本
                 auto visible_record = GetVisibleVersion(rid, context_->txn_);
                 if (!visible_record) {
+                    // 没有可见版本（可能被删除或不可见），跳过
                     scan.next();
                     continue;
                 }
+
+                // 2. 检查是否满足WHERE条件
                 if (EvaluateConditions(*visible_record, conds_)) {
                     buffer_.push_back(std::move(visible_record));
                     rids_.push_back(rid);
@@ -154,15 +154,13 @@ class MvccSelectExecutor : public AbstractExecutor {
         // 检查记录版本是否对当前事务可见
         auto version_link = txn_mgr_->GetVersionLink(rid);
         if (!version_link.has_value()) {
-            // 没有版本链，说明是基础版本，可见
-            return true;
+            return true;  // 没有版本链，基础版本可见
         }
 
         // 检查版本链中的事务状态
         auto prev_txn_id = version_link->prev_.prev_txn_;
-
         if (prev_txn_id == INVALID_TXN_ID) {
-            return true;
+            return true;  // 没有前一个事务，基础版本可见
         }
 
         if (prev_txn_id == txn->get_transaction_id()) {
@@ -171,32 +169,34 @@ class MvccSelectExecutor : public AbstractExecutor {
             if (undo_log && undo_log->is_deleted_) {
                 return false;  // 被自己删除了，不可见
             }
-            return true;
+            return true;  // 自己的修改可见
         }
 
         // 检查其他事务的状态
         auto prev_txn = txn_mgr_->find_transaction(prev_txn_id);
         if (!prev_txn) {
-            // 事务不存在，可能已经提交或回滚，记录可见（返回基础版本）
+            // 事务已经结束且从txn_map中移除，假设已提交
             return true;
         }
 
         if (prev_txn->get_state() == TransactionState::COMMITTED) {
-            // 已提交的事务，检查时间戳
             if (prev_txn->get_commit_ts() <= txn->get_read_ts()) {
                 // 在快照时间内，检查是否是删除操作
                 auto undo_log = GetUndoLog(version_link->prev_);
                 if (undo_log && undo_log->is_deleted_) {
                     return false;  // 已被删除，不可见
                 }
-                return true;
+                return true;  // 已提交且在快照时间内，可见
             } else {
-                // 时间戳冲突，记录对当前事务不可见（应该看到更早的版本）
-                return true;  // 仍然可见，但会返回更早的版本
+                // 提交时间戳大于读时间戳，不可见，需要查看更早版本
+                return false;
             }
+        } else if (prev_txn->get_state() == TransactionState::ABORTED) {
+            // 已回滚的事务，不可见，需要查看更早版本
+            return false;
         } else {
-            // 未提交的事务，记录对当前事务不可见（应该看到更早的版本）
-            return true;  // 仍然可见，但会返回更早的版本
+            // 未提交的事务（DEFAULT状态），不可见，需要查看更早版本
+            return false;
         }
     }
 
@@ -207,6 +207,76 @@ class MvccSelectExecutor : public AbstractExecutor {
         if (!version_link.has_value()) {
             // 没有版本链，返回基础版本
             return fh_->get_record(rid, context_);
+        }
+
+        if (version_link->in_progress_) {
+            // 这是一个正在进行中的操作
+            auto prev_txn_id = version_link->prev_.prev_txn_;
+            if (prev_txn_id != txn->get_transaction_id()) {
+                // 不是自己的事务，正在进行中的操作对其他事务不可见
+                auto undo_log = GetUndoLog(version_link->prev_);
+                if (undo_log) {
+                    if (!undo_log->is_deleted_ && undo_log->prev_version_.prev_txn_ == INVALID_TXN_ID) {
+                        // 这是未提交的INSERT操作，对其他事务完全不可见
+                        return nullptr;
+                    } else if (undo_log->prev_version_.IsValid()) {
+                        // 这是未提交的UPDATE/DELETE操作，查看更早版本
+                        // 递归调用，直接从更早版本开始
+                        auto current_link = undo_log->prev_version_;
+                        while (current_link.prev_txn_ != INVALID_TXN_ID) {
+                            auto earlier_txn_id = current_link.prev_txn_;
+
+                            if (earlier_txn_id == txn->get_transaction_id()) {
+                                // 自己的修改
+                                auto earlier_undo_log = GetUndoLog(current_link);
+                                if (earlier_undo_log) {
+                                    if (earlier_undo_log->is_deleted_) {
+                                        return nullptr;  // 被自己删除，不可见
+                                    } else {
+                                        return fh_->get_record(rid, context_);  // 自己的修改，可见
+                                    }
+                                }
+                                break;
+                            }
+
+                            // 检查其他事务
+                            auto earlier_txn = txn_mgr_->find_transaction(earlier_txn_id);
+                            if (earlier_txn && earlier_txn->get_state() == TransactionState::COMMITTED) {
+                                if (earlier_txn->get_commit_ts() <= txn->get_read_ts()) {
+                                    // 找到可见的已提交版本
+                                    auto earlier_undo_log = GetUndoLog(current_link);
+                                    if (earlier_undo_log) {
+                                        if (earlier_undo_log->is_deleted_) {
+                                            return nullptr;  // 被删除，不可见
+                                        } else {
+                                            return fh_->get_record(rid, context_);  // 可见
+                                        }
+                                    }
+                                    break;
+                                }
+                            }
+
+                            // 继续向上查找
+                            auto earlier_undo_log = GetUndoLog(current_link);
+                            if (earlier_undo_log && earlier_undo_log->prev_version_.IsValid()) {
+                                current_link = earlier_undo_log->prev_version_;
+                                continue;
+                            } else {
+                                break;
+                            }
+                        }
+
+                        // 遍历完版本链，返回基础版本
+                        return fh_->get_record(rid, context_);
+                    } else {
+                        // UPDATE/DELETE操作但没有更早版本，返回基础版本
+                        return fh_->get_record(rid, context_);
+                    }
+                }
+                // 如果获取不到UndoLog，不可见
+                return nullptr;
+            }
+            // 如果是自己的事务，继续正常处理
         }
 
         // 遍历版本链，找到可见的版本
@@ -220,9 +290,9 @@ class MvccSelectExecutor : public AbstractExecutor {
                 auto undo_log = GetUndoLog(current_link);
                 if (undo_log) {
                     if (undo_log->is_deleted_) {
-                        return nullptr;  // 被删除
+                        return nullptr;  // 被自己删除，不可见
                     } else {
-                        // 对于同一事务的修改，返回表中的当前版本（更新后的值），而不是UndoLog中的旧值
+                        // 自己的修改，返回当前版本
                         return fh_->get_record(rid, context_);
                     }
                 }
@@ -233,48 +303,53 @@ class MvccSelectExecutor : public AbstractExecutor {
             auto prev_txn = txn_mgr_->find_transaction(prev_txn_id);
 
             if (prev_txn) {
-                if (prev_txn->get_state() == TransactionState::COMMITTED &&
-                    prev_txn->get_commit_ts() <= txn->get_read_ts()) {
-                    // 找到可见的已提交版本
-                    auto undo_log = GetUndoLog(current_link);
-                    if (undo_log) {
-                        if (undo_log->is_deleted_) {
-                            return nullptr;  // 被删除
+                if (prev_txn->get_state() == TransactionState::COMMITTED) {
+                    if (prev_txn->get_commit_ts() <= txn->get_read_ts()) {
+                        // 找到可见的已提交版本
+                        auto undo_log = GetUndoLog(current_link);
+                        if (undo_log) {
+                            if (undo_log->is_deleted_) {
+                                return nullptr;  // 被删除，不可见
+                            } else {
+                                // 已提交且在读时间戳之前，返回当前版本
+                                return fh_->get_record(rid, context_);
+                            }
+                        }
+                        break;
+                    } else {
+                        // 提交时间戳大于读时间戳，继续向上查找更早版本
+                        auto undo_log = GetUndoLog(current_link);
+                        if (undo_log && undo_log->prev_version_.IsValid()) {
+                            current_link = undo_log->prev_version_;
+                            continue;
                         } else {
-                            // 对于其他已提交事务的修改，返回表中的当前版本（更新后的值）
-                            return fh_->get_record(rid, context_);
+                            break;
                         }
                     }
-                    break;
+                } else if (prev_txn->get_state() == TransactionState::ABORTED) {
+                    // 已回滚的事务，忽略这个版本，继续查找更早版本
+                    auto undo_log = GetUndoLog(current_link);
+                    if (undo_log && undo_log->prev_version_.IsValid()) {
+                        current_link = undo_log->prev_version_;
+                        continue;
+                    } else {
+                        break;
+                    }
                 } else {
-                    // 未提交或时间戳冲突的事务，应该返回UndoLog中的更新前版本
+                    // 未提交的事务（DEFAULT状态），不可见，继续查找更早版本
                     auto undo_log = GetUndoLog(current_link);
-                    if (undo_log) {
-                        if (undo_log->is_deleted_) {
-                            // 如果是删除操作，且事务未提交，则记录仍可见（返回删除前的版本）
-                            return std::make_unique<RmRecord>(*undo_log->tuple_test_);
-                        } else {
-                            // 如果是更新操作，且事务未提交，则返回更新前的版本
-                            return std::make_unique<RmRecord>(*undo_log->tuple_test_);
-                        }
+                    if (undo_log && undo_log->prev_version_.IsValid()) {
+                        current_link = undo_log->prev_version_;
+                        continue;
+                    } else {
+                        break;
                     }
-                    // 如果没有UndoLog，继续查找更早的版本
                 }
             } else {
-                // 事务不存在，可能已经提交或回滚，返回当前版本
+                // 事务不存在（可能已经结束），假设已提交，返回当前版本
                 return fh_->get_record(rid, context_);
             }
-
-            // 继续查找更早的版本
-            auto undo_log = GetUndoLog(current_link);
-            if (undo_log && undo_log->prev_version_.prev_log_idx_ >= 0) {
-                current_link = undo_log->prev_version_;
-            } else {
-                break;
-            }
-        }
-
-        // 返回基础版本（原始记录）
+        }  // 如果遍历完版本链都没找到可见版本，返回基础版本
         return fh_->get_record(rid, context_);
     }
 

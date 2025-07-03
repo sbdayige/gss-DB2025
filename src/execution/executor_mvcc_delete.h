@@ -38,6 +38,14 @@ class MvccDeleteExecutor : public AbstractExecutor {
         conds_ = conds;
         rids_ = rids;
         context_ = context;
+
+        // 间隙锁：如果没有找到匹配的记录，需要加间隙锁防止其他事务插入满足删除条件的记录
+        if (!conds_.empty()) {
+            // DELETE语句有WHERE条件但没找到匹配记录，加间隙锁
+            if (!context_->lock_mgr_->lock_gap(context_->txn_, fh_->GetFd(), conds_)) {
+                throw TransactionAbortException(context_->txn_->get_transaction_id(), AbortReason::DEADLOCK_PREVENTION);
+            }
+        }
     }
 
     std::unique_ptr<RmRecord> Next() override {
@@ -54,6 +62,15 @@ class MvccDeleteExecutor : public AbstractExecutor {
             undo_log.is_deleted_ = true;  // 表示这是删除操作
             undo_log.tuple_test_ = new RmRecord(delete_record);
             undo_log.ts_ = context_->txn_->get_start_ts();
+
+            // 设置前一个版本的链接信息
+            auto old_version_link = txn_mgr_->GetVersionLink(rid);
+            if (old_version_link.has_value()) {
+                undo_log.prev_version_ = old_version_link->prev_;
+            } else {
+                undo_log.prev_version_.prev_txn_ = INVALID_TXN_ID;
+                undo_log.prev_version_.prev_log_idx_ = -1;
+            }
 
             // 填充修改字段信息（删除操作影响所有字段）
             undo_log.modified_fields_.resize(tab_.cols.size(), true);
@@ -130,6 +147,8 @@ class MvccDeleteExecutor : public AbstractExecutor {
                 return false;  // 写入冲突
             }
             return true;
+        } else if (prev_txn->get_state() == TransactionState::ABORTED) {
+            return true;  // ABORTED的事务不应该造成冲突
         }
 
         // 未提交的事务，写入冲突
@@ -137,12 +156,9 @@ class MvccDeleteExecutor : public AbstractExecutor {
     }
 
     void MarkRecordAsDeleted(const Rid &rid) {
-        // 在MVCC中，删除通常是逻辑删除
-        // 这里可以实现一个删除标记位
-        // 由于当前框架没有提供删除标记，我们使用版本链来表示删除状态
-
-        // 实际实现中，可能需要在记录头部添加删除标记
-        // 或者通过版本链来判断记录是否被删除
+        // 在MVCC中，DELETE操作不应该物理删除记录，只在版本链中标记删除
+        // 物理删除由垃圾回收器在事务提交后执行
+        // 这里不需要做任何操作，删除标记已经在版本链和UndoLog中设置了
     }
 
     void DeleteFromIndices(const RmRecord &record, const Rid &rid) {

@@ -41,14 +41,23 @@ class MvccInsertExecutor : public AbstractExecutor {
         if (values_.size() != tab_.cols.size()) {
             throw InvalidValueCountError();
         }
+
+        // 间隙锁冲突检测：检查插入的记录是否与现有的间隙锁冲突
+        CheckGapLockConflict();
+
         for (size_t i = 0; i < values_.size(); ++i) {
             auto &col = tab_.cols[i];
             auto &val = values_[i];
-
-            if (col.type != val.type) {
+            // 类型兼容：float->int、int->float自动转换
+            if (col.type == TYPE_INT && val.type == TYPE_FLOAT) {
+                int v = (int)val.float_val;
+                val.set_int(v);
+            } else if (col.type == TYPE_FLOAT && val.type == TYPE_INT) {
+                float v = (float)val.int_val;
+                val.set_float(v);
+            } else if (col.type != val.type) {
                 throw IncompatibleTypeError(coltype2str(col.type), coltype2str(val.type));
             }
-
             if (col.type == TYPE_STRING && val.str_val.size() > col.len) {
                 throw StringOverflowError();
             }
@@ -98,6 +107,46 @@ class MvccInsertExecutor : public AbstractExecutor {
 
         WriteRecord *write_record = new WriteRecord(WType::INSERT_TUPLE, tab_name_, rid_, rec);
         context_->txn_->append_write_record(write_record);
+
+        // MVCC: 创建版本链
+        UndoLink insert_link;
+        insert_link.prev_txn_ = context_->txn_->get_transaction_id();
+        insert_link.prev_log_idx_ = context_->txn_->GetUndoLogNum();  // 将要添加的UndoLog的索引
+
+        // 创建UndoLog（INSERT操作的UndoLog记录被插入的记录）
+        UndoLog undo_log;
+        undo_log.is_deleted_ = false;  // INSERT操作，撤销时需要删除
+        undo_log.tuple_test_ = new RmRecord(rec);
+        undo_log.ts_ = context_->txn_->get_start_ts();
+        undo_log.modified_fields_.resize(tab_.cols.size(), true);  // INSERT影响所有字段
+        undo_log.prev_version_.prev_txn_ = INVALID_TXN_ID;         // INSERT操作没有前一个版本
+        undo_log.prev_version_.prev_log_idx_ = -1;
+        undo_log.tuple_.clear();
+        for (size_t i = 0; i < tab_.cols.size(); ++i) {
+            Value val;
+            if (tab_.cols[i].type == TYPE_INT) {
+                val.set_int(*(int *)(rec.data + tab_.cols[i].offset));
+            } else if (tab_.cols[i].type == TYPE_FLOAT) {
+                val.set_float(*(float *)(rec.data + tab_.cols[i].offset));
+            } else if (tab_.cols[i].type == TYPE_STRING) {
+                std::string str_val(rec.data + tab_.cols[i].offset, tab_.cols[i].len);
+                str_val = str_val.c_str();
+                val.set_str(str_val);
+            }
+            undo_log.tuple_.push_back(val);
+        }
+
+        context_->txn_->AppendUndoLog(undo_log);
+
+        // 创建版本链
+        VersionUndoLink version_link;
+        version_link.prev_ = insert_link;
+        version_link.in_progress_ = true;
+
+        txn_mgr_->UpdateVersionLink(rid_, version_link, [](std::optional<VersionUndoLink>) { return true; });
+
+        std::cout << "DEBUG: INSERT created version link for rid " << rid_.page_no << "," << rid_.slot_no
+                  << " with txn " << context_->txn_->get_transaction_id() << std::endl;
 
         return nullptr;
     }
@@ -159,5 +208,97 @@ class MvccInsertExecutor : public AbstractExecutor {
 
     Transaction *GetTransaction(txn_id_t txn_id) {
         return txn_mgr_->find_transaction(txn_id);
+    }
+
+    void CheckGapLockConflict() {
+        // 检查插入的记录是否与现有的间隙锁冲突
+        int tab_fd = fh_->GetFd();
+        auto gap_conditions = context_->lock_mgr_->get_gap_condition(tab_fd, context_->txn_);
+
+        if (!gap_conditions.empty()) {
+            // 为插入的记录构造一个临时记录用于条件检查
+            RmRecord temp_record(fh_->get_file_hdr().record_size);
+            for (size_t i = 0; i < values_.size(); ++i) {
+                auto &col = tab_.cols[i];
+                auto &val = values_[i];
+                if (!val.raw) {
+                    val.init_raw(col.len);
+                }
+                memcpy(temp_record.data + col.offset, val.raw->data, col.len);
+            }
+
+            // 检查插入的记录是否满足任何间隙锁条件
+            for (const auto &condition : gap_conditions) {
+                if (EvaluateCondition(temp_record, condition)) {
+                    // 插入的记录满足其他事务的间隙锁条件，触发写冲突
+                    throw TransactionAbortException(context_->txn_->get_transaction_id(), AbortReason::DEADLOCK_PREVENTION);
+                }
+            }
+        }
+    }
+
+    bool EvaluateCondition(const RmRecord &record, const Condition &cond) {
+        auto lhs_col = tab_.get_col(cond.lhs_col.col_name);
+        char *lhs_data = record.data + lhs_col->offset;
+
+        char *rhs_data;
+        ColType rhs_type;
+
+        if (cond.is_rhs_val) {
+            if (!cond.rhs_val.raw) {
+                const_cast<Value &>(cond.rhs_val).init_raw(lhs_col->len);
+            }
+            rhs_data = cond.rhs_val.raw->data;
+            rhs_type = cond.rhs_val.type;
+        } else {
+            auto rhs_col = tab_.get_col(cond.rhs_col.col_name);
+            rhs_data = record.data + rhs_col->offset;
+            rhs_type = rhs_col->type;
+        }
+
+        // 类型兼容性检查和比较
+        int cmp_result = 0;
+        if (lhs_col->type == TYPE_INT && rhs_type == TYPE_INT) {
+            int lhs_val = *(int *)lhs_data;
+            int rhs_val = *(int *)rhs_data;
+            cmp_result = (lhs_val < rhs_val) ? -1 : (lhs_val > rhs_val) ? 1
+                                                                        : 0;
+        } else if (lhs_col->type == TYPE_FLOAT && rhs_type == TYPE_FLOAT) {
+            float lhs_val = *(float *)lhs_data;
+            float rhs_val = *(float *)rhs_data;
+            cmp_result = (lhs_val < rhs_val) ? -1 : (lhs_val > rhs_val) ? 1
+                                                                        : 0;
+        } else if (lhs_col->type == TYPE_INT && rhs_type == TYPE_FLOAT) {
+            int lhs_val = *(int *)lhs_data;
+            float rhs_val = *(float *)rhs_data;
+            cmp_result = (lhs_val < rhs_val) ? -1 : (lhs_val > rhs_val) ? 1
+                                                                        : 0;
+        } else if (lhs_col->type == TYPE_FLOAT && rhs_type == TYPE_INT) {
+            float lhs_val = *(float *)lhs_data;
+            int rhs_val = *(int *)rhs_data;
+            cmp_result = (lhs_val < rhs_val) ? -1 : (lhs_val > rhs_val) ? 1
+                                                                        : 0;
+        } else if (lhs_col->type == TYPE_STRING && rhs_type == TYPE_STRING) {
+            cmp_result = memcmp(lhs_data, rhs_data, lhs_col->len);
+        } else {
+            return false;  // 类型不兼容，假设不匹配
+        }
+
+        switch (cond.op) {
+            case OP_EQ:
+                return cmp_result == 0;
+            case OP_NE:
+                return cmp_result != 0;
+            case OP_LT:
+                return cmp_result < 0;
+            case OP_GT:
+                return cmp_result > 0;
+            case OP_LE:
+                return cmp_result <= 0;
+            case OP_GE:
+                return cmp_result >= 0;
+            default:
+                return false;
+        }
     }
 };
