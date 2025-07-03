@@ -87,7 +87,12 @@ void LogManager::create_static_checkpoint() {
     
     // 3. 将检查点LSN写入重启文件
     const std::string restart_file = "restart.log";
-    disk_manager_->create_file(restart_file);
+    
+    // 检查文件是否存在，如果不存在则创建
+    if (!disk_manager_->is_file(restart_file)) {
+        disk_manager_->create_file(restart_file);
+    }
+    
     int restart_fd = disk_manager_->open_file(restart_file);
     disk_manager_->write_page(restart_fd, 0, (char*)&checkpoint_lsn, sizeof(lsn_t));
     disk_manager_->close_file(restart_fd);
