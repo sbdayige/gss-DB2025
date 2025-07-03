@@ -212,71 +212,35 @@ class MvccSelectExecutor : public AbstractExecutor {
         if (version_link->in_progress_) {
             // 这是一个正在进行中的操作
             auto prev_txn_id = version_link->prev_.prev_txn_;
-            if (prev_txn_id != txn->get_transaction_id()) {
+            if (prev_txn_id == txn->get_transaction_id()) {
+                // 是自己的事务，需要检查操作类型
+                auto undo_log = GetUndoLog(version_link->prev_);
+                if (undo_log) {
+                    if (undo_log->is_deleted_) {
+                        // 自己的DELETE操作，记录不可见
+                        return nullptr;
+                    } else {
+                        // 自己的INSERT/UPDATE操作，记录可见
+                        return fh_->get_record(rid, context_);
+                    }
+                }
+                // 如果获取不到UndoLog，默认可见
+                return fh_->get_record(rid, context_);
+            } else {
                 // 不是自己的事务，正在进行中的操作对其他事务不可见
                 auto undo_log = GetUndoLog(version_link->prev_);
                 if (undo_log) {
                     if (!undo_log->is_deleted_ && undo_log->prev_version_.prev_txn_ == INVALID_TXN_ID) {
                         // 这是未提交的INSERT操作，对其他事务完全不可见
                         return nullptr;
-                    } else if (undo_log->prev_version_.IsValid()) {
-                        // 这是未提交的UPDATE/DELETE操作，查看更早版本
-                        // 递归调用，直接从更早版本开始
-                        auto current_link = undo_log->prev_version_;
-                        while (current_link.prev_txn_ != INVALID_TXN_ID) {
-                            auto earlier_txn_id = current_link.prev_txn_;
-
-                            if (earlier_txn_id == txn->get_transaction_id()) {
-                                // 自己的修改
-                                auto earlier_undo_log = GetUndoLog(current_link);
-                                if (earlier_undo_log) {
-                                    if (earlier_undo_log->is_deleted_) {
-                                        return nullptr;  // 被自己删除，不可见
-                                    } else {
-                                        return fh_->get_record(rid, context_);  // 自己的修改，可见
-                                    }
-                                }
-                                break;
-                            }
-
-                            // 检查其他事务
-                            auto earlier_txn = txn_mgr_->find_transaction(earlier_txn_id);
-                            if (earlier_txn && earlier_txn->get_state() == TransactionState::COMMITTED) {
-                                if (earlier_txn->get_commit_ts() <= txn->get_read_ts()) {
-                                    // 找到可见的已提交版本
-                                    auto earlier_undo_log = GetUndoLog(current_link);
-                                    if (earlier_undo_log) {
-                                        if (earlier_undo_log->is_deleted_) {
-                                            return nullptr;  // 被删除，不可见
-                                        } else {
-                                            return fh_->get_record(rid, context_);  // 可见
-                                        }
-                                    }
-                                    break;
-                                }
-                            }
-
-                            // 继续向上查找
-                            auto earlier_undo_log = GetUndoLog(current_link);
-                            if (earlier_undo_log && earlier_undo_log->prev_version_.IsValid()) {
-                                current_link = earlier_undo_log->prev_version_;
-                                continue;
-                            } else {
-                                break;
-                            }
-                        }
-
-                        // 遍历完版本链，返回基础版本
-                        return fh_->get_record(rid, context_);
                     } else {
-                        // UPDATE/DELETE操作但没有更早版本，返回基础版本
-                        return fh_->get_record(rid, context_);
+                        // 这是未提交的UPDATE/DELETE操作，返回UndoLog中存储的旧值
+                        return RestoreRecordFromUndoLog(*undo_log);
                     }
                 }
                 // 如果获取不到UndoLog，不可见
                 return nullptr;
             }
-            // 如果是自己的事务，继续正常处理
         }
 
         // 遍历版本链，找到可见的版本
@@ -440,5 +404,37 @@ class MvccSelectExecutor : public AbstractExecutor {
         }
 
         return projected_record;
+    }
+
+    std::unique_ptr<RmRecord> RestoreRecordFromUndoLog(const UndoLog &undo_log) {
+        // 从UndoLog恢复记录的原始版本
+        size_t record_size = 0;
+        for (const auto &col : tab_.cols) {
+            record_size += col.len;
+        }
+
+        auto record = std::make_unique<RmRecord>(record_size);
+
+        // 从UndoLog的tuple_数组中恢复数据
+        for (size_t i = 0; i < tab_.cols.size() && i < undo_log.tuple_.size(); ++i) {
+            const auto &col = tab_.cols[i];
+            const auto &value = undo_log.tuple_[i];
+
+            if (col.type == TYPE_INT) {
+                *(int *)(record->data + col.offset) = value.int_val;
+            } else if (col.type == TYPE_FLOAT) {
+                *(float *)(record->data + col.offset) = value.float_val;
+            } else if (col.type == TYPE_STRING) {
+                memcpy(record->data + col.offset, value.str_val.c_str(),
+                       std::min(col.len, static_cast<int>(value.str_val.length())));
+                // 确保字符串以null结尾
+                if (value.str_val.length() < col.len) {
+                    memset(record->data + col.offset + value.str_val.length(), 0,
+                           col.len - value.str_val.length());
+                }
+            }
+        }
+
+        return record;
     }
 };
