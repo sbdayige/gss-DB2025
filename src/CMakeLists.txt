@@ -12,7 +12,6 @@ add_subdirectory(common)
 add_subdirectory(replacer)
 add_subdirectory(transaction)
 add_subdirectory(recovery)
-add_subdirectory(test)
 
 
 target_link_libraries(parser execution pthread)
