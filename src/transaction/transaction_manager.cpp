@@ -23,9 +23,10 @@
 
 #include "transaction_manager.h"
 
+#include <set>
+
 #include "record/rm_file_handle.h"
 #include "system/sm_manager.h"
-#include <set>
 
 std::unordered_map<txn_id_t, Transaction*> TransactionManager::txn_map = {};
 
@@ -156,7 +157,6 @@ void TransactionManager::commit(Transaction* txn, LogManager* log_manager) {
     for (int fd : affected_files) {
         bpm->flush_all_pages(fd);
     }
-
 
     // MVCC相关清理
     if (concurrency_mode_ == ConcurrencyMode::MVCC) {
@@ -324,9 +324,10 @@ void TransactionManager::abort(Transaction* txn, LogManager* log_manager) {
         log_manager->flush_log_to_disk();  // 中止时强制刷盘
     }
 
-    auto write_set = txn->get_write_set();
+    // 注意：此处write_set已在上方声明，避免重复声明
+    auto write_set_mvcc = txn->get_write_set();
     std::set<int> affected_files;
-    for (auto write_record : *write_set) {
+    for (auto write_record : *write_set_mvcc) {
         // 收集所有涉及的表文件
         std::string table_name = write_record->GetTableName();
         if (sm_manager_->fhs_.find(table_name) != sm_manager_->fhs_.end()) {
@@ -346,8 +347,8 @@ void TransactionManager::abort(Transaction* txn, LogManager* log_manager) {
         running_txns_.RemoveTxn(txn->get_read_ts());  // 从水位线中移除事务
 
         // 清理版本链：恢复到该事务修改前的状态
-        auto write_set = txn->get_write_set();
-        for (auto iter = write_set->rbegin(); iter != write_set->rend(); iter++) {
+        auto write_set_mvcc2 = txn->get_write_set();
+        for (auto iter = write_set_mvcc2->rbegin(); iter != write_set_mvcc2->rend(); iter++) {
             const auto rid = (*iter)->GetRid();
 
             // 获取当前版本链
