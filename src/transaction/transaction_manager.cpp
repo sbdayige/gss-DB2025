@@ -25,6 +25,7 @@
 
 #include "record/rm_file_handle.h"
 #include "system/sm_manager.h"
+#include <set>
 
 std::unordered_map<txn_id_t, Transaction*> TransactionManager::txn_map = {};
 
@@ -137,6 +138,25 @@ void TransactionManager::commit(Transaction* txn, LogManager* log_manager) {
         log_manager->add_log_to_buffer(&log_record);
         log_manager->flush_log_to_disk();  // 提交时强制刷盘
     }
+
+    // 【新增】强制刷所有相关数据页到磁盘，确保事务的持久性
+    auto write_set = txn->get_write_set();
+    std::set<int> affected_files;
+    for (auto write_record : *write_set) {
+        // 收集所有涉及的表文件
+        std::string table_name = write_record->GetTableName();
+        if (sm_manager_->fhs_.find(table_name) != sm_manager_->fhs_.end()) {
+            auto& fh = sm_manager_->fhs_.at(table_name);
+            affected_files.insert(fh->GetFd());
+        }
+    }
+
+    // 刷盘所有相关文件的数据页
+    BufferPoolManager* bpm = sm_manager_->get_bpm();
+    for (int fd : affected_files) {
+        bpm->flush_all_pages(fd);
+    }
+
 
     // MVCC相关清理
     if (concurrency_mode_ == ConcurrencyMode::MVCC) {
@@ -302,6 +322,23 @@ void TransactionManager::abort(Transaction* txn, LogManager* log_manager) {
         log_record.prev_lsn_ = txn->get_prev_lsn();
         log_manager->add_log_to_buffer(&log_record);
         log_manager->flush_log_to_disk();  // 中止时强制刷盘
+    }
+
+    auto write_set = txn->get_write_set();
+    std::set<int> affected_files;
+    for (auto write_record : *write_set) {
+        // 收集所有涉及的表文件
+        std::string table_name = write_record->GetTableName();
+        if (sm_manager_->fhs_.find(table_name) != sm_manager_->fhs_.end()) {
+            auto& fh = sm_manager_->fhs_.at(table_name);
+            affected_files.insert(fh->GetFd());
+        }
+    }
+
+    // 刷盘所有相关文件的数据页
+    BufferPoolManager* bpm = sm_manager_->get_bpm();
+    for (int fd : affected_files) {
+        bpm->flush_all_pages(fd);
     }
 
     // MVCC相关清理
