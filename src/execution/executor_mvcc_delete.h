@@ -50,10 +50,17 @@ class MvccDeleteExecutor : public AbstractExecutor {
     }
 
     std::unique_ptr<RmRecord> Next() override {
+        std::cerr << "DEBUG DELETE: Starting delete operation, rids_.size()=" << rids_.size() << std::endl;
+
         for (auto &rid : rids_) {
+            std::cerr << "DEBUG DELETE: Processing rid(" << rid.page_no << "," << rid.slot_no << ")" << std::endl;
+
+            std::cerr << "DEBUG DELETE: Checking write conflict for rid(" << rid.page_no << "," << rid.slot_no << ")" << std::endl;
             if (!CheckWriteConflict(rid)) {
+                std::cerr << "DEBUG DELETE: Write conflict detected, throwing exception" << std::endl;
                 throw TransactionAbortException(context_->txn_->get_transaction_id(), AbortReason::DEADLOCK_PREVENTION);
             }
+            std::cerr << "DEBUG DELETE: No write conflict detected" << std::endl;
 
             auto record = fh_->get_record(rid, context_);
 
@@ -131,36 +138,57 @@ class MvccDeleteExecutor : public AbstractExecutor {
 
    private:
     bool CheckWriteConflict(const Rid &rid) {
+        std::cerr << "DEBUG DELETE CheckWriteConflict: Checking rid(" << rid.page_no << "," << rid.slot_no << ")" << std::endl;
+
         auto version_link = txn_mgr_->GetVersionLink(rid);
         if (!version_link.has_value()) {
+            std::cerr << "DEBUG DELETE CheckWriteConflict: No version link, can delete" << std::endl;
             return true;  // 没有版本链，可以删除
         }
+
+        std::cerr << "DEBUG DELETE CheckWriteConflict: Found version link" << std::endl;
         auto prev_txn_id = version_link->prev_.prev_txn_;
         if (prev_txn_id == INVALID_TXN_ID) {
+            std::cerr << "DEBUG DELETE CheckWriteConflict: Invalid txn_id, can delete" << std::endl;
             return true;  // 基础版本，可以删除
         }
 
+        std::cerr << "DEBUG DELETE CheckWriteConflict: prev_txn_id=" << prev_txn_id
+                  << ", current_txn_id=" << context_->txn_->get_transaction_id() << std::endl;
+
         if (prev_txn_id == context_->txn_->get_transaction_id()) {
+            std::cerr << "DEBUG DELETE CheckWriteConflict: Same transaction, can delete" << std::endl;
             return true;  // 自己的修改，可以删除
         }
 
         // 检查其他事务的状态
         auto prev_txn = txn_mgr_->find_transaction(prev_txn_id);
         if (!prev_txn) {
+            std::cerr << "DEBUG DELETE CheckWriteConflict: Previous transaction not found, can delete" << std::endl;
             return true;  // 事务不存在，可能已经提交
         }
 
+        std::cerr << "DEBUG DELETE CheckWriteConflict: Found previous transaction, state="
+                  << static_cast<int>(prev_txn->get_state()) << std::endl;
+
         if (prev_txn->get_state() == TransactionState::COMMITTED) {
+            std::cerr << "DEBUG DELETE CheckWriteConflict: Previous transaction committed, checking timestamps" << std::endl;
+            std::cerr << "DEBUG DELETE CheckWriteConflict: prev_commit_ts=" << prev_txn->get_commit_ts()
+                      << ", current_read_ts=" << context_->txn_->get_read_ts() << std::endl;
             // 已提交的事务，检查时间戳冲突
             if (prev_txn->get_commit_ts() > context_->txn_->get_read_ts()) {
+                std::cerr << "DEBUG DELETE CheckWriteConflict: Write conflict - commit_ts > read_ts" << std::endl;
                 return false;  // 写入冲突
             }
+            std::cerr << "DEBUG DELETE CheckWriteConflict: No timestamp conflict" << std::endl;
             return true;
         } else if (prev_txn->get_state() == TransactionState::ABORTED) {
+            std::cerr << "DEBUG DELETE CheckWriteConflict: Previous transaction aborted, can delete" << std::endl;
             return true;  // ABORTED的事务不应该造成冲突
         }
 
         // 未提交的事务，写入冲突
+        std::cerr << "DEBUG DELETE CheckWriteConflict: Previous transaction uncommitted, write conflict!" << std::endl;
         return false;
     }
 
@@ -191,29 +219,37 @@ class MvccDeleteExecutor : public AbstractExecutor {
     }
 
     bool IsVisible(const Rid &rid, Transaction *txn) {
+        // DELETE操作需要看到所有记录（包括未提交的INSERT）以便进行写冲突检测
+        // 这与SELECT的可见性规则不同，DELETE必须能看到所有存在的记录
         auto version_link = txn_mgr_->GetVersionLink(rid);
         if (!version_link.has_value()) {
-            return true;
+            return true;  // 没有版本链，记录可见
         }
 
         auto prev_txn_id = version_link->prev_.prev_txn_;
         if (prev_txn_id == INVALID_TXN_ID) {
-            return true;
+            return true;  // 无效事务ID，记录可见
         }
 
         if (prev_txn_id == txn->get_transaction_id()) {
-            return true;
+            // 自己的修改，检查是否被删除
+            auto undo_log = GetUndoLog(version_link->prev_);
+            if (undo_log && undo_log->is_deleted_) {
+                return false;  // 被自己删除了，不可见
+            }
+            return true;  // 自己的修改，可见
         }
 
-        auto prev_txn = txn_mgr_->find_transaction(prev_txn_id);
-        if (!prev_txn) {
-            return true;
-        }
+        // 对于其他事务的修改（包括未提交的INSERT），DELETE操作都应该能看到
+        // 这样才能在CheckWriteConflict中正确检测写冲突并触发回滚
+        return true;
+    }
 
-        if (prev_txn->get_state() == TransactionState::COMMITTED) {
-            return prev_txn->get_commit_ts() < txn->get_read_ts();
+    std::unique_ptr<UndoLog> GetUndoLog(const UndoLink &link) {
+        auto undo_log_opt = txn_mgr_->GetUndoLogOptional(link);
+        if (undo_log_opt.has_value()) {
+            return std::make_unique<UndoLog>(undo_log_opt.value());
         }
-
-        return false;
+        return nullptr;
     }
 };

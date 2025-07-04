@@ -10,12 +10,13 @@ See the Mulan PSL v2 for more details. */
 
 #pragma once
 
+#include "execution_common.h"
 #include "execution_defs.h"
 #include "execution_manager.h"
 #include "executor_abstract.h"
 #include "index/ix.h"
-#include "system/sm.h"
 #include "recovery/log_manager.h"
+#include "system/sm.h"
 
 class MvccInsertExecutor : public AbstractExecutor {
    private:
@@ -91,7 +92,7 @@ class MvccInsertExecutor : public AbstractExecutor {
         }
 
         rid_ = fh_->insert_record(rec.data, context_);
-        
+
         // WAL: 记录INSERT日志
         if (context_ && context_->txn_ && context_->log_mgr_) {
             InsertLogRecord log_record(context_->txn_->get_transaction_id(), rec, rid_, tab_name_);
@@ -238,76 +239,11 @@ class MvccInsertExecutor : public AbstractExecutor {
 
             // 检查插入的记录是否满足任何间隙锁条件
             for (const auto &condition : gap_conditions) {
-                if (EvaluateCondition(temp_record, condition)) {
+                if (EvaluateCondition(temp_record, condition, tab_)) {
                     // 插入的记录满足其他事务的间隙锁条件，触发写冲突
                     throw TransactionAbortException(context_->txn_->get_transaction_id(), AbortReason::DEADLOCK_PREVENTION);
                 }
             }
-        }
-    }
-
-    bool EvaluateCondition(const RmRecord &record, const Condition &cond) {
-        auto lhs_col = tab_.get_col(cond.lhs_col.col_name);
-        char *lhs_data = record.data + lhs_col->offset;
-
-        char *rhs_data;
-        ColType rhs_type;
-
-        if (cond.is_rhs_val) {
-            if (!cond.rhs_val.raw) {
-                const_cast<Value &>(cond.rhs_val).init_raw(lhs_col->len);
-            }
-            rhs_data = cond.rhs_val.raw->data;
-            rhs_type = cond.rhs_val.type;
-        } else {
-            auto rhs_col = tab_.get_col(cond.rhs_col.col_name);
-            rhs_data = record.data + rhs_col->offset;
-            rhs_type = rhs_col->type;
-        }
-
-        // 类型兼容性检查和比较
-        int cmp_result = 0;
-        if (lhs_col->type == TYPE_INT && rhs_type == TYPE_INT) {
-            int lhs_val = *(int *)lhs_data;
-            int rhs_val = *(int *)rhs_data;
-            cmp_result = (lhs_val < rhs_val) ? -1 : (lhs_val > rhs_val) ? 1
-                                                                        : 0;
-        } else if (lhs_col->type == TYPE_FLOAT && rhs_type == TYPE_FLOAT) {
-            float lhs_val = *(float *)lhs_data;
-            float rhs_val = *(float *)rhs_data;
-            cmp_result = (lhs_val < rhs_val) ? -1 : (lhs_val > rhs_val) ? 1
-                                                                        : 0;
-        } else if (lhs_col->type == TYPE_INT && rhs_type == TYPE_FLOAT) {
-            int lhs_val = *(int *)lhs_data;
-            float rhs_val = *(float *)rhs_data;
-            cmp_result = (lhs_val < rhs_val) ? -1 : (lhs_val > rhs_val) ? 1
-                                                                        : 0;
-        } else if (lhs_col->type == TYPE_FLOAT && rhs_type == TYPE_INT) {
-            float lhs_val = *(float *)lhs_data;
-            int rhs_val = *(int *)rhs_data;
-            cmp_result = (lhs_val < rhs_val) ? -1 : (lhs_val > rhs_val) ? 1
-                                                                        : 0;
-        } else if (lhs_col->type == TYPE_STRING && rhs_type == TYPE_STRING) {
-            cmp_result = memcmp(lhs_data, rhs_data, lhs_col->len);
-        } else {
-            return false;  // 类型不兼容，假设不匹配
-        }
-
-        switch (cond.op) {
-            case OP_EQ:
-                return cmp_result == 0;
-            case OP_NE:
-                return cmp_result != 0;
-            case OP_LT:
-                return cmp_result < 0;
-            case OP_GT:
-                return cmp_result > 0;
-            case OP_LE:
-                return cmp_result <= 0;
-            case OP_GE:
-                return cmp_result >= 0;
-            default:
-                return false;
         }
     }
 };

@@ -12,6 +12,7 @@ See the Mulan PSL v2 for more details. */
 
 #include <set>
 
+#include "execution_common.h"
 #include "execution_defs.h"
 #include "execution_manager.h"
 #include "executor_abstract.h"
@@ -139,7 +140,7 @@ class MvccSelectExecutor : public AbstractExecutor {
                 }
 
                 // 2. 检查是否满足WHERE条件
-                if (EvaluateConditions(*visible_record, conds_)) {
+                if (EvaluateConditions(*visible_record, conds_, tab_)) {
                     buffer_.push_back(std::move(visible_record));
                     rids_.push_back(rid);
                 }
@@ -203,40 +204,48 @@ class MvccSelectExecutor : public AbstractExecutor {
 
     std::unique_ptr<RmRecord> GetVisibleVersion(const Rid &rid, Transaction *txn) {
         // 获取对当前事务可见的记录版本
-        std::cerr << "DEBUG: Checking visibility for rid (" << rid.page_no << "," << rid.slot_no << ")" << std::endl;
+        std::cerr << "DEBUG SELECT GetVisibleVersion: Checking visibility for rid (" << rid.page_no << "," << rid.slot_no << ") for txn_id=" << txn->get_transaction_id() << std::endl;
 
         auto version_link = txn_mgr_->GetVersionLink(rid);
 
         if (!version_link.has_value()) {
             // 没有版本链，返回基础版本
-            std::cerr << "DEBUG: No version link found, returning physical record" << std::endl;
+            std::cerr << "DEBUG SELECT GetVisibleVersion: No version link found, returning physical record" << std::endl;
             return fh_->get_record(rid, context_);
         }
 
         if (version_link->in_progress_) {
             // 这是一个正在进行中的操作
-            std::cerr << "DEBUG: Version link in_progress=true" << std::endl;
+            std::cerr << "DEBUG SELECT GetVisibleVersion: Version link in_progress=true" << std::endl;
             auto prev_txn_id = version_link->prev_.prev_txn_;
+            std::cerr << "DEBUG SELECT GetVisibleVersion: prev_txn_id=" << prev_txn_id << ", current_txn_id=" << txn->get_transaction_id() << std::endl;
+
             if (prev_txn_id == txn->get_transaction_id()) {
                 // 是自己的事务，需要检查操作类型
+                std::cerr << "DEBUG SELECT GetVisibleVersion: Own transaction's operation" << std::endl;
                 auto undo_log = GetUndoLog(version_link->prev_);
                 if (undo_log) {
                     if (undo_log->is_deleted_) {
                         // 自己的DELETE操作，记录不可见
+                        std::cerr << "DEBUG SELECT GetVisibleVersion: Own DELETE operation, not visible" << std::endl;
                         return nullptr;
                     } else {
                         // 自己的INSERT/UPDATE操作，记录可见
+                        std::cerr << "DEBUG SELECT GetVisibleVersion: Own INSERT/UPDATE operation, visible" << std::endl;
                         return fh_->get_record(rid, context_);
                     }
                 }
                 // 如果获取不到UndoLog，默认可见
+                std::cerr << "DEBUG SELECT GetVisibleVersion: No UndoLog found, defaulting to visible" << std::endl;
                 return fh_->get_record(rid, context_);
             } else {
                 // 不是自己的事务，正在进行中的操作对其他事务不可见
+                std::cerr << "DEBUG SELECT GetVisibleVersion: Other transaction's in-progress operation" << std::endl;
                 auto undo_log = GetUndoLog(version_link->prev_);
                 if (undo_log) {
                     if (!undo_log->is_deleted_ && undo_log->prev_version_.prev_txn_ == INVALID_TXN_ID) {
                         // 这是未提交的INSERT操作，对其他事务完全不可见
+                        std::cerr << "DEBUG SELECT GetVisibleVersion: Uncommitted INSERT by other transaction, not visible" << std::endl;
                         return nullptr;
                     } else {
                         // 这是未提交的UPDATE/DELETE操作，返回UndoLog中存储的旧值
@@ -388,84 +397,6 @@ class MvccSelectExecutor : public AbstractExecutor {
             return std::make_unique<UndoLog>(undo_log_opt.value());
         }
         return nullptr;
-    }
-
-    bool EvaluateConditions(const RmRecord &record, const std::vector<Condition> &conditions) {
-        for (size_t i = 0; i < conditions.size(); ++i) {
-            if (!EvaluateCondition(record, conditions[i])) {
-                return false;
-            }
-        }
-        return true;
-    }
-
-    bool EvaluateCondition(const RmRecord &record, const Condition &cond) {
-        auto lhs_col = tab_.get_col(cond.lhs_col.col_name);
-
-        char *lhs_data = record.data + lhs_col->offset;
-
-        char *rhs_data;
-        ColType rhs_type;
-
-        if (cond.is_rhs_val) {
-            if (!cond.rhs_val.raw) {
-                // 初始化 raw 数据
-                const_cast<Value &>(cond.rhs_val).init_raw(lhs_col->len);
-            }
-            rhs_data = cond.rhs_val.raw->data;
-            rhs_type = cond.rhs_val.type;
-        } else {
-            auto rhs_col = tab_.get_col(cond.rhs_col.col_name);
-            rhs_data = record.data + rhs_col->offset;
-            rhs_type = rhs_col->type;
-        }
-
-        // 支持类型自动转换：int ↔ float
-        int cmp_result = 0;
-        if (lhs_col->type == TYPE_INT && rhs_type == TYPE_INT) {
-            int lhs_val = *(int *)lhs_data;
-            int rhs_val = *(int *)rhs_data;
-            cmp_result = (lhs_val < rhs_val) ? -1 : (lhs_val > rhs_val) ? 1
-                                                                        : 0;
-        } else if (lhs_col->type == TYPE_FLOAT && rhs_type == TYPE_FLOAT) {
-            float lhs_val = *(float *)lhs_data;
-            float rhs_val = *(float *)rhs_data;
-            cmp_result = (lhs_val < rhs_val) ? -1 : (lhs_val > rhs_val) ? 1
-                                                                        : 0;
-        } else if (lhs_col->type == TYPE_INT && rhs_type == TYPE_FLOAT) {
-            // int → float 转换
-            float lhs_val = static_cast<float>(*(int *)lhs_data);
-            float rhs_val = *(float *)rhs_data;
-            cmp_result = (lhs_val < rhs_val) ? -1 : (lhs_val > rhs_val) ? 1
-                                                                        : 0;
-        } else if (lhs_col->type == TYPE_FLOAT && rhs_type == TYPE_INT) {
-            // float → int 转换 (float与int比较)
-            float lhs_val = *(float *)lhs_data;
-            float rhs_val = static_cast<float>(*(int *)rhs_data);
-            cmp_result = (lhs_val < rhs_val) ? -1 : (lhs_val > rhs_val) ? 1
-                                                                        : 0;
-        } else if (lhs_col->type == TYPE_STRING && rhs_type == TYPE_STRING) {
-            cmp_result = memcmp(lhs_data, rhs_data, lhs_col->len);
-        } else {
-            throw IncompatibleTypeError(coltype2str(lhs_col->type), coltype2str(rhs_type));
-        }
-
-        switch (cond.op) {
-            case OP_EQ:
-                return cmp_result == 0;
-            case OP_NE:
-                return cmp_result != 0;
-            case OP_LT:
-                return cmp_result < 0;
-            case OP_GT:
-                return cmp_result > 0;
-            case OP_LE:
-                return cmp_result <= 0;
-            case OP_GE:
-                return cmp_result >= 0;
-            default:
-                return false;
-        }
     }
 
     std::unique_ptr<RmRecord> ProjectRecord(const RmRecord &record) {

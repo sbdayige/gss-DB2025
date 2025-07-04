@@ -54,12 +54,18 @@ class MvccUpdateExecutor : public AbstractExecutor {
 
     std::unique_ptr<RmRecord> Next() override {
         // MVCC Update Logic
+        std::cerr << "DEBUG UPDATE: Starting update operation, rids_.size()=" << rids_.size() << std::endl;
 
         for (auto &rid : rids_) {
+            std::cerr << "DEBUG UPDATE: Processing rid(" << rid.page_no << "," << rid.slot_no << ")" << std::endl;
+
             // 1. MVCC写入冲突检测
+            std::cerr << "DEBUG UPDATE: Checking write conflict for rid(" << rid.page_no << "," << rid.slot_no << ")" << std::endl;
             if (!CheckWriteConflict(rid)) {
+                std::cerr << "DEBUG UPDATE: Write conflict detected, throwing exception" << std::endl;
                 throw TransactionAbortException(context_->txn_->get_transaction_id(), AbortReason::DEADLOCK_PREVENTION);
             }
+            std::cerr << "DEBUG UPDATE: No write conflict detected" << std::endl;
 
             // 2. 获取当前记录
             auto record = fh_->get_record(rid, context_);
@@ -225,38 +231,58 @@ class MvccUpdateExecutor : public AbstractExecutor {
 
    private:
     bool CheckWriteConflict(const Rid &rid) {
+        std::cerr << "DEBUG UPDATE CheckWriteConflict: Checking rid(" << rid.page_no << "," << rid.slot_no << ")" << std::endl;
+
         // MVCC写入冲突检测
         auto version_link = txn_mgr_->GetVersionLink(rid);
         if (!version_link.has_value()) {
+            std::cerr << "DEBUG UPDATE CheckWriteConflict: No version link, can update" << std::endl;
             return true;  // 没有版本链，可以更新
         }
 
+        std::cerr << "DEBUG UPDATE CheckWriteConflict: Found version link" << std::endl;
         auto prev_txn_id = version_link->prev_.prev_txn_;
 
         if (prev_txn_id == INVALID_TXN_ID) {
+            std::cerr << "DEBUG UPDATE CheckWriteConflict: Invalid txn_id, can update" << std::endl;
             return true;  // 基础版本，可以更新
         }
 
+        std::cerr << "DEBUG UPDATE CheckWriteConflict: prev_txn_id=" << prev_txn_id
+                  << ", current_txn_id=" << context_->txn_->get_transaction_id() << std::endl;
+
         if (prev_txn_id == context_->txn_->get_transaction_id()) {
+            std::cerr << "DEBUG UPDATE CheckWriteConflict: Same transaction, can update" << std::endl;
             return true;  // 自己的修改，可以更新
         }
 
         // 检查其他事务的状态
         auto prev_txn = txn_mgr_->find_transaction(prev_txn_id);
         if (!prev_txn) {
+            std::cerr << "DEBUG UPDATE CheckWriteConflict: Previous transaction not found, can update" << std::endl;
             return true;  // 事务不存在，可能已经提交
         }
 
+        std::cerr << "DEBUG UPDATE CheckWriteConflict: Found previous transaction, state="
+                  << static_cast<int>(prev_txn->get_state()) << std::endl;
+
         if (prev_txn->get_state() == TransactionState::COMMITTED) {
+            std::cerr << "DEBUG UPDATE CheckWriteConflict: Previous transaction committed, checking timestamps" << std::endl;
+            std::cerr << "DEBUG UPDATE CheckWriteConflict: prev_commit_ts=" << prev_txn->get_commit_ts()
+                      << ", current_read_ts=" << context_->txn_->get_read_ts() << std::endl;
             if (prev_txn->get_commit_ts() > context_->txn_->get_read_ts()) {
+                std::cerr << "DEBUG UPDATE CheckWriteConflict: Write conflict - commit_ts > read_ts" << std::endl;
                 return false;  // 写入冲突
             }
+            std::cerr << "DEBUG UPDATE CheckWriteConflict: No timestamp conflict" << std::endl;
             return true;
         } else if (prev_txn->get_state() == TransactionState::ABORTED) {
+            std::cerr << "DEBUG UPDATE CheckWriteConflict: Previous transaction aborted, can update" << std::endl;
             return true;  // ABORTED的事务不应该造成冲突
         }
 
         // 未提交的事务造成写入冲突
+        std::cerr << "DEBUG UPDATE CheckWriteConflict: Previous transaction uncommitted, write conflict!" << std::endl;
         return false;
     }
 
@@ -279,29 +305,42 @@ class MvccUpdateExecutor : public AbstractExecutor {
     }
 
     bool IsVisible(const Rid &rid, Transaction *txn) {
-        // UPDATE操作需要看到所有记录以便进行写冲突检测
-        // 即使记录被其他事务修改，也应该可见，但会在CheckWriteConflict中检测冲突
+        std::cerr << "DEBUG UPDATE IsVisible: Checking rid(" << rid.page_no << "," << rid.slot_no
+                  << ") for txn_id=" << txn->get_transaction_id() << std::endl;
+
+        // UPDATE操作需要看到所有记录（包括未提交的INSERT）以便进行写冲突检测
+        // 这与SELECT的可见性规则不同，UPDATE必须能看到所有存在的记录
         auto version_link = txn_mgr_->GetVersionLink(rid);
         if (!version_link.has_value()) {
+            std::cerr << "DEBUG UPDATE IsVisible: No version link, record visible" << std::endl;
             return true;  // 没有版本链，记录可见
         }
 
+        std::cerr << "DEBUG UPDATE IsVisible: Found version link" << std::endl;
         auto prev_txn_id = version_link->prev_.prev_txn_;
         if (prev_txn_id == INVALID_TXN_ID) {
+            std::cerr << "DEBUG UPDATE IsVisible: Invalid txn_id, record visible" << std::endl;
             return true;  // 无效事务ID，记录可见
         }
 
+        std::cerr << "DEBUG UPDATE IsVisible: prev_txn_id=" << prev_txn_id
+                  << ", current_txn_id=" << txn->get_transaction_id() << std::endl;
+
         if (prev_txn_id == txn->get_transaction_id()) {
+            std::cerr << "DEBUG UPDATE IsVisible: Same transaction, checking if deleted" << std::endl;
             // 自己的修改，检查是否被删除
             auto undo_log = GetUndoLog(version_link->prev_);
             if (undo_log && undo_log->is_deleted_) {
+                std::cerr << "DEBUG UPDATE IsVisible: Record deleted by self, not visible" << std::endl;
                 return false;  // 被自己删除了，不可见
             }
+            std::cerr << "DEBUG UPDATE IsVisible: Own modification, visible" << std::endl;
             return true;  // 自己的修改，可见
         }
 
-        // 对于其他事务的修改，UPDATE操作应该能看到记录以便进行写冲突检测
-        // 实际的冲突检测在CheckWriteConflict中进行
+        // 对于其他事务的修改（包括未提交的INSERT），UPDATE操作都应该能看到
+        // 这样才能在CheckWriteConflict中正确检测写冲突并触发回滚
+        std::cerr << "DEBUG UPDATE IsVisible: Other transaction's record, making visible for conflict detection" << std::endl;
         return true;
     }
 

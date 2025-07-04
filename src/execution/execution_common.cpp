@@ -10,6 +10,8 @@ See the Mulan PSL v2 for more details. */
 
 #include "execution_common.h"
 
+#include "../errors.h"
+
 Value GetColumnValue(const RmRecord& record, const ColMeta& col_meta) {
     Value value;
     char* data_ptr = record.data + col_meta.offset;
@@ -143,4 +145,81 @@ Value EvaluateArithExpr(std::shared_ptr<ast::ArithExpr> expr, const RmRecord& re
 
 Value EvaluateExpr(const ExprTerm& expr_term, const RmRecord& record, const std::vector<ColMeta>& cols) {
     return EvaluateArithExpr(expr_term.expr, record, cols);
+}
+
+bool EvaluateCondition(const RmRecord& record, const Condition& cond, TabMeta& tab_meta) {
+    auto lhs_col = tab_meta.get_col(cond.lhs_col.col_name);
+    char* lhs_data = record.data + lhs_col->offset;
+
+    char* rhs_data;
+    ColType rhs_type;
+
+    if (cond.is_rhs_val) {
+        if (!cond.rhs_val.raw) {
+            // 初始化 raw 数据
+            const_cast<Value&>(cond.rhs_val).init_raw(lhs_col->len);
+        }
+        rhs_data = cond.rhs_val.raw->data;
+        rhs_type = cond.rhs_val.type;
+    } else {
+        auto rhs_col = tab_meta.get_col(cond.rhs_col.col_name);
+        rhs_data = record.data + rhs_col->offset;
+        rhs_type = rhs_col->type;
+    }
+
+    // 支持类型自动转换：int ↔ float
+    int cmp_result = 0;
+    if (lhs_col->type == TYPE_INT && rhs_type == TYPE_INT) {
+        int lhs_val = *(int*)lhs_data;
+        int rhs_val = *(int*)rhs_data;
+        cmp_result = (lhs_val < rhs_val) ? -1 : (lhs_val > rhs_val) ? 1
+                                                                    : 0;
+    } else if (lhs_col->type == TYPE_FLOAT && rhs_type == TYPE_FLOAT) {
+        float lhs_val = *(float*)lhs_data;
+        float rhs_val = *(float*)rhs_data;
+        cmp_result = (lhs_val < rhs_val) ? -1 : (lhs_val > rhs_val) ? 1
+                                                                    : 0;
+    } else if (lhs_col->type == TYPE_INT && rhs_type == TYPE_FLOAT) {
+        // int → float 转换
+        float lhs_val = static_cast<float>(*(int*)lhs_data);
+        float rhs_val = *(float*)rhs_data;
+        cmp_result = (lhs_val < rhs_val) ? -1 : (lhs_val > rhs_val) ? 1
+                                                                    : 0;
+    } else if (lhs_col->type == TYPE_FLOAT && rhs_type == TYPE_INT) {
+        // float → int 转换 (float与int比较)
+        float lhs_val = *(float*)lhs_data;
+        float rhs_val = static_cast<float>(*(int*)rhs_data);
+        cmp_result = (lhs_val < rhs_val) ? -1 : (lhs_val > rhs_val) ? 1
+                                                                    : 0;
+    } else if (lhs_col->type == TYPE_STRING && rhs_type == TYPE_STRING) {
+        cmp_result = memcmp(lhs_data, rhs_data, lhs_col->len);
+    } else {
+        throw IncompatibleTypeError(coltype2str(lhs_col->type), coltype2str(rhs_type));
+    }
+
+    switch (cond.op) {
+        case OP_EQ:
+            return cmp_result == 0;
+        case OP_NE:
+            return cmp_result != 0;
+        case OP_LT:
+            return cmp_result < 0;
+        case OP_GT:
+            return cmp_result > 0;
+        case OP_LE:
+            return cmp_result <= 0;
+        case OP_GE:
+            return cmp_result >= 0;
+        default:
+            return false;
+    }
+}
+
+bool EvaluateConditions(const RmRecord& record, const std::vector<Condition>& conditions, TabMeta& tab_meta) {
+    for (const auto& condition : conditions) {
+        if (!EvaluateCondition(record, condition, tab_meta)) {
+            return false;
+        }
+    }
+    return true;
 }

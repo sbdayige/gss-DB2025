@@ -10,6 +10,7 @@ See the Mulan PSL v2 for more details. */
 
 #pragma once
 
+#include "execution_common.h"
 #include "execution_defs.h"
 #include "execution_manager.h"
 #include "executor_abstract.h"
@@ -155,7 +156,7 @@ class MvccIndexScanExecutor : public AbstractExecutor {
             }
 
             // 检查所有WHERE条件（包括非索引条件）
-            if (EvaluateConditions(*record, conds_)) {
+            if (EvaluateConditions(*record, conds_, tab_)) {
                 buffer_.push_back(std::make_unique<RmRecord>(*record));
             }
         }
@@ -334,68 +335,6 @@ class MvccIndexScanExecutor : public AbstractExecutor {
             return std::make_unique<UndoLog>(undo_log_opt.value());
         }
         return nullptr;
-    }
-
-    bool EvaluateConditions(const RmRecord &record, const std::vector<Condition> &conditions) {
-        for (auto &cond : conditions) {
-            if (!EvaluateCondition(record, cond)) {
-                return false;
-            }
-        }
-        return true;
-    }
-
-    bool EvaluateCondition(const RmRecord &record, const Condition &cond) {
-        auto lhs_col = tab_.get_col(cond.lhs_col.col_name);
-        char *lhs_data = record.data + lhs_col->offset;
-
-        char *rhs_data;
-        ColType rhs_type;
-
-        if (cond.is_rhs_val) {
-            rhs_data = cond.rhs_val.raw->data;
-            rhs_type = cond.rhs_val.type;
-        } else {
-            auto rhs_col = tab_.get_col(cond.rhs_col.col_name);
-            rhs_data = record.data + rhs_col->offset;
-            rhs_type = rhs_col->type;
-        }
-
-        if (lhs_col->type != rhs_type) {
-            throw IncompatibleTypeError(coltype2str(lhs_col->type), coltype2str(rhs_type));
-        }
-
-        int cmp_result = 0;
-        if (lhs_col->type == TYPE_INT) {
-            int lhs_val = *(int *)lhs_data;
-            int rhs_val = *(int *)rhs_data;
-            cmp_result = (lhs_val < rhs_val) ? -1 : (lhs_val > rhs_val) ? 1
-                                                                        : 0;
-        } else if (lhs_col->type == TYPE_FLOAT) {
-            float lhs_val = *(float *)lhs_data;
-            float rhs_val = *(float *)rhs_data;
-            cmp_result = (lhs_val < rhs_val) ? -1 : (lhs_val > rhs_val) ? 1
-                                                                        : 0;
-        } else if (lhs_col->type == TYPE_STRING) {
-            cmp_result = memcmp(lhs_data, rhs_data, lhs_col->len);
-        }
-
-        switch (cond.op) {
-            case OP_EQ:
-                return cmp_result == 0;
-            case OP_NE:
-                return cmp_result != 0;
-            case OP_LT:
-                return cmp_result < 0;
-            case OP_GT:
-                return cmp_result > 0;
-            case OP_LE:
-                return cmp_result <= 0;
-            case OP_GE:
-                return cmp_result >= 0;
-            default:
-                return false;
-        }
     }
 
     std::unique_ptr<RmRecord> ProjectRecord(const RmRecord &record) {

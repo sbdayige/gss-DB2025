@@ -52,3 +52,21 @@ Value EvaluateArithExpr(std::shared_ptr<ast::ArithExpr> expr, const RmRecord& re
  * @return 计算结果的值
  */
 Value EvaluateExpr(const ExprTerm& expr_term, const RmRecord& record, const std::vector<ColMeta>& cols);
+
+/**
+ * @brief 评估单个WHERE条件
+ * @param record 记录
+ * @param cond 条件
+ * @param tab_meta 表元数据
+ * @return 条件是否满足
+ */
+bool EvaluateCondition(const RmRecord& record, const Condition& cond, TabMeta& tab_meta);
+
+/**
+ * @brief 评估多个WHERE条件（AND关系）
+ * @param record 记录
+ * @param conditions 条件列表
+ * @param tab_meta 表元数据
+ * @return 所有条件是否都满足
+ */
+bool EvaluateConditions(const RmRecord& record, const std::vector<Condition>& conditions, TabMeta& tab_meta);
