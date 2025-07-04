@@ -253,6 +253,22 @@ struct ShowIndex : public TreeNode {
 };
 
 /**
+ * @brief 加载数据语句AST节点
+ *
+ * 表示LOAD DATA INFILE INTO TABLE语句，用于从文件加载数据到表中
+ * 例如：LOAD DATA INFILE 'data.csv' INTO TABLE student
+ *
+ * @param file_name 数据文件名
+ * @param tab_name 目标表名
+ */
+struct LoadStmt : public TreeNode {
+    std::string file_name;
+    std::string tab_name;
+
+    LoadStmt(std::string file_name_, std::string table_name_) : file_name(std::move(file_name_)), tab_name(std::move(table_name_)) {}
+};
+
+/**
  * @brief 创建索引语句AST节点
  *
  * 表示CREATE INDEX语句

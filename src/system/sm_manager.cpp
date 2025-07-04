@@ -443,3 +443,7 @@ IxIndexHandle* SmManager::get_index_handle(
 bool SmManager::contains_table(const std::string& tab_name) const {
     return db_.is_table(tab_name);
 }
+
+void SmManager::load_csv_data(const std::string& csv_file_path, const std::string& tab_name) {
+    std::cerr << "Loading CSV data from " << csv_file_path << " into table " << tab_name << std::endl;
+}
