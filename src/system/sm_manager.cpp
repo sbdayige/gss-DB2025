@@ -13,7 +13,6 @@ See the Mulan PSL v2 for more details. */
 #include <sys/stat.h>
 #include <unistd.h>
 
-#include <filesystem>
 #include <fstream>
 
 #include "index/ix.h"
