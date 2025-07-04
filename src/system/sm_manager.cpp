@@ -446,8 +446,4 @@ bool SmManager::contains_table(const std::string& tab_name) const {
 }
 
 void SmManager::load_csv_data(const std::string& csv_file_path, const std::string& tab_name) {
-    std::cerr << "Loading data from CSV file: " << csv_file_path << " into table: " << tab_name << std::endl;
-    while (1) {
-        std::cerr << "114514 ";
-    }
 }
