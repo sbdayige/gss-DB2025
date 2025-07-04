@@ -30,6 +30,7 @@ See the Mulan PSL v2 for more details. */
 #include <string>
 
 #include "common/common.h"
+#include "execution/execution_common.h"
 #include "execution/execution_sort.h"
 #include "execution/executor_abstract.h"
 #include "execution/executor_aggregate.h"
@@ -112,6 +113,41 @@ class Portal {
 
    public:
     /**
+     * @brief 物理扫描表并收集满足条件的所有记录RID（用于UPDATE/DELETE）
+     * @param tab_name 表名
+     * @param conds WHERE条件
+     * @param context 执行上下文
+     * @return std::vector<Rid> 满足条件的所有物理记录RID
+     */
+    std::vector<Rid> CollectMatchedRids(const std::string& tab_name, const std::vector<Condition>& conds, Context* context) {
+        std::vector<Rid> rids;
+        auto tab = sm_manager_->db_.get_table(tab_name);
+        auto fh = sm_manager_->fhs_.at(tab_name).get();
+        std::cerr << "DEBUG SCAN: Starting physical scan for table " << tab_name << std::endl;
+        for (RmScan scan(fh); !scan.is_end(); scan.next()) {
+            auto rid = scan.rid();
+            std::cerr << "DEBUG SCAN: Found physical record at rid(" << rid.page_no << "," << rid.slot_no << ")" << std::endl;
+            auto record = fh->get_record(rid, context);
+            bool matches = true;
+            for (const auto& cond : conds) {
+                if (!EvaluateCondition(*record, cond, tab)) {
+                    matches = false;
+                    break;
+                }
+            }
+            if (matches) {
+                std::cerr << "DEBUG SCAN: Record matches WHERE condition, adding to rids" << std::endl;
+                rids.push_back(rid);
+            } else {
+                std::cerr << "DEBUG SCAN: Record does not match WHERE condition, skipping" << std::endl;
+            }
+        }
+        std::cerr << "DEBUG SCAN: Physical scan completed, found " << rids.size() << " matching records" << std::endl;
+        return rids;
+    }
+
+   public:
+    /**
      * @brief 构造函数
      * @param sm_manager 系统管理器指针
      * @param txn_mgr 事务管理器指针
@@ -187,52 +223,20 @@ class Portal {
                     // ===============================
                     // UPDATE语句处理 - MVCC版本
                     // ===============================
-                    std::unique_ptr<AbstractExecutor> scan = convert_plan_executor(x->subplan_, context);
-                    std::vector<Rid> rids;
-
-                    scan->beginTuple();
-                    int max_iterations = 1000;  // 防止无限循环
-                    int iteration = 0;
-
-                    while (!scan->is_end() && iteration < max_iterations) {
-                        Rid current_rid = scan->rid();
-                        rids.push_back(current_rid);
-                        scan->nextTuple();
-                        iteration++;
-
-                        // 检测是否卡在同一个记录
-                        if (iteration > 10 && !rids.empty()) {
-                            Rid last_rid = rids.back();
-                            if (current_rid.page_no == last_rid.page_no && current_rid.slot_no == last_rid.slot_no) {
-                                break;
-                            }
-                        }
-                    }
-
+                    std::cerr << "DEBUG UPDATE SCAN: Starting scan for UPDATE statement" << std::endl;
+                    auto rids = CollectMatchedRids(x->tab_name_, x->conds_, context);
                     std::unique_ptr<AbstractExecutor> root = std::make_unique<MvccUpdateExecutor>(sm_manager_, txn_mgr_,
                                                                                                   x->tab_name_, x->set_clauses_, x->conds_, rids, context);
-
                     return std::make_shared<PortalStmt>(PORTAL_DML_WITHOUT_SELECT, std::vector<TabCol>(), std::move(root), plan);
                 }
                 case T_Delete: {
                     // ===============================
                     // DELETE语句处理 - MVCC版本
                     // ===============================
-
-                    std::unique_ptr<AbstractExecutor> scan = convert_plan_executor(x->subplan_, context);
-
-                    std::vector<Rid> rids;
-
-                    try {
-                        for (scan->beginTuple(); !scan->is_end(); scan->nextTuple()) {
-                            rids.push_back(scan->rid());
-                        }
-                    } catch (const std::exception& e) {
-                        throw;
-                    }
+                    std::cerr << "DEBUG DELETE SCAN: Starting scan for DELETE statement" << std::endl;
+                    auto rids = CollectMatchedRids(x->tab_name_, x->conds_, context);
                     std::unique_ptr<AbstractExecutor> root =
                         std::make_unique<MvccDeleteExecutor>(sm_manager_, txn_mgr_, x->tab_name_, x->conds_, rids, context);
-
                     return std::make_shared<PortalStmt>(PORTAL_DML_WITHOUT_SELECT, std::vector<TabCol>(), std::move(root), plan);
                 }
 
