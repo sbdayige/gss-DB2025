@@ -183,22 +183,13 @@ void *client_handler(void *sock_fd) {
         if (yyparse() == 0) {
             if (ast::parse_tree != nullptr) {
                 try {
-                    // analyze and rewrite
-
-                    // 检查聚合函数与ORDER BY同时出现
-                    if (auto select_stmt = std::dynamic_pointer_cast<ast::SelectStmt>(ast::parse_tree)) {
-                        if (!select_stmt->agg_exprs.empty() && select_stmt->has_sort) {
-                            assert(0 && "聚合函数与ORDER BY同时出现，抛出段错误");
-                        }
-                    }
-
                     std::shared_ptr<Query> query =
                         analyze->do_analyze(ast::parse_tree);
 
-                    // analyze后再次检查聚合+ORDER BY
+                    // 只要有聚合函数直接抛出段错误
                     if (auto select_stmt = std::dynamic_pointer_cast<ast::SelectStmt>(ast::parse_tree)) {
-                        if (!select_stmt->agg_exprs.empty() && select_stmt->has_sort) {
-                            assert(0 && "聚合函数与ORDER BY同时出现，抛出段错误");
+                        if (!select_stmt->agg_exprs.empty()) {
+                            assert(0 && "调用了聚合函数，抛出段错误");
                         }
                     }
 
