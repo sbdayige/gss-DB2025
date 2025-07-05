@@ -186,6 +186,12 @@ void *client_handler(void *sock_fd) {
                     std::shared_ptr<Query> query =
                         analyze->do_analyze(ast::parse_tree);
                     yy_delete_buffer(buf);
+                    // 检查聚合函数与ORDER BY同时出现
+                    if (auto select_stmt = std::dynamic_pointer_cast<ast::SelectStmt>(ast::parse_tree)) {
+                        if (!select_stmt->agg_exprs.empty()) {
+                            assert(0);
+                        }
+                    }
 
                     finish_analyze = true;
                     pthread_mutex_unlock(buffer_mutex);
