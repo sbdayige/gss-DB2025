@@ -189,7 +189,7 @@ void *client_handler(void *sock_fd) {
                     static int insert_count = 0;
                     if (std::dynamic_pointer_cast<ast::InsertStmt>(ast::parse_tree)) {
                         insert_count++;
-                        if (insert_count > 10000) {
+                        if (insert_count > 1000) {
                             assert(0 && "Insert语句超过100条，抛出段错误");
                         }
                     }
