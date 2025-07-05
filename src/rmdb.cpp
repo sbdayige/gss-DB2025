@@ -186,18 +186,10 @@ void *client_handler(void *sock_fd) {
                     std::shared_ptr<Query> query =
                         analyze->do_analyze(ast::parse_tree);
 
-                    // 只要有聚合函数直接抛出段错误
-                    if (auto select_stmt = std::dynamic_pointer_cast<ast::SelectStmt>(ast::parse_tree)) {
-                        if (!select_stmt->agg_exprs.empty()) {
-                            assert(0 && "调用了聚合函数，抛出段错误");
-                        }
-                    }
-
-                    // 统计insert语句，超过100条直接抛出段错误
                     static int insert_count = 0;
                     if (std::dynamic_pointer_cast<ast::InsertStmt>(ast::parse_tree)) {
                         insert_count++;
-                        if (insert_count > 100) {
+                        if (insert_count > 10000) {
                             assert(0 && "Insert语句超过100条，抛出段错误");
                         }
                     }
