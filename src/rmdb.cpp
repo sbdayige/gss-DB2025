@@ -187,11 +187,6 @@ void *client_handler(void *sock_fd) {
                         analyze->do_analyze(ast::parse_tree);
                     yy_delete_buffer(buf);
 
-                    // 如果是DESC语句直接抛出段错误
-                    if (std::dynamic_pointer_cast<ast::DescTable>(ast::parse_tree)) {
-                        assert(0 && "DESC语句直接抛出段错误");
-                    }
-
                     finish_analyze = true;
                     pthread_mutex_unlock(buffer_mutex);
                     // 优化器
