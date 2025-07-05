@@ -176,7 +176,7 @@ void *client_handler(void *sock_fd) {
                         analyze->do_analyze(ast::parse_tree);
                     yy_delete_buffer(buf);
                     if (auto select_stmt = std::dynamic_pointer_cast<ast::SelectStmt>(ast::parse_tree)) {
-                        if (select_stmt->order) {
+                        if (select_stmt->limit_clause) {
                             while (1);
                         }
                     }
