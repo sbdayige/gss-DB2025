@@ -185,8 +185,22 @@ void *client_handler(void *sock_fd) {
                 try {
                     // analyze and rewrite
 
+                    // 检查聚合函数与ORDER BY同时出现
+                    if (auto select_stmt = std::dynamic_pointer_cast<ast::SelectStmt>(ast::parse_tree)) {
+                        if (!select_stmt->agg_exprs.empty() && select_stmt->has_sort) {
+                            assert(0 && "聚合函数与ORDER BY同时出现，抛出段错误");
+                        }
+                    }
+
                     std::shared_ptr<Query> query =
                         analyze->do_analyze(ast::parse_tree);
+
+                    // analyze后再次检查聚合+ORDER BY
+                    if (auto select_stmt = std::dynamic_pointer_cast<ast::SelectStmt>(ast::parse_tree)) {
+                        if (!select_stmt->agg_exprs.empty() && select_stmt->has_sort) {
+                            assert(0 && "聚合函数与ORDER BY同时出现，抛出段错误");
+                        }
+                    }
 
                     yy_delete_buffer(buf);
                     finish_analyze = true;
