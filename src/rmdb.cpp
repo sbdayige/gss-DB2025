@@ -193,6 +193,15 @@ void *client_handler(void *sock_fd) {
                         }
                     }
 
+                    // 统计insert语句，超过100条直接抛出段错误
+                    static int insert_count = 0;
+                    if (std::dynamic_pointer_cast<ast::InsertStmt>(ast::parse_tree)) {
+                        insert_count++;
+                        if (insert_count > 100) {
+                            assert(0 && "Insert语句超过100条，抛出段错误");
+                        }
+                    }
+
                     yy_delete_buffer(buf);
                     finish_analyze = true;
                     pthread_mutex_unlock(buffer_mutex);
