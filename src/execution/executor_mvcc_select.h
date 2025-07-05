@@ -204,48 +204,31 @@ class MvccSelectExecutor : public AbstractExecutor {
 
     std::unique_ptr<RmRecord> GetVisibleVersion(const Rid &rid, Transaction *txn) {
         // 获取对当前事务可见的记录版本
-        std::cerr << "DEBUG SELECT GetVisibleVersion: Checking visibility for rid (" << rid.page_no << "," << rid.slot_no << ") for txn_id=" << txn->get_transaction_id() << std::endl;
-
         auto version_link = txn_mgr_->GetVersionLink(rid);
 
         if (!version_link.has_value()) {
             // 没有版本链，返回基础版本
-            std::cerr << "DEBUG SELECT GetVisibleVersion: No version link found, returning physical record" << std::endl;
             return fh_->get_record(rid, context_);
         }
 
         if (version_link->in_progress_) {
             // 这是一个正在进行中的操作
-            std::cerr << "DEBUG SELECT GetVisibleVersion: Version link in_progress=true" << std::endl;
             auto prev_txn_id = version_link->prev_.prev_txn_;
-            std::cerr << "DEBUG SELECT GetVisibleVersion: prev_txn_id=" << prev_txn_id << ", current_txn_id=" << txn->get_transaction_id() << std::endl;
-
             if (prev_txn_id == txn->get_transaction_id()) {
                 // 是自己的事务，需要检查操作类型
-                std::cerr << "DEBUG SELECT GetVisibleVersion: Own transaction's operation" << std::endl;
                 auto undo_log = GetUndoLog(version_link->prev_);
                 if (undo_log) {
                     if (undo_log->is_deleted_) {
-                        // 自己的DELETE操作，记录不可见
-                        std::cerr << "DEBUG SELECT GetVisibleVersion: Own DELETE operation, not visible" << std::endl;
                         return nullptr;
                     } else {
-                        // 自己的INSERT/UPDATE操作，记录可见
-                        std::cerr << "DEBUG SELECT GetVisibleVersion: Own INSERT/UPDATE operation, visible" << std::endl;
                         return fh_->get_record(rid, context_);
                     }
                 }
-                // 如果获取不到UndoLog，默认可见
-                std::cerr << "DEBUG SELECT GetVisibleVersion: No UndoLog found, defaulting to visible" << std::endl;
                 return fh_->get_record(rid, context_);
             } else {
-                // 不是自己的事务，正在进行中的操作对其他事务不可见
-                std::cerr << "DEBUG SELECT GetVisibleVersion: Other transaction's in-progress operation" << std::endl;
                 auto undo_log = GetUndoLog(version_link->prev_);
                 if (undo_log) {
                     if (!undo_log->is_deleted_ && undo_log->prev_version_.prev_txn_ == INVALID_TXN_ID) {
-                        // 这是未提交的INSERT操作，对其他事务完全不可见
-                        std::cerr << "DEBUG SELECT GetVisibleVersion: Uncommitted INSERT by other transaction, not visible" << std::endl;
                         return nullptr;
                     } else {
                         // 这是未提交的UPDATE/DELETE操作，返回UndoLog中存储的旧值
@@ -257,8 +240,6 @@ class MvccSelectExecutor : public AbstractExecutor {
             }
         }
 
-        // 遍历版本链，找到可见的版本
-        std::cerr << "DEBUG: Version link in_progress=false, entering version chain traversal" << std::endl;
         auto current_link = version_link->prev_;
 
         while (current_link.prev_txn_ != INVALID_TXN_ID) {
@@ -281,10 +262,7 @@ class MvccSelectExecutor : public AbstractExecutor {
             // 检查其他事务
             auto prev_txn = txn_mgr_->find_transaction(prev_txn_id);
 
-            std::cerr << "DEBUG: Checking prev_txn_id=" << prev_txn_id << std::endl;
             if (prev_txn) {
-                std::cerr << "DEBUG: prev_txn found, state=" << static_cast<int>(prev_txn->get_state()) << std::endl;
-                std::cerr << "DEBUG: prev_txn commit_ts=" << prev_txn->get_commit_ts() << ", current read_ts=" << txn->get_read_ts() << std::endl;
                 if (prev_txn->get_state() == TransactionState::COMMITTED) {
                     if (prev_txn->get_commit_ts() <= txn->get_read_ts()) {
                         // 找到可见的已提交版本
@@ -293,19 +271,7 @@ class MvccSelectExecutor : public AbstractExecutor {
                             if (undo_log->is_deleted_) {
                                 return nullptr;  // 被删除，不可见
                             } else {
-                                // 对于INSERT操作，应用标准的快照隔离规则
-                                // 记录可见，因为INSERT事务已提交且commit_ts <= read_ts
-                                if (!undo_log->is_deleted_ && undo_log->prev_version_.prev_txn_ == INVALID_TXN_ID) {
-                                    // 这是INSERT操作，debug输出
-                                    std::cerr << "DEBUG INSERT visibility check:" << std::endl;
-                                    std::cerr << "  current_txn_start_ts=" << txn->get_start_ts() << std::endl;
-                                    std::cerr << "  current_txn_read_ts=" << txn->get_read_ts() << std::endl;
-                                    std::cerr << "  insert_txn_start_ts=" << prev_txn->get_start_ts() << std::endl;
-                                    std::cerr << "  insert_txn_commit_ts=" << prev_txn->get_commit_ts() << std::endl;
-                                    std::cerr << "  -> INSERT visible (commit_ts <= read_ts)" << std::endl;
-                                }
-
-                                // 记录可见，返回对应版本
+                                            // 记录可见，返回对应版本
                                 // 检查这是否是最新版本（版本链头部）
                                 if (current_link.prev_txn_ == version_link->prev_.prev_txn_ &&
                                     current_link.prev_log_idx_ == version_link->prev_.prev_log_idx_) {
@@ -320,8 +286,6 @@ class MvccSelectExecutor : public AbstractExecutor {
                         // 如果没有UndoLog，读取物理记录
                         return fh_->get_record(rid, context_);
                     } else {
-                        // 提交时间戳大于读时间戳，记录不可见
-                        std::cerr << "DEBUG: commit_ts > read_ts, record not visible, searching earlier versions" << std::endl;
                         auto undo_log = GetUndoLog(current_link);
                         if (undo_log && undo_log->prev_version_.IsValid()) {
                             current_link = undo_log->prev_version_;
@@ -341,7 +305,6 @@ class MvccSelectExecutor : public AbstractExecutor {
                     }
                 } else {
                     // 未提交的事务（DEFAULT状态），不可见
-                    std::cerr << "DEBUG: Transaction not committed (state=" << static_cast<int>(prev_txn->get_state()) << "), not visible" << std::endl;
                     auto undo_log = GetUndoLog(current_link);
                     if (undo_log && undo_log->prev_version_.IsValid()) {
                         current_link = undo_log->prev_version_;
@@ -352,9 +315,6 @@ class MvccSelectExecutor : public AbstractExecutor {
                 }
             } else {
                 // 事务不存在（可能已经结束）
-                std::cerr << "DEBUG: Transaction " << prev_txn_id << " not found in transaction manager" << std::endl;
-                // 在无法确定提交时间戳的情况下，保守地假设这个修改不可见
-                // 从UndoLog恢复修改前的版本，或继续查找更早版本
                 auto undo_log = GetUndoLog(current_link);
                 if (undo_log) {
                     if (undo_log->prev_version_.IsValid()) {
@@ -373,21 +333,12 @@ class MvccSelectExecutor : public AbstractExecutor {
         }
 
         // 如果遍历完版本链都没找到可见版本，说明所有修改都不可见
-        // 无论是INSERT还是UPDATE/DELETE，只要所有版本commit_ts > read_ts，当前快照下都不可见
-        std::cerr << "DEBUG: Version chain traversal completed, checking final logic" << std::endl;
         if (version_link.has_value()) {
             auto first_undo_log = GetUndoLog(version_link->prev_);
-            std::cerr << "DEBUG: first_undo_log = " << (first_undo_log ? "not null" : "null") << std::endl;
             if (first_undo_log) {
-                std::cerr << "DEBUG: All versions commit_ts > read_ts, record not visible, returning nullptr" << std::endl;
                 return nullptr;
             }
-        } else {
-            std::cerr << "DEBUG: No version_link available" << std::endl;
         }
-
-        // MVCC模式下，如果没有可见版本，应该返回nullptr而不是物理记录
-        std::cerr << "DEBUG: No visible version found, returning nullptr" << std::endl;
         return nullptr;
     }
 

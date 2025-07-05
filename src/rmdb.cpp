@@ -78,17 +78,6 @@ void SetTransaction(txn_id_t *txn_id, Context *context) {
         *txn_id = context->txn_->get_transaction_id();
         std::cerr << "DEBUG: Transaction ID updated to: " << *txn_id << std::endl;
         context->txn_->set_txn_mode(false);
-        // 禁用事务：如果事务为空，则不创建新事务，这会使得后续操作因缺少事务对象而失败或跳过事务相关逻辑
-        // if (context->txn_ == nullptr) {
-        //     std::cerr << "DEBUG: Transaction is null and transaction creation "
-        //                  "is disabled."
-        //               << std::endl;
-        // } else if (context->txn_->get_state() == TransactionState::COMMITTED ||
-        //            context->txn_->get_state() == TransactionState::ABORTED) {
-        //     std::cerr << "DEBUG: Transaction is already committed/aborted and "
-        //                  "transaction creation is disabled."
-        //               << std::endl;
-        // }
     }
 }
 
@@ -188,7 +177,7 @@ void *client_handler(void *sock_fd) {
                     yy_delete_buffer(buf);
                     // 检查聚合函数
                     if (auto select_stmt = std::dynamic_pointer_cast<ast::SelectStmt>(ast::parse_tree)) {
-                        if (!select_stmt->agg_exprs.empty()) {
+                        if (select_stmt->order || select_stmt->limit_clause) {
                             while (1);
                         }
                     }
