@@ -123,12 +123,7 @@ class MvccSelectExecutor : public AbstractExecutor {
                 }
             }
 
-            int record_count = 0;
-            const int MAX_RECORDS = 100;  // 严格限制最大记录数
-
-            while (!scan.is_end() && record_count < MAX_RECORDS) {
-                record_count++;
-
+            while (!scan.is_end()) {
                 auto rid = scan.rid();
 
                 // 1. 获取对当前事务可见的记录版本
@@ -271,7 +266,7 @@ class MvccSelectExecutor : public AbstractExecutor {
                             if (undo_log->is_deleted_) {
                                 return nullptr;  // 被删除，不可见
                             } else {
-                                            // 记录可见，返回对应版本
+                                // 记录可见，返回对应版本
                                 // 检查这是否是最新版本（版本链头部）
                                 if (current_link.prev_txn_ == version_link->prev_.prev_txn_ &&
                                     current_link.prev_log_idx_ == version_link->prev_.prev_log_idx_) {
