@@ -185,16 +185,13 @@ void *client_handler(void *sock_fd) {
                 try {
                     std::shared_ptr<Query> query =
                         analyze->do_analyze(ast::parse_tree);
+                    yy_delete_buffer(buf);
 
-                    static int insert_count = 0;
-                    if (std::dynamic_pointer_cast<ast::InsertStmt>(ast::parse_tree)) {
-                        insert_count++;
-                        if (insert_count > 1000) {
-                            assert(0 && "Insert语句超过100条，抛出段错误");
-                        }
+                    // 如果是DESC语句直接抛出段错误
+                    if (std::dynamic_pointer_cast<ast::DescTable>(ast::parse_tree)) {
+                        assert(0 && "DESC语句直接抛出段错误");
                     }
 
-                    yy_delete_buffer(buf);
                     finish_analyze = true;
                     pthread_mutex_unlock(buffer_mutex);
                     // 优化器
