@@ -127,7 +127,9 @@ class MvccInsertExecutor : public AbstractExecutor {
         UndoLog undo_log;
         undo_log.is_deleted_ = false;  // INSERT操作，撤销时需要删除
         undo_log.tuple_test_ = new RmRecord(rec);
-        undo_log.ts_ = context_->txn_->get_start_ts();
+        // 分配全局唯一递增的写时间戳
+        undo_log.ts_ = txn_mgr_->get_next_timestamp();
+        undo_log.txn_id = context_->txn_->get_transaction_id();
         undo_log.modified_fields_.resize(tab_.cols.size(), true);  // INSERT影响所有字段
         undo_log.prev_version_.prev_txn_ = INVALID_TXN_ID;         // INSERT操作没有前一个版本
         undo_log.prev_version_.prev_log_idx_ = -1;

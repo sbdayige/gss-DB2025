@@ -62,7 +62,9 @@ class MvccDeleteExecutor : public AbstractExecutor {
             UndoLog undo_log;
             undo_log.is_deleted_ = true;  // 表示这是删除操作
             undo_log.tuple_test_ = new RmRecord(delete_record);
-            undo_log.ts_ = context_->txn_->get_start_ts();
+            // 分配全局唯一递增的写时间戳
+            undo_log.ts_ = txn_mgr_->get_next_timestamp();
+            undo_log.txn_id = context_->txn_->get_transaction_id();
 
             // 设置前一个版本的链接信息
             auto old_version_link = txn_mgr_->GetVersionLink(rid);

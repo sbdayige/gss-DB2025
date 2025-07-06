@@ -107,6 +107,25 @@ void RmFileHandle::insert_record(const Rid &rid, char *buf) {
     buffer_pool_manager_->unpin_page(page_handle.page->get_page_id(), true);
 }
 
+void RmFileHandle::insert_record_force(const Rid &rid, char *buf) {
+    // 获取页面句柄
+    RmPageHandle page_handle = fetch_page_handle(rid.page_no);
+
+    // 复制数据到指定slot
+    char *slot = page_handle.get_slot(rid.slot_no);
+    memcpy(slot, buf, file_hdr_.record_size);
+
+    // 设置bitmap和更新记录数
+    if (!Bitmap::is_set(page_handle.bitmap, rid.slot_no)) {
+        Bitmap::set(page_handle.bitmap, rid.slot_no);
+        page_handle.page_hdr->num_records++;
+    }
+    if (page_handle.page_hdr->num_records == page_handle.file_hdr->num_records_per_page) {
+        file_hdr_.first_free_page_no = page_handle.page_hdr->next_free_page_no;
+    }
+
+    buffer_pool_manager_->unpin_page(page_handle.page->get_page_id(), true);
+}
 /**
  * @description: 删除记录文件中记录号为rid的记录
  * @param {Rid&} rid 要删除的记录的记录号（位置）

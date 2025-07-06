@@ -67,17 +67,17 @@ void sigint_handler(int signo) {
 
 // 判断当前正在执行的是显式事务还是单条SQL语句的事务，并更新事务ID
 void SetTransaction(txn_id_t *txn_id, Context *context) {
-    context->txn_ = txn_manager->get_transaction(*txn_id);
-    if (context->txn_ == nullptr ||
-        context->txn_->get_state() == TransactionState::COMMITTED ||
+    if (txn_manager->exsit_transaction(*txn_id)) {
+        // 如果事务ID存在，则获取对应的事务对象
+        context->txn_ = txn_manager->get_transaction(*txn_id);
+    } else {
+        context->txn_ = nullptr;
+    }
+    // 如果事务对象为空 或者已提交 或者已中止， 则创建新事务
+    if (context->txn_ == nullptr || context->txn_->get_state() == TransactionState::COMMITTED ||
         context->txn_->get_state() == TransactionState::ABORTED) {
-        std::cerr << "DEBUG: Transaction is null or already committed/aborted, creating a new transaction." << std::endl;
         context->txn_ = txn_manager->begin(nullptr, context->log_mgr_);
-        std::cerr << "DEBUG: New transaction created with ID: "
-                  << context->txn_->get_transaction_id() << std::endl;
         *txn_id = context->txn_->get_transaction_id();
-        std::cerr << "DEBUG: Transaction ID updated to: " << *txn_id << std::endl;
-        context->txn_->set_txn_mode(false);
     }
 }
 
@@ -159,10 +159,7 @@ void *client_handler(void *sock_fd) {
         memset(data_send, '\0', BUFFER_LENGTH);
         offset = 0;
 
-        // 开启事务，初始化系统所需的上下文信息（包括事务对象指针、锁管理器指针、日志管理器指针、存放结果的buffer、记录结果长度的变量）
-        std::unique_ptr<Context> context(new Context(lock_manager.get(),
-                                                     log_manager.get(), nullptr,
-                                                     data_send, &offset));
+        auto context = std::make_unique<Context>(lock_manager.get(), log_manager.get(), nullptr, data_send, &offset);
         SetTransaction(&txn_id, context.get());
 
         // 用于判断是否已经调用了yy_delete_buffer来删除buf
@@ -196,7 +193,7 @@ void *client_handler(void *sock_fd) {
                     offset = str.length();
 
                     // 回滚事务
-                    txn_manager->abort(context->txn_, log_manager.get());
+                    txn_manager->abort(context.get(), log_manager.get());
                     std::cout << e.GetInfo() << std::endl;
 
                     if (output_file_enabled) {

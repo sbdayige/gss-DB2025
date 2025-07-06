@@ -51,6 +51,8 @@ struct UndoLog {
     timestamp_t ts_{INVALID_TS};
     /* 撤销日志的前一个版本 */
     UndoLink prev_version_{};
+    /* 产生该UndoLog的事务ID */
+    txn_id_t txn_id{INVALID_TXN_ID};
 };
 
 class Transaction {
@@ -115,6 +117,11 @@ class Transaction {
         return {txn_id_, static_cast<int>(undo_logs_.size() - 1)};
     }
     inline auto GetUndoLog(size_t log_id) -> UndoLog {
+        std::scoped_lock<std::mutex> lck(latch_);
+        return undo_logs_[log_id];
+    }
+    // 新增：获取UndoLog的引用（用于原地修改ts_等字段）
+    inline UndoLog &GetUndoLogRef(size_t log_id) {
         std::scoped_lock<std::mutex> lck(latch_);
         return undo_logs_[log_id];
     }

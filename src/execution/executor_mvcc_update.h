@@ -53,167 +53,81 @@ class MvccUpdateExecutor : public AbstractExecutor {
     }
 
     std::unique_ptr<RmRecord> Next() override {
-        // MVCC Update Logic
-
+        // MVCC Update实现：UPDATE = DELETE + INSERT
         for (auto &rid : rids_) {
-            if (!CheckWriteConflict(rid)) {
-                throw TransactionAbortException(context_->txn_->get_transaction_id(), AbortReason::DEADLOCK_PREVENTION);
-            }
-
-            // 2. 获取当前记录
+            // 1. 获取当前记录用于生成新记录
             auto record = fh_->get_record(rid, context_);
-
             auto old_record = *record;
             records_.push_back(std::make_unique<RmRecord>(old_record));
 
-            // 3. 构造新记录
+            // 2. 构造新记录（根据SET子句修改相应字段）
+            RmRecord new_record = old_record;
             for (auto &set_clause : set_clauses_) {
                 auto lhs_col = tab_.get_col(set_clause.lhs.col_name);
 
                 if (set_clause.rhs_type == SET_RHS_VALUE) {
                     if (lhs_col->type == TYPE_INT && set_clause.rhs_val.type == TYPE_FLOAT) {
                         int v = (int)set_clause.rhs_val.float_val;
-                        memcpy(record->data + lhs_col->offset, &v, lhs_col->len);
+                        memcpy(new_record.data + lhs_col->offset, &v, lhs_col->len);
                     } else if (lhs_col->type == TYPE_FLOAT && set_clause.rhs_val.type == TYPE_INT) {
                         float v = (float)set_clause.rhs_val.int_val;
-                        memcpy(record->data + lhs_col->offset, &v, lhs_col->len);
+                        memcpy(new_record.data + lhs_col->offset, &v, lhs_col->len);
                     } else if (lhs_col->type != set_clause.rhs_val.type) {
                         throw IncompatibleTypeError(coltype2str(lhs_col->type), coltype2str(set_clause.rhs_val.type));
                     } else {
                         if (!set_clause.rhs_val.raw) {
                             set_clause.rhs_val.init_raw(lhs_col->len);
                         }
-                        memcpy(record->data + lhs_col->offset, set_clause.rhs_val.raw->data, lhs_col->len);
+                        memcpy(new_record.data + lhs_col->offset, set_clause.rhs_val.raw->data, lhs_col->len);
                     }
                 } else if (set_clause.rhs_type == SET_RHS_COL) {
-                    // 列赋值
                     auto rhs_col = tab_.get_col(set_clause.rhs_col.col_name);
                     if (lhs_col->type != rhs_col->type) {
                         throw IncompatibleTypeError(coltype2str(lhs_col->type), coltype2str(rhs_col->type));
                     }
-
-                    memcpy(record->data + lhs_col->offset, record->data + rhs_col->offset, lhs_col->len);
-
+                    memcpy(new_record.data + lhs_col->offset, new_record.data + rhs_col->offset, lhs_col->len);
                 } else if (set_clause.rhs_type == SET_RHS_EXPR) {
-                    // 表达式赋值（使用execution_common中的表达式求值器）
-                    Value expr_result = EvaluateArithExpr(set_clause.rhs_expr, *record, tab_.cols);
-
-                    // 类型检查和转换
+                    Value expr_result = EvaluateArithExpr(set_clause.rhs_expr, new_record, tab_.cols);
                     if (lhs_col->type == TYPE_INT && expr_result.type == TYPE_FLOAT) {
-                        // 将浮点数转换为整数
                         expr_result.set_int((int)expr_result.float_val);
                     } else if (lhs_col->type == TYPE_FLOAT && expr_result.type == TYPE_INT) {
-                        // 将整数转换为浮点数
                         expr_result.set_float((float)expr_result.int_val);
                     } else if (lhs_col->type != expr_result.type) {
                         throw IncompatibleTypeError(coltype2str(lhs_col->type), coltype2str(expr_result.type));
                     }
-
-                    // 设置值
                     if (!expr_result.raw) {
                         expr_result.init_raw(lhs_col->len);
                     }
-                    memcpy(record->data + lhs_col->offset, expr_result.raw->data, lhs_col->len);
+                    memcpy(new_record.data + lhs_col->offset, expr_result.raw->data, lhs_col->len);
                 }
             }
 
-            // 4. 检查唯一性约束
-            for (auto &index : tab_.indexes) {
-                auto ih = sm_manager_->ihs_.at(sm_manager_->get_ix_manager()->get_index_name(tab_name_, index.cols)).get();
-
-                // 构造新记录的索引键
-                char *new_key = new char[index.col_tot_len];
-                int offset = 0;
-                for (int j = 0; j < index.col_num; ++j) {
-                    memcpy(new_key + offset, record->data + index.cols[j].offset, index.cols[j].len);
-                    offset += index.cols[j].len;
-                }
-
-                // 检查新键是否与其他记录冲突
-                if (CheckUniqueConstraintWithMvcc(ih, new_key, index.col_tot_len, rid)) {
-                    delete[] new_key;
-                    throw InternalError("Duplicate key");
-                }
-
-                delete[] new_key;
-            }
-
-            // 5. 创建撤销日志
-            UndoLog undo_log;
-            undo_log.is_deleted_ = false;  // 表示这是更新操作
-            undo_log.tuple_test_ = new RmRecord(old_record);
-            undo_log.ts_ = context_->txn_->get_start_ts();
-
-            // 设置前一个版本链接
-            auto old_version_link = txn_mgr_->GetVersionLink(rid);
-            if (old_version_link.has_value()) {
-                undo_log.prev_version_ = old_version_link->prev_;
-            } else {
-                undo_log.prev_version_.prev_txn_ = INVALID_TXN_ID;
-                undo_log.prev_version_.prev_log_idx_ = -1;
-            }
-
-            // 填充修改字段信息和旧值
-            undo_log.modified_fields_.resize(tab_.cols.size(), false);
-            undo_log.tuple_.clear();
+            // 3. 构造新记录的字段值
+            std::vector<Value> new_values;
             for (size_t i = 0; i < tab_.cols.size(); ++i) {
                 Value val;
-                // 从记录数据中提取值
                 if (tab_.cols[i].type == TYPE_INT) {
-                    val.set_int(*(int *)(old_record.data + tab_.cols[i].offset));
+                    val.set_int(*(int *)(new_record.data + tab_.cols[i].offset));
                 } else if (tab_.cols[i].type == TYPE_FLOAT) {
-                    val.set_float(*(float *)(old_record.data + tab_.cols[i].offset));
+                    val.set_float(*(float *)(new_record.data + tab_.cols[i].offset));
                 } else if (tab_.cols[i].type == TYPE_STRING) {
-                    std::string str_val(old_record.data + tab_.cols[i].offset, tab_.cols[i].len);
-                    // 移除末尾的空字符
+                    std::string str_val(new_record.data + tab_.cols[i].offset, tab_.cols[i].len);
                     str_val = str_val.c_str();
                     val.set_str(str_val);
                 }
-                undo_log.tuple_.push_back(val);
-
-                // 标记被修改的字段
-                for (auto &clause : set_clauses_) {
-                    if (clause.lhs.col_name == tab_.cols[i].name) {
-                        undo_log.modified_fields_[i] = true;
-                        break;
-                    }
-                }
+                new_values.push_back(val);
             }
 
-            // 添加到事务的撤销日志
-            context_->txn_->AppendUndoLog(undo_log);
+            // 4. 执行DELETE操作（删除旧记录）
+            std::vector<Rid> delete_rids = {rid};
+            std::vector<Condition> empty_conds;
+            MvccDeleteExecutor delete_executor(sm_manager_, txn_mgr_, tab_name_, empty_conds, delete_rids, context_);
+            delete_executor.Next();
 
-            // 6. 更新版本链
-            UndoLink new_link;
-            new_link.prev_txn_ = context_->txn_->get_transaction_id();
-            new_link.prev_log_idx_ = context_->txn_->GetUndoLogNum() - 1;
-
-            auto old_link = txn_mgr_->GetUndoLink(rid);
-            VersionUndoLink version_link;
-            version_link.prev_ = new_link;
-            version_link.in_progress_ = true;
-
-            txn_mgr_->UpdateVersionLink(rid, version_link, [](std::optional<VersionUndoLink>) { return true; });
-
-            // 7. 更新索引
-            UpdateIndicesForMvcc(old_record, *record, rid);
-
-            // 8. 更新记录（MVCC中物理记录保存最新版本）
-            fh_->update_record(rid, record->data, context_);
-
-            // WAL: 记录UPDATE日志
-            if (context_ && context_->txn_ && context_->log_mgr_) {
-                UpdateLogRecord log_record(context_->txn_->get_transaction_id(), old_record, *record, rid, tab_name_);
-                log_record.prev_lsn_ = context_->txn_->get_prev_lsn();
-                lsn_t lsn = context_->log_mgr_->add_log_to_buffer(&log_record);
-                context_->txn_->set_prev_lsn(lsn);
-            }
-
-            // 9. 记录事务写集
-            WriteRecord *write_record = new WriteRecord(WType::UPDATE_TUPLE, tab_name_, rid, old_record);
-            context_->txn_->append_write_record(write_record);
+            // 5. 执行INSERT操作（插入新记录）
+            MvccInsertExecutor insert_executor(sm_manager_, txn_mgr_, tab_name_, new_values, context_);
+            insert_executor.Next();
         }
-
         return nullptr;
     }
 

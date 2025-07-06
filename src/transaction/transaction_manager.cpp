@@ -1,4 +1,6 @@
 /**
+// 修正 DeleteUpdateVersionLink 查找逻辑：version_info_ 的 key 是 page_id_t（int32_t），即 fd
+// 所以查找应为 version_info_.find(fd)
  * @file transaction_manager.cpp
  * @author RMDB Development Team
  * @brief 事务管理器实现文件
@@ -52,11 +54,13 @@ Transaction* TransactionManager::begin(Transaction* txn, LogManager* log_manager
     txn_map.emplace(txn->get_transaction_id(), txn);
     lock.unlock();
 
-    timestamp_t start_ts = next_timestamp_.fetch_add(1);
-    txn->set_start_ts(start_ts);  // 设置事务开始时间戳
-    // 不要强制设置txn_mode，保持调用者设置的值
+    // 分配全局唯一递增的 start_ts
+    txn_map.emplace(txn->get_transaction_id(), txn);
+    timestamp_t start_ts = get_next_timestamp();
+    txn->set_start_ts(start_ts);        // 设置事务开始时间戳
+    txn->set_read_ts(last_commit_ts_);  // 设置读取时间戳该事务早的最后一次提交时间戳
+    txn->set_txn_mode(false);
     txn->set_state(TransactionState::DEFAULT);
-
     // MVCC相关设置
     if (concurrency_mode_ == ConcurrencyMode::MVCC) {
         running_txns_.AddTxn(start_ts);  // 添加事务到水位线
@@ -92,10 +96,10 @@ void TransactionManager::commit(Transaction* txn, LogManager* log_manager) {
     // MVCC: 分配提交时间戳
     timestamp_t commit_ts = INVALID_TS;
     if (concurrency_mode_ == ConcurrencyMode::MVCC) {
+        // 分配全局唯一递增的提交时间戳
         commit_ts = next_timestamp_.fetch_add(1);
         last_commit_ts_.store(std::max(last_commit_ts_.load(), commit_ts));
         txn->set_commit_ts(commit_ts);  // 设置事务的提交时间戳
-
         // 更新所有相关版本链的状态为已完成
         auto write_set = txn->get_write_set();
         for (auto write_record : *write_set) {
@@ -150,139 +154,29 @@ void TransactionManager::commit(Transaction* txn, LogManager* log_manager) {
  * @param {Transaction *} txn 需要回滚的事务
  * @param {LogManager} *log_manager 日志管理器指针
  */
-void TransactionManager::abort(Transaction* txn, LogManager* log_manager) {
-    // Todo:
+void TransactionManager::abort(Context* context, LogManager* log_manager) {
     // 1. 回滚所有写操作
-    // 2. 释放所有锁
-    // 3. 清空事务相关资源，eg.锁集
-    // 4. 把事务日志刷入磁盘中
-    // 5. 更新事务状态
-    // 如果需要支持MVCC请在上述过程中添加代码
-
+    Transaction* txn = context->txn_;
     auto write_set = txn->get_write_set();
 
-    // 创建Context对象，在循环外创建一次即可
-    Context context(lock_manager_, log_manager, txn);
-
-    // 反向遍历写集合，回滚所有写操作
     for (auto iter = write_set->rbegin(); iter != write_set->rend(); iter++) {
         const auto write_type = (*iter)->GetWriteType();
         const auto table_name = (*iter)->GetTableName();
         const auto rid = (*iter)->GetRid();
         std::unique_ptr<RmFileHandle>& handle = sm_manager_->fhs_.at(table_name);
 
-        try {
-            if (write_type == WType::INSERT_TUPLE) {
-                // 对于INSERT操作，回滚时删除插入的记录
-                auto rec = (*iter)->GetRecord();
-
-                // 删除所有索引项
-                for (const auto& index : sm_manager_->db_.get_table(table_name).indexes) {
-                    auto ix_name = sm_manager_->get_ix_manager()->get_index_name(table_name, index.cols);
-                    auto* ih = sm_manager_->ihs_.at(ix_name).get();
-
-                    // 构造索引键值
-                    std::vector<char> key_buffer(index.col_tot_len);
-                    char* key = key_buffer.data();
-                    int offset = 0;
-                    for (int j = 0; j < index.col_num; ++j) {
-                        memcpy(key + offset, rec.data + index.cols[j].offset, index.cols[j].len);
-                        offset += index.cols[j].len;
-                    }
-                    ih->delete_entry(key, txn);
-                }
-
-                // 删除记录
-                handle->delete_record(rid, &context);
-
-            } else if (write_type == WType::UPDATE_TUPLE) {
-                // 对于UPDATE操作，恢复到旧值
-                // 注意：WriteSet中存储的应该是旧记录，直接使用
-                auto old_rec = (*iter)->GetRecord();
-
-                // 删除新记录的索引项，插入旧记录的索引项
-                for (const auto& index : sm_manager_->db_.get_table(table_name).indexes) {
-                    auto ix_name = sm_manager_->get_ix_manager()->get_index_name(table_name, index.cols);
-                    auto* ih = sm_manager_->ihs_.at(ix_name).get();
-
-                    // 读取当前记录用于删除索引
-                    auto current_rec = handle->get_record(rid, &context);
-
-                    // 构造新记录的索引键值并删除
-                    std::vector<char> new_key_buffer(index.col_tot_len);
-                    char* new_key = new_key_buffer.data();
-                    int offset = 0;
-                    for (int j = 0; j < index.col_num; ++j) {
-                        memcpy(new_key + offset, current_rec->data + index.cols[j].offset, index.cols[j].len);
-                        offset += index.cols[j].len;
-                    }
-                    ih->delete_entry(new_key, txn);
-
-                    // 构造旧记录的索引键值并插入
-                    std::vector<char> old_key_buffer(index.col_tot_len);
-                    char* old_key = old_key_buffer.data();
-                    offset = 0;
-                    for (int j = 0; j < index.col_num; ++j) {
-                        memcpy(old_key + offset, old_rec.data + index.cols[j].offset, index.cols[j].len);
-                        offset += index.cols[j].len;
-                    }
-                    ih->insert_entry(old_key, rid, txn);
-                }
-
-                // 更新记录为旧值
-                handle->update_record(rid, old_rec.data, &context);
-
-            } else if (write_type == WType::DELETE_TUPLE) {
-                // 对于DELETE操作的回滚处理
-                auto rec = (*iter)->GetRecord();
-
-                if (concurrency_mode_ == ConcurrencyMode::MVCC) {
-                    // MVCC模式：DELETE操作没有物理删除记录，只是在版本链中标记删除
-                    // 回滚时只需要清除版本链中的删除标记，不需要重新插入记录
-
-                    // 清除版本链（这会在下面的版本链清理中自动处理）
-                    // 这里只需要恢复索引项
-                    for (const auto& index : sm_manager_->db_.get_table(table_name).indexes) {
-                        auto ix_name = sm_manager_->get_ix_manager()->get_index_name(table_name, index.cols);
-                        auto* ih = sm_manager_->ihs_.at(ix_name).get();
-
-                        // 构造索引键值并重新插入
-                        std::vector<char> key_buffer(index.col_tot_len);
-                        char* key = key_buffer.data();
-                        int offset = 0;
-                        for (int j = 0; j < index.col_num; ++j) {
-                            memcpy(key + offset, rec.data + index.cols[j].offset, index.cols[j].len);
-                            offset += index.cols[j].len;
-                        }
-                        ih->insert_entry(key, rid, txn);
-                    }
-                } else {
-                    // 非MVCC模式：DELETE操作物理删除了记录，回滚时需要重新插入
-                    // 修复：不强制使用原RID，让系统重新分配
-                    auto new_rid = handle->insert_record(rec.data, &context);
-
-                    // 重新插入索引项，使用新的RID
-                    for (const auto& index : sm_manager_->db_.get_table(table_name).indexes) {
-                        auto ix_name = sm_manager_->get_ix_manager()->get_index_name(table_name, index.cols);
-                        auto* ih = sm_manager_->ihs_.at(ix_name).get();
-
-                        // 构造索引键值
-                        std::vector<char> key_buffer(index.col_tot_len);
-                        char* key = key_buffer.data();
-                        int offset = 0;
-                        for (int j = 0; j < index.col_num; ++j) {
-                            memcpy(key + offset, rec.data + index.cols[j].offset, index.cols[j].len);
-                            offset += index.cols[j].len;
-                        }
-                        ih->insert_entry(key, new_rid, txn);
-                    }
-                }
-            }
-        } catch (const std::exception& e) {
-            // 记录回滚操作失败，但继续处理其他操作
-            std::cerr << "WARNING: Failed to rollback operation: " << e.what() << std::endl;
-            // 继续处理其他写操作的回滚
+        if (write_type == WType::INSERT_TUPLE) {
+            auto rec = (*iter)->GetRecord();
+            handle->delete_record(rid, context);
+            // sm_manager_->delete_index_with_rid(table_name, rec, rid, context->txn_);
+        } else if (write_type == WType::DELETE_TUPLE) {
+            // MVCC下delete只打标记，回滚时只需撤销版本链即可
+            // 如需恢复索引可在此补充
+            auto rec = (*iter)->GetRecord();
+            handle->insert_record_force(rid, rec.data);
         }
+        // 删除版本链记录
+        DeleteUpdateVersionLink(handle->GetFd(), rid, context->txn_);
     }
 
     // 释放所有锁
@@ -585,4 +479,38 @@ bool TransactionManager::IsVersionVisible(Transaction* txn, timestamp_t version_
 
     // 如果版本时间戳小于等于当前事务的读时间戳，版本可见
     return version_ts <= txn->get_read_ts();
+}
+
+UndoLink TransactionManager::DeleteUpdateVersionLink(const int& fd, Rid rid, Transaction* txn) {
+    // 获取对应的版本信息
+    std::unique_lock<std::shared_mutex> lock(version_info_mutex_);
+    page_id_t page_id = rid.page_no;
+    auto it = version_info_.find(page_id);
+    if (it == version_info_.end()) {
+        return UndoLink{};
+    }
+    auto& version_info = it->second;
+    std::unique_lock<std::shared_mutex> version_lock(version_info->mutex_);
+    // 更新版本链接
+    auto& prev_version_map = version_info->prev_version_;
+    auto prev_version_it = prev_version_map.find(rid.slot_no);
+    if (prev_version_it != prev_version_map.end()) {
+        VersionUndoLink version_link = prev_version_it->second;
+        UndoLink undo_link = version_link.prev_;
+        while (undo_link.prev_txn_ == txn->get_transaction_id()) {
+            undo_link = GetUndoLog(undo_link).prev_version_;
+            if (!undo_link.IsValid()) {
+                break;
+            }
+        }
+        if (undo_link.IsValid()) {
+            // 如果撤销链接有效，则更新版本链接
+            prev_version_it->second.prev_ = undo_link;
+        } else {
+            // 如果撤销链接无效，则删除该版本链接
+            prev_version_map.erase(prev_version_it);
+        }
+        return undo_link;
+    }
+    return UndoLink{};
 }

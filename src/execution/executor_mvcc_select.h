@@ -198,142 +198,92 @@ class MvccSelectExecutor : public AbstractExecutor {
     }
 
     std::unique_ptr<RmRecord> GetVisibleVersion(const Rid &rid, Transaction *txn) {
-        // 获取对当前事务可见的记录版本
+        std::cout << "[DEBUG] SELECT事务id=" << txn->get_transaction_id() << " start_ts=" << txn->get_start_ts() << std::endl;
         auto version_link = txn_mgr_->GetVersionLink(rid);
-
         if (!version_link.has_value()) {
             // 没有版本链，返回基础版本
             return fh_->get_record(rid, context_);
         }
-
-        if (version_link->in_progress_) {
-            // 这是一个正在进行中的操作
-            auto prev_txn_id = version_link->prev_.prev_txn_;
-            if (prev_txn_id == txn->get_transaction_id()) {
-                // 是自己的事务，需要检查操作类型
-                auto undo_log = GetUndoLog(version_link->prev_);
-                if (undo_log) {
-                    if (undo_log->is_deleted_) {
-                        return nullptr;
-                    } else {
-                        return fh_->get_record(rid, context_);
+        std::cout << "[DEBUG] rid(" << rid.page_no << "," << rid.slot_no << ") 进入GetVisibleVersion" << std::endl;
+        UndoLink link = version_link->prev_;
+        while (true) {
+            if (link.prev_txn_ == INVALID_TXN_ID) {
+                // 没有更多历史版本，返回物理记录
+                std::cout << "[DEBUG] rid(" << rid.page_no << "," << rid.slot_no << ") 回溯到链尾，判断物理记录可见性" << std::endl;
+                auto insert_version_link = txn_mgr_->GetVersionLink(rid);
+                if (insert_version_link.has_value()) {
+                    UndoLink insert_link = insert_version_link->prev_;
+                    auto insert_undo_log = GetUndoLog(insert_link);
+                    if (insert_undo_log) {
+                        Transaction *insert_txn = txn_mgr_->find_transaction(insert_link.prev_txn_);
+                        if (insert_txn && insert_txn->get_state() == TransactionState::COMMITTED &&
+                            insert_txn->get_commit_ts() < txn->get_start_ts()) {
+                            return fh_->get_record(rid, context_);
+                        }
                     }
                 }
-                return fh_->get_record(rid, context_);
-            } else {
-                auto undo_log = GetUndoLog(version_link->prev_);
-                if (undo_log) {
-                    if (!undo_log->is_deleted_ && undo_log->prev_version_.prev_txn_ == INVALID_TXN_ID) {
-                        return nullptr;
-                    } else {
-                        // 这是未提交的UPDATE/DELETE操作，返回UndoLog中存储的旧值
-                        return RestoreRecordFromUndoLog(*undo_log);
-                    }
-                }
-                // 如果获取不到UndoLog，不可见
+                // 否则不可见
                 return nullptr;
             }
-        }
-
-        auto current_link = version_link->prev_;
-
-        while (current_link.prev_txn_ != INVALID_TXN_ID) {
-            auto prev_txn_id = current_link.prev_txn_;
-
-            if (prev_txn_id == txn->get_transaction_id()) {
-                // 自己的修改，返回对应版本
-                auto undo_log = GetUndoLog(current_link);
-                if (undo_log) {
-                    if (undo_log->is_deleted_) {
-                        return nullptr;  // 被自己删除，不可见
-                    } else {
-                        // 自己的修改，返回当前版本
-                        return fh_->get_record(rid, context_);
-                    }
-                }
+            auto undo_log = GetUndoLog(link);
+            if (!undo_log) {
+                std::cout << "[DEBUG] rid(" << rid.page_no << "," << rid.slot_no << ") 找不到UndoLog，break" << std::endl;
                 break;
             }
 
-            // 检查其他事务
-            auto prev_txn = txn_mgr_->find_transaction(prev_txn_id);
+            Transaction *log_txn = txn_mgr_->find_transaction(link.prev_txn_);
+            std::cout << "[DEBUG] rid(" << rid.page_no << "," << rid.slot_no << ") link.txn=" << link.prev_txn_
+                      << " undo_log.ts_=" << undo_log->ts_
+                      << " is_deleted=" << undo_log->is_deleted_
+                      << " 当前txn=" << txn->get_transaction_id()
+                      << " log_txn_state=" << (log_txn ? (int)log_txn->get_state() : -1)
+                      << " 当前txn start_ts=" << txn->get_start_ts()
+                      << std::endl;
 
-            if (prev_txn) {
-                if (prev_txn->get_state() == TransactionState::COMMITTED) {
-                    if (prev_txn->get_commit_ts() <= txn->get_read_ts()) {
-                        // 找到可见的已提交版本
-                        auto undo_log = GetUndoLog(current_link);
-                        if (undo_log) {
-                            if (undo_log->is_deleted_) {
-                                return nullptr;  // 被删除，不可见
-                            } else {
-                                // 记录可见，返回对应版本
-                                // 检查这是否是最新版本（版本链头部）
-                                if (current_link.prev_txn_ == version_link->prev_.prev_txn_ &&
-                                    current_link.prev_log_idx_ == version_link->prev_.prev_log_idx_) {
-                                    // 这是最新版本，可以读取物理记录
-                                    return fh_->get_record(rid, context_);
-                                } else {
-                                    // 这是历史版本，需要从UndoLog重构数据
-                                    return RestoreRecordFromUndoLog(*undo_log);
-                                }
-                            }
-                        }
-                        // 如果没有UndoLog，读取物理记录
-                        return fh_->get_record(rid, context_);
-                    } else {
-                        auto undo_log = GetUndoLog(current_link);
-                        if (undo_log && undo_log->prev_version_.IsValid()) {
-                            current_link = undo_log->prev_version_;
-                            continue;
-                        } else {
-                            break;
-                        }
+            // 1. 本事务产生的未提交版本：只对本事务可见
+            if (link.prev_txn_ == txn->get_transaction_id()) {
+                if (log_txn && log_txn->get_state() != TransactionState::COMMITTED) {
+                    std::cout << "[DEBUG] 本事务未提交版本，is_deleted=" << undo_log->is_deleted_ << std::endl;
+                    if (undo_log->is_deleted_) {
+                        // 本事务未提交的delete，直接不可见
+                        return nullptr;
                     }
-                } else if (prev_txn->get_state() == TransactionState::ABORTED) {
-                    // 已回滚的事务，忽略这个版本，继续查找更早版本
-                    auto undo_log = GetUndoLog(current_link);
-                    if (undo_log && undo_log->prev_version_.IsValid()) {
-                        current_link = undo_log->prev_version_;
-                        continue;
-                    } else {
-                        break;
-                    }
-                } else {
-                    // 未提交的事务（DEFAULT状态），不可见
-                    auto undo_log = GetUndoLog(current_link);
-                    if (undo_log && undo_log->prev_version_.IsValid()) {
-                        current_link = undo_log->prev_version_;
-                        continue;
-                    } else {
-                        break;
-                    }
+                    return RestoreRecordFromUndoLog(*undo_log);
                 }
-            } else {
-                // 事务不存在（可能已经结束）
-                auto undo_log = GetUndoLog(current_link);
-                if (undo_log) {
-                    if (undo_log->prev_version_.IsValid()) {
-                        // 有更早版本，继续查找
-                        current_link = undo_log->prev_version_;
-                        continue;
-                    } else {
-                        // 没有更早版本，从当前UndoLog恢复修改前的版本
-                        return RestoreRecordFromUndoLog(*undo_log);
+                // 已提交，继续判断
+            }
+
+            // 2. 其他事务产生的未提交版本：对本事务不可见
+            if (link.prev_txn_ != txn->get_transaction_id() && log_txn && log_txn->get_state() != TransactionState::COMMITTED) {
+                std::cout << "[DEBUG] 其他事务未提交版本，不可见，回溯" << std::endl;
+                link = undo_log->prev_version_;
+                continue;
+            }
+
+            // 3. 已提交版本：只有提交时间早于当前事务start_ts才可见
+            if (log_txn && log_txn->get_state() == TransactionState::COMMITTED) {
+                // 用 commit_ts 判断可见性
+                if (log_txn->get_commit_ts() < txn->get_start_ts()) {
+                    std::cout << "[DEBUG] 已提交版本 commit_ts=" << log_txn->get_commit_ts() << " < start_ts=" << txn->get_start_ts() << std::endl;
+                    if (undo_log->is_deleted_) {
+                        std::cout << "[DEBUG] 该版本被删除，直接不可见" << std::endl;
+                        return nullptr;
                     }
+                    std::cout << "[DEBUG] 返回可见已提交版本" << std::endl;
+                    return RestoreRecordFromUndoLog(*undo_log);
                 } else {
-                    // 无法获取UndoLog，中断查找
-                    break;
+                    std::cout << "[DEBUG] 已提交版本 commit_ts=" << log_txn->get_commit_ts() << " >= start_ts=" << txn->get_start_ts() << "，回溯" << std::endl;
+                    link = undo_log->prev_version_;
+                    continue;
                 }
             }
-        }
 
-        // 如果遍历完版本链都没找到可见版本，说明所有修改都不可见
-        if (version_link.has_value()) {
-            auto first_undo_log = GetUndoLog(version_link->prev_);
-            if (first_undo_log) {
-                return nullptr;
-            }
+            // 4. 其他情况，继续回溯
+            std::cout << "[DEBUG] 其他情况，回溯" << std::endl;
+            link = undo_log->prev_version_;
         }
+        // 没有可见版本
+        std::cout << "[DEBUG] rid(" << rid.page_no << "," << rid.slot_no << ") 没有可见版本" << std::endl;
         return nullptr;
     }
 

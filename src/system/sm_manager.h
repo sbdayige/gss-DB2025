@@ -85,4 +85,6 @@ class SmManager {
     IxIndexHandle* get_index_handle(const std::string& index_name) const;
 
     bool contains_table(const std::string& tab_name) const;
+
+    bool insert_index_force(const std::string& tab_name, RmRecord& rec, Rid rid, Transaction* txn);
 };

@@ -63,7 +63,7 @@ class TransactionManager {
 
     void commit(Transaction *txn, LogManager *log_manager);
 
-    void abort(Transaction *txn, LogManager *log_manager);
+    void abort(Context *context, LogManager *log_manager);
 
     ConcurrencyMode get_concurrency_mode() { return concurrency_mode_; }
 
@@ -166,6 +166,17 @@ class TransactionManager {
         std::unordered_map<slot_offset_t, VersionUndoLink> prev_version_;
     };
 
+    // 获取全局唯一递增的时间戳（用于每次写操作）
+    timestamp_t get_next_timestamp() {
+        return next_timestamp_.fetch_add(1);
+    }
+    bool exsit_transaction(txn_id_t txn_id) {
+        if (txn_id == INVALID_TXN_ID) return false;
+        std::shared_lock<std::shared_mutex> lock(txn_map_mutex_);
+        return TransactionManager::txn_map.find(txn_id) != TransactionManager::txn_map.end();
+    }
+
+    UndoLink DeleteUpdateVersionLink(const int &fd, Rid rid, Transaction *txn);
     /** 保护版本信息 */
     std::shared_mutex version_info_mutex_;
     /** 存储表堆中每个元组的先前版本。 */
