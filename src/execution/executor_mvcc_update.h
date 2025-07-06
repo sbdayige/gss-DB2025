@@ -53,7 +53,6 @@ class MvccUpdateExecutor : public AbstractExecutor {
     }
 
     std::unique_ptr<RmRecord> Next() override {
-        // MVCC Update实现：UPDATE = DELETE + INSERT
         for (auto &rid : rids_) {
             // 1. 可见性检查：跳过对当前事务不可见的记录
             if (!IsRecordVisible(rid)) {
@@ -83,44 +82,55 @@ class MvccUpdateExecutor : public AbstractExecutor {
 
             // 2. 构造新记录（根据SET子句修改相应字段）
             RmRecord new_record = old_record;
-            for (auto &set_clause : set_clauses_) {
+            for (const auto &set_clause : set_clauses_) {
                 auto lhs_col = tab_.get_col(set_clause.lhs.col_name);
 
+                Value value;
                 if (set_clause.rhs_type == SET_RHS_VALUE) {
-                    if (lhs_col->type == TYPE_INT && set_clause.rhs_val.type == TYPE_FLOAT) {
-                        int v = (int)set_clause.rhs_val.float_val;
-                        memcpy(new_record.data + lhs_col->offset, &v, lhs_col->len);
-                    } else if (lhs_col->type == TYPE_FLOAT && set_clause.rhs_val.type == TYPE_INT) {
-                        float v = (float)set_clause.rhs_val.int_val;
-                        memcpy(new_record.data + lhs_col->offset, &v, lhs_col->len);
-                    } else if (lhs_col->type != set_clause.rhs_val.type) {
-                        throw IncompatibleTypeError(coltype2str(lhs_col->type), coltype2str(set_clause.rhs_val.type));
-                    } else {
-                        if (!set_clause.rhs_val.raw) {
-                            set_clause.rhs_val.init_raw(lhs_col->len);
-                        }
-                        memcpy(new_record.data + lhs_col->offset, set_clause.rhs_val.raw->data, lhs_col->len);
-                    }
-                } else if (set_clause.rhs_type == SET_RHS_COL) {
-                    auto rhs_col = tab_.get_col(set_clause.rhs_col.col_name);
-                    if (lhs_col->type != rhs_col->type) {
-                        throw IncompatibleTypeError(coltype2str(lhs_col->type), coltype2str(rhs_col->type));
-                    }
-                    memcpy(new_record.data + lhs_col->offset, new_record.data + rhs_col->offset, lhs_col->len);
+                    value = set_clause.rhs_val;
                 } else if (set_clause.rhs_type == SET_RHS_EXPR) {
-                    Value expr_result = EvaluateArithExpr(set_clause.rhs_expr, new_record, tab_.cols);
-                    if (lhs_col->type == TYPE_INT && expr_result.type == TYPE_FLOAT) {
-                        expr_result.set_int((int)expr_result.float_val);
-                    } else if (lhs_col->type == TYPE_FLOAT && expr_result.type == TYPE_INT) {
-                        expr_result.set_float((float)expr_result.int_val);
-                    } else if (lhs_col->type != expr_result.type) {
-                        throw IncompatibleTypeError(coltype2str(lhs_col->type), coltype2str(expr_result.type));
+                    ExprTerm temp_expr_term(set_clause.rhs_expr);
+                    value = EvaluateExpr(temp_expr_term, old_record, tab_.cols);
+                } else if (set_clause.rhs_type == SET_RHS_COL) {
+                    const ColMeta *rhs_col_meta = nullptr;
+                    for (const auto &meta : tab_.cols) {
+                        if (meta.tab_name == set_clause.rhs_col.tab_name && meta.name == set_clause.rhs_col.col_name) {
+                            rhs_col_meta = &meta;
+                            break;
+                        }
                     }
-                    if (!expr_result.raw) {
-                        expr_result.init_raw(lhs_col->len);
+                    if (!rhs_col_meta) {
+                        throw RMDBError("RHS column not found in SET clause: " + set_clause.rhs_col.tab_name + "." +
+                                        set_clause.rhs_col.col_name);
                     }
-                    memcpy(new_record.data + lhs_col->offset, expr_result.raw->data, lhs_col->len);
+                    value = GetColumnValue(old_record, *rhs_col_meta);
+                } else {
+                    throw RMDBError("Unsupported SetRhsType");
                 }
+
+                // 类型转换
+                if (lhs_col->type != value.type) {
+                    if (lhs_col->type == ColType::TYPE_INT && value.type == ColType::TYPE_FLOAT) {
+                        value.set_int(static_cast<int>(value.float_val));
+                    } else if (lhs_col->type == ColType::TYPE_FLOAT && value.type == ColType::TYPE_INT) {
+                        value.set_float(static_cast<float>(value.int_val));
+                    } else if (lhs_col->type != value.type) {
+                        throw IncompatibleTypeError(coltype2str(lhs_col->type), coltype2str(value.type));
+                    }
+                }
+
+                std::cerr << "[DEBUG] update: before init_raw, value.type=" << value.type << " col.len=" << lhs_col->len << " value.raw=" << (value.raw ? "not null" : "null") << std::endl;
+                value.raw.reset();
+                value.init_raw(lhs_col->len);
+                std::cerr << "[DEBUG] update: after init_raw, value.raw=" << (value.raw ? "not null" : "null") << std::endl;
+                memcpy(new_record.data + lhs_col->offset, value.raw->data, lhs_col->len);
+            }
+
+            // Debug: 打印新记录内容
+            if (tab_.cols.size() >= 2) {
+                int new_id = *(int *)(new_record.data + tab_.cols[0].offset);
+                int new_score = *(int *)(new_record.data + tab_.cols[1].offset);
+                std::cout << "[DEBUG] UPDATE 构造新记录: id=" << new_id << " score=" << new_score << std::endl;
             }
 
             // 3. 构造新记录的字段值
@@ -138,6 +148,24 @@ class MvccUpdateExecutor : public AbstractExecutor {
                 }
                 new_values.push_back(val);
             }
+
+            // Debug: 打印要INSERT的值
+            std::cout << "[DEBUG] UPDATE 准备INSERT的值: ";
+            for (size_t i = 0; i < new_values.size(); ++i) {
+                if (i < tab_.cols.size()) {
+                    std::cout << tab_.cols[i].name << "=";
+                    if (tab_.cols[i].type == TYPE_INT) {
+                        std::cout << new_values[i].int_val;
+                    } else if (tab_.cols[i].type == TYPE_FLOAT) {
+                        std::cout << new_values[i].float_val;
+                    } else if (tab_.cols[i].type == TYPE_STRING) {
+                        std::cout << new_values[i].str_val;
+                    }
+                    std::cout << " ";
+                }
+            }
+            std::cout << std::endl;
+
             // 4. 执行DELETE操作（删除旧记录）
             std::vector<Rid> delete_rids = {rid};
             std::vector<Condition> empty_conds;

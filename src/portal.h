@@ -112,13 +112,6 @@ class Portal {
     TransactionManager* txn_mgr_;  ///< 事务管理器指针，用于MVCC执行器
 
    public:
-    /**
-     * @brief 物理扫描表并收集满足条件的所有记录RID（用于UPDATE/DELETE）
-     * @param tab_name 表名
-     * @param conds WHERE条件
-     * @param context 执行上下文
-     * @return std::vector<Rid> 满足条件的所有物理记录RID
-     */
     std::vector<Rid> CollectMatchedRids(const std::string& tab_name, const std::vector<Condition>& conds, Context* context) {
         std::vector<Rid> rids;
         auto tab = sm_manager_->db_.get_table(tab_name);
@@ -142,7 +135,6 @@ class Portal {
                 std::cerr << "DEBUG SCAN: Record does not match WHERE condition, skipping" << std::endl;
             }
         }
-        std::cerr << "DEBUG SCAN: Physical scan completed, found " << rids.size() << " matching records" << std::endl;
         return rids;
     }
 
@@ -155,23 +147,6 @@ class Portal {
     Portal(SmManager* sm_manager, TransactionManager* txn_mgr) : sm_manager_(sm_manager), txn_mgr_(txn_mgr) {}
     ~Portal() {}
 
-    /**
-     * @brief 启动查询执行 - 将执行计划转换为门户语句
-     *
-     * 这是Portal系统的核心入口函数，负责将优化器生成的执行计划转换为
-     * 可执行的门户语句。通过模式匹配识别不同类型的执行计划，并调用
-     * 相应的转换逻辑。
-     *
-     * @param plan 优化器生成的执行计划
-     * @param context 执行上下文，包含事务、锁等信息
-     * @return std::shared_ptr<PortalStmt> 转换后的门户语句
-     *
-     * @details 支持的计划类型：
-     *          - OtherPlan: 其他类型计划
-     *          - SetKnobPlan: 系统参数设置计划
-     *          - DDLPlan: 数据定义语言计划
-     *          - DMLPlan: 数据操纵语言计划
-     */
     std::shared_ptr<PortalStmt> start(std::shared_ptr<Plan> plan, Context* context) {
         // ===========================================
         // 计划类型识别与分发
@@ -187,10 +162,6 @@ class Portal {
             // 数据定义语言计划：CREATE/DROP TABLE/INDEX等
             return std::make_shared<PortalStmt>(PORTAL_MULTI_QUERY, std::vector<TabCol>(), std::unique_ptr<AbstractExecutor>(), plan);
         } else if (auto x = std::dynamic_pointer_cast<DMLPlan>(plan)) {
-            // ===========================================
-            // DML计划处理：根据操作类型进一步分发
-            // ===========================================
-
             switch (x->tag) {
                 case T_Explain: {
                     // EXPLAIN语句处理：直接使用命令工具模式，避免包装成SELECT
@@ -220,9 +191,6 @@ class Portal {
                 }
 
                 case T_Update: {
-                    // ===============================
-                    // UPDATE语句处理 - MVCC版本
-                    // ===============================
                     std::cerr << "DEBUG UPDATE SCAN: Starting scan for UPDATE statement" << std::endl;
                     auto rids = CollectMatchedRids(x->tab_name_, x->conds_, context);
                     std::unique_ptr<AbstractExecutor> root = std::make_unique<MvccUpdateExecutor>(sm_manager_, txn_mgr_,
@@ -230,9 +198,6 @@ class Portal {
                     return std::make_shared<PortalStmt>(PORTAL_DML_WITHOUT_SELECT, std::vector<TabCol>(), std::move(root), plan);
                 }
                 case T_Delete: {
-                    // ===============================
-                    // DELETE语句处理 - MVCC版本
-                    // ===============================
                     std::cerr << "DEBUG DELETE SCAN: Starting scan for DELETE statement" << std::endl;
                     auto rids = CollectMatchedRids(x->tab_name_, x->conds_, context);
                     std::unique_ptr<AbstractExecutor> root =
@@ -241,11 +206,6 @@ class Portal {
                 }
 
                 case T_Insert: {
-                    // ===============================
-                    // INSERT语句处理 - MVCC版本
-                    // ===============================
-
-                    // 使用MVCC插入执行器，支持快照隔离和写入冲突检测
                     std::unique_ptr<AbstractExecutor> root =
                         std::make_unique<MvccInsertExecutor>(sm_manager_, txn_mgr_, x->tab_name_, x->values_, context);
 
@@ -261,24 +221,6 @@ class Portal {
         }
         return nullptr;
     }
-
-    /**
-     * @brief 执行门户语句 - 遍历算子树并生成执行结果
-     *
-     * 根据门户类型分发到相应的执行路径，统一管理不同类型SQL语句的执行过程。
-     * 这是Portal系统执行阶段的核心函数，负责将准备好的执行器树真正执行。
-     *
-     * @param portal 准备好的门户语句，包含执行器树和元数据
-     * @param ql 查询语言管理器，负责实际的查询执行
-     * @param txn_id 事务ID指针，用于事务管理
-     * @param context 执行上下文，包含锁、缓冲区等资源
-     *
-     * @details 执行分发策略：
-     *          - PORTAL_ONE_SELECT: 单SELECT查询，返回结果集
-     *          - PORTAL_DML_WITHOUT_SELECT: DML操作，返回影响行数
-     *          - PORTAL_MULTI_QUERY: DDL操作，执行结构变更
-     *          - PORTAL_CMD_UTILITY: 工具命令，执行管理操作
-     */
     void run(std::shared_ptr<PortalStmt> portal, QlManager* ql, txn_id_t* txn_id, Context* context) {
         // ===========================================
         // 门户类型分发执行
@@ -320,60 +262,12 @@ class Portal {
             }
         }
     }
-
-    /**
-     * @brief 清理门户资源
-     *
-     * 负责清理Portal执行过程中分配的资源。当前实现为空，
-     * 因为使用了智能指针进行自动内存管理。
-     *
-     * @details 资源清理策略：
-     *          - 执行器树：通过unique_ptr自动释放
-     *          - 门户语句：通过shared_ptr自动释放
-     *          - 上下文资源：由调用者负责管理
-     *
-     * @note 未来可能需要添加：
-     *       - 临时文件清理
-     *       - 锁资源释放
-     *       - 缓存清理
-     */
     void drop() {
         // 当前使用智能指针自动管理内存，无需手动清理
         // 未来可能需要添加特定资源的清理逻辑
     }
-
-    /**
-     * @brief 递归转换执行计划为执行器 - 执行计划到执行器的核心转换函数
-     *
-     * 这是Portal系统最核心的转换函数，负责将优化器生成的逻辑执行计划
-     * 递归转换为具体的执行器对象树。采用访问者模式，通过动态类型转换
-     * 识别计划类型，并创建相应的执行器。
-     *
-     * @param plan 待转换的执行计划节点
-     * @param context 执行上下文，传递给执行器使用
-     * @return std::unique_ptr<AbstractExecutor> 转换后的执行器对象
-     *
-     * @details 支持的计划类型转换：
-     *          - ProjectionPlan → ProjectionExecutor: 投影算子
-     *          - ScanPlan → SeqScanExecutor/IndexScanExecutor: 扫描算子
-     *          - JoinPlan → NestedLoopJoinExecutor: 连接算子
-     *          - SortPlan → SortExecutor: 排序算子
-     *
-     * @note 采用递归下降策略：
-     *       1. 先转换子计划为子执行器
-     *       2. 再创建当前层级的执行器
-     *       3. 建立执行器之间的父子关系
-     */
     std::unique_ptr<AbstractExecutor> convert_plan_executor(std::shared_ptr<Plan> plan, Context* context) {
-        // ===========================================
-        // 计划类型识别与执行器创建
-        // ===========================================
-
         if (auto x = std::dynamic_pointer_cast<ProjectionPlan>(plan)) {
-            // ===============================
-            // 投影计划转换
-            // ===============================
-            // 递归转换子计划，然后创建投影执行器包装子执行器
             return std::make_unique<ProjectionExecutor>(convert_plan_executor(x->subplan_, context),
                                                         x->sel_cols_);
         } else if (auto x = std::dynamic_pointer_cast<ScanPlan>(plan)) {
@@ -398,10 +292,6 @@ class Portal {
                 }
             }
         } else if (auto x = std::dynamic_pointer_cast<JoinPlan>(plan)) {
-            // ===============================
-            // 连接计划转换
-            // ===============================
-            // 递归转换左右子计划，创建嵌套循环连接执行器
             std::unique_ptr<AbstractExecutor> left = convert_plan_executor(x->left_, context);
             std::unique_ptr<AbstractExecutor> right = convert_plan_executor(x->right_, context);
             std::unique_ptr<AbstractExecutor> join = std::make_unique<NestedLoopJoinExecutor>(
@@ -409,17 +299,9 @@ class Portal {
                 std::move(right), std::move(x->conds_), x->type);  // 传递JOIN类型
             return join;
         } else if (auto x = std::dynamic_pointer_cast<FilterPlan>(plan)) {
-            // ===============================
-            // 过滤计划转换
-            // ===============================
-            // 递归转换子计划，创建过滤执行器
             return std::make_unique<FilterExecutor>(convert_plan_executor(x->subplan_, context),
                                                     x->conds_);
         } else if (auto x = std::dynamic_pointer_cast<SortPlan>(plan)) {
-            // ===============================
-            // 排序计划转换
-            // ===============================
-            // 递归转换子计划，创建排序执行器
             if (x->is_multi_column()) {
                 // 多列排序：构建列列表和排序方向列表
                 std::vector<TabCol> sort_tab_cols;
@@ -438,10 +320,6 @@ class Portal {
                                                       x->sel_col_, x->is_desc_);
             }
         } else if (auto x = std::dynamic_pointer_cast<AggregatePlan>(plan)) {
-            // ===============================
-            // 聚合计划转换
-            // ===============================
-            // 递归转换子计划，创建聚合执行器
             auto subplan_executor = convert_plan_executor(x->subplan_, context);
 
             // 创建聚合执行器，传递GROUP BY列信息和HAVING条件
