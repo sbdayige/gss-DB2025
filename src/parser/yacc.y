@@ -471,7 +471,6 @@ expr:
     }
     |   expr '+' expr
     {
-        printf("YACC DEBUG: Parsing arithmetic addition\n");
         $$ = std::make_shared<ArithExpr>($1, ARITH_OP_ADD, $3);
     }
     |   expr '-' expr

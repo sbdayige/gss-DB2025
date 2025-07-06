@@ -119,12 +119,10 @@ single_op ";"|"("|")"|","|"*"|"="|">"|"<"|"."|"+"|"-"|"/"
 "<>" { return NEQ; }
 "!=" { return NEQ; }
 {single_op} { 
-    printf("LEX DEBUG: Found single operator: '%s'\n", yytext);
     return yytext[0]; 
 }
     /* id */
 {identifier} {
-    printf("LEX DEBUG: Found identifier: '%s'\n", yytext);
     yylval->sv_str = yytext;
     return IDENTIFIER;
 }
@@ -134,7 +132,6 @@ single_op ";"|"("|")"|","|"*"|"="|">"|"<"|"."|"+"|"-"|"/"
     return VALUE_INT;
 }
 {value_float} {
-    printf("LEX DEBUG: Found float: '%s'\n", yytext);
     yylval->sv_float = atof(yytext);
     return VALUE_FLOAT;
 }

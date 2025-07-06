@@ -55,10 +55,31 @@ class MvccUpdateExecutor : public AbstractExecutor {
     std::unique_ptr<RmRecord> Next() override {
         // MVCC Update实现：UPDATE = DELETE + INSERT
         for (auto &rid : rids_) {
+            // 1. 可见性检查：跳过对当前事务不可见的记录
+            if (!IsRecordVisible(rid)) {
+                std::cerr << "DEBUG UPDATE: Record rid(" << rid.page_no << "," << rid.slot_no << ") not visible, skipping" << std::endl;
+                continue;
+            }
+
+            // 2. 写锁冲突检测：如果有写锁冲突则抛出异常
+            if (!CheckWriteConflict(rid)) {
+                std::cerr << "DEBUG UPDATE: Write conflict detected for rid(" << rid.page_no << "," << rid.slot_no << "), aborting transaction" << std::endl;
+                throw TransactionAbortException(context_->txn_->get_transaction_id(), AbortReason::DEADLOCK_PREVENTION);
+            }
+
+            std::cerr << "DEBUG UPDATE: Processing visible record rid(" << rid.page_no << "," << rid.slot_no << ")" << std::endl;
+
             // 1. 获取当前记录用于生成新记录
             auto record = fh_->get_record(rid, context_);
             auto old_record = *record;
             records_.push_back(std::make_unique<RmRecord>(old_record));
+
+            // Debug: 打印原始记录内容
+            if (tab_.cols.size() >= 2) {
+                int old_id = *(int *)(old_record.data + tab_.cols[0].offset);
+                int old_score = *(int *)(old_record.data + tab_.cols[1].offset);
+                std::cout << "[DEBUG] UPDATE rid(" << rid.page_no << "," << rid.slot_no << ") 原始记录: id=" << old_id << " score=" << old_score << std::endl;
+            }
 
             // 2. 构造新记录（根据SET子句修改相应字段）
             RmRecord new_record = old_record;
@@ -117,7 +138,6 @@ class MvccUpdateExecutor : public AbstractExecutor {
                 }
                 new_values.push_back(val);
             }
-
             // 4. 执行DELETE操作（删除旧记录）
             std::vector<Rid> delete_rids = {rid};
             std::vector<Condition> empty_conds;
@@ -137,6 +157,61 @@ class MvccUpdateExecutor : public AbstractExecutor {
     }
 
    private:
+    /**
+     * 检查记录对当前事务的可见性
+     * 使用与SELECT相同的MVCC可见性规则
+     */
+    bool IsRecordVisible(const Rid &rid) {
+        auto version_link = txn_mgr_->GetVersionLink(rid);
+        if (!version_link.has_value()) {
+            return true;  // 没有版本链，基础版本可见
+        }
+
+        UndoLink link = version_link->prev_;
+        while (true) {
+            if (link.prev_txn_ == INVALID_TXN_ID) {
+                // 回溯到链尾，基础版本可见
+                return true;
+            }
+
+            auto undo_log_opt = txn_mgr_->GetUndoLogOptional(link);
+            if (!undo_log_opt.has_value()) {
+                break;
+            }
+            auto &undo_log = undo_log_opt.value();
+
+            // 1. 本事务产生的版本
+            if (link.prev_txn_ == context_->txn_->get_transaction_id()) {
+                if (undo_log.is_deleted_) {
+                    return false;  // 本事务DELETE，记录不可见
+                } else {
+                    return true;  // 本事务INSERT/UPDATE，记录可见
+                }
+            }
+
+            // 2. 其他事务产生的版本
+            Transaction *log_txn = txn_mgr_->find_transaction(link.prev_txn_);
+            if (log_txn && log_txn->get_state() == TransactionState::COMMITTED) {
+                // 已提交版本：只有提交时间早于当前事务start_ts才可见
+                if (log_txn->get_commit_ts() < context_->txn_->get_start_ts()) {
+                    if (undo_log.is_deleted_) {
+                        return false;  // 已被删除，不可见
+                    }
+                    return true;  // 可见已提交版本
+                } else {
+                    // 提交时间晚于start_ts，继续回溯
+                    link = undo_log.prev_version_;
+                    continue;
+                }
+            } else {
+                // 未提交或已回滚的事务，继续回溯
+                link = undo_log.prev_version_;
+                continue;
+            }
+        }
+        return false;  // 没有可见版本
+    }
+
     bool CheckWriteConflict(const Rid &rid) {
         auto version_link = txn_mgr_->GetVersionLink(rid);
         if (!version_link.has_value()) {

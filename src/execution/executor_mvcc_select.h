@@ -130,16 +130,27 @@ class MvccSelectExecutor : public AbstractExecutor {
                 auto visible_record = GetVisibleVersion(rid, context_->txn_);
                 if (!visible_record) {
                     // 没有可见版本（可能被删除或不可见），跳过
+                    std::cout << "[DEBUG] rid(" << rid.page_no << "," << rid.slot_no << ") 不可见，跳过" << std::endl;
                     scan.next();
                     continue;
                 }
 
-                // 2. 检查是否满足WHERE条件
+                std::cout << "[DEBUG] rid(" << rid.page_no << "," << rid.slot_no << ") 可见，检查条件" << std::endl;
+
                 if (EvaluateConditions(*visible_record, conds_, tab_)) {
+                    // Debug: 打印记录内容
+                    if (tab_.cols.size() >= 2) {
+                        int id = *(int *)(visible_record->data + tab_.cols[0].offset);
+                        int score = *(int *)(visible_record->data + tab_.cols[1].offset);
+                        std::cout << "[DEBUG] rid(" << rid.page_no << "," << rid.slot_no << ") 满足条件，加入buffer，内容: id=" << id << " score=" << score << std::endl;
+                    } else {
+                        std::cout << "[DEBUG] rid(" << rid.page_no << "," << rid.slot_no << ") 满足条件，加入buffer" << std::endl;
+                    }
                     buffer_.push_back(std::move(visible_record));
                     rids_.push_back(rid);
+                } else {
+                    std::cout << "[DEBUG] rid(" << rid.page_no << "," << rid.slot_no << ") 不满足条件" << std::endl;
                 }
-
                 scan.next();
             }
         } catch (const std::exception &e) {
@@ -240,17 +251,25 @@ class MvccSelectExecutor : public AbstractExecutor {
                       << " 当前txn start_ts=" << txn->get_start_ts()
                       << std::endl;
 
-            // 1. 本事务产生的未提交版本：只对本事务可见
+            // 1. 本事务产生的版本：只对本事务可见
             if (link.prev_txn_ == txn->get_transaction_id()) {
-                if (log_txn && log_txn->get_state() != TransactionState::COMMITTED) {
-                    std::cout << "[DEBUG] 本事务未提交版本，is_deleted=" << undo_log->is_deleted_ << std::endl;
-                    if (undo_log->is_deleted_) {
-                        // 本事务未提交的delete，直接不可见
-                        return nullptr;
+                std::cout << "[DEBUG] 本事务版本，is_deleted=" << undo_log->is_deleted_ << std::endl;
+                if (undo_log->is_deleted_) {
+                    // 本事务的DELETE操作，记录不可见
+                    std::cout << "[DEBUG] 本事务DELETE，记录不可见" << std::endl;
+                    return nullptr;
+                } else {
+                    // 本事务的INSERT/UPDATE操作，返回物理记录
+                    std::cout << "[DEBUG] 本事务INSERT/UPDATE，返回物理记录" << std::endl;
+                    auto physical_record = fh_->get_record(rid, context_);
+                    // Debug: 检查物理记录内容
+                    if (physical_record && tab_.cols.size() >= 2) {
+                        int id_val = *(int *)(physical_record->data + tab_.cols[0].offset);
+                        int score_val = *(int *)(physical_record->data + tab_.cols[1].offset);
+                        std::cout << "[DEBUG] 物理记录内容: id=" << id_val << " score=" << score_val << std::endl;
                     }
-                    return RestoreRecordFromUndoLog(*undo_log);
+                    return physical_record;
                 }
-                // 已提交，继续判断
             }
 
             // 2. 其他事务产生的未提交版本：对本事务不可见

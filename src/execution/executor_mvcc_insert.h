@@ -45,8 +45,6 @@ class MvccInsertExecutor : public AbstractExecutor {
         }
 
         // 间隙锁冲突检测：检查插入的记录是否与现有的间隙锁冲突
-        CheckGapLockConflict();
-
         for (size_t i = 0; i < values_.size(); ++i) {
             auto &col = tab_.cols[i];
             auto &val = values_[i];
@@ -64,6 +62,9 @@ class MvccInsertExecutor : public AbstractExecutor {
                 throw StringOverflowError();
             }
         }
+
+        CheckGapLockConflict();
+
         RmRecord rec(fh_->get_file_hdr().record_size);
         for (size_t i = 0; i < values_.size(); ++i) {
             auto &col = tab_.cols[i];
