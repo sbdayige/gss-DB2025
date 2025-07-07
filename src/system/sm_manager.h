@@ -85,6 +85,7 @@ class SmManager {
     IxIndexHandle* get_index_handle(const std::string& index_name) const;
 
     bool contains_table(const std::string& tab_name) const;
+    void load_csv_data(const std::string& csv_file_path, const std::string& tab_name);
 
     bool insert_index_force(const std::string& tab_name, RmRecord& rec, Rid rid, Transaction* txn);
 };

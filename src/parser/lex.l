@@ -40,6 +40,7 @@ value_int {digit}+
 value_float {digit}+\.({digit}+)?
 value_string '[^']*'
 single_op ";"|"("|")"|","|"*"|"="|">"|"<"|"."|"+"|"-"|"/"
+value_path [\.|\/][^ \t]+\.csv
 
 %x STATE_COMMENT
 
@@ -103,6 +104,7 @@ single_op ";"|"("|")"|","|"*"|"="|">"|"<"|"."|"+"|"-"|"/"
 "MIN" { return MIN; }
 "SUM" { return SUM; }
 "AVG" { return AVG; }
+"LOAD" { return LOAD; }
 "ENABLE_NESTLOOP" { return ENABLE_NESTLOOP; }
 "ENABLE_SORTMERGE" { return ENABLE_SORTMERGE; }
 "TRUE" { 
@@ -138,6 +140,10 @@ single_op ";"|"("|")"|","|"*"|"="|">"|"<"|"."|"+"|"-"|"/"
 {value_string} {
     yylval->sv_str = std::string(yytext + 1, strlen(yytext) - 2);
     return VALUE_STRING;
+}
+{value_path} {
+    yylval->sv_str = yytext;
+    return VALUE_PATH;
 }
     /* EOF */
 <<EOF>> { return T_EOF; }

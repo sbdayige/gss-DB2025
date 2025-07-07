@@ -61,6 +61,8 @@ class Optimizer {
         } else if (auto x = std::dynamic_pointer_cast<ast::Crash>(query->parse)) {
             // crash;
             return std::make_shared<OtherPlan>(T_Crash, std::string());
+        } else if (auto x = std::dynamic_pointer_cast<ast::LoadStmt>(query->parse)) {
+            return std::make_shared<OtherPlan>(T_LoadData, x->tab_name, x->file_name);
         } else if (auto x = std::dynamic_pointer_cast<ast::SetStmt>(query->parse)) {
             // Set Knob Plan
             return std::make_shared<SetKnobPlan>(x->set_knob_type_, x->bool_val_);

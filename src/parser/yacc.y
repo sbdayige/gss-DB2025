@@ -25,7 +25,7 @@ using namespace ast;
 %token WHERE UPDATE SET SELECT INT CHAR FLOAT INDEX AND JOIN INNER LEFT RIGHT FULL SEMI
 %token ON AS EXIT HELP TXN_BEGIN TXN_COMMIT TXN_ABORT TXN_ROLLBACK ORDER_BY 
 %token ENABLE_NESTLOOP ENABLE_SORTMERGE STATIC_CHECKPOINT CRASH
-%token GROUP HAVING LIMIT COUNT MAX MIN SUM AVG
+%token GROUP HAVING LIMIT COUNT MAX MIN SUM AVG LOAD
 // non-keywords
 %token LEQ NEQ GEQ T_EOF
 %token EXPLAIN
@@ -40,7 +40,7 @@ using namespace ast;
 %right UMINUS  // 一元减号优先级最高
 
 // type-specific tokens
-%token <sv_str> IDENTIFIER VALUE_STRING
+%token <sv_str> IDENTIFIER VALUE_STRING VALUE_PATH
 %token <sv_int> VALUE_INT
 %token <sv_float> VALUE_FLOAT
 %token <sv_bool> VALUE_BOOL
@@ -54,7 +54,7 @@ using namespace ast;
 %type <sv_expr> expr
 %type <sv_val> value
 %type <sv_vals> valueList
-%type <sv_str> tbName colName
+%type <sv_str> tbName colName fileName
 %type <sv_strs> colNameList
 %type <sv_col> col
 %type <sv_cols> colList selector groupByClause optGroupByClause
@@ -136,6 +136,10 @@ dbStmt:
     |   SHOW INDEX FROM tbName
     {
         $$ = std::make_shared<ShowIndex>($4);
+    }
+    |   LOAD fileName INTO tbName
+    {
+         $$ = std::make_shared<LoadStmt>($2, $4);
     }
     ;
 
@@ -798,4 +802,6 @@ optLimitClause:
 tbName: IDENTIFIER;
 
 colName: IDENTIFIER;
+
+fileName: VALUE_PATH;
 %%
