@@ -159,9 +159,6 @@ class MvccInsertExecutor : public AbstractExecutor {
 
         txn_mgr_->UpdateVersionLink(rid_, version_link, [](std::optional<VersionUndoLink>) { return true; });
 
-        std::cout << "DEBUG: INSERT created version link for rid " << rid_.page_no << "," << rid_.slot_no
-                  << " with txn " << context_->txn_->get_transaction_id() << std::endl;
-
         return nullptr;
     }
 

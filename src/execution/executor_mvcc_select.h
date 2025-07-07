@@ -129,27 +129,18 @@ class MvccSelectExecutor : public AbstractExecutor {
                 // 1. 获取对当前事务可见的记录版本
                 auto visible_record = GetVisibleVersion(rid, context_->txn_);
                 if (!visible_record) {
-                    // 没有可见版本（可能被删除或不可见），跳过
-                    std::cout << "[DEBUG] rid(" << rid.page_no << "," << rid.slot_no << ") 不可见，跳过" << std::endl;
                     scan.next();
                     continue;
                 }
-
-                std::cout << "[DEBUG] rid(" << rid.page_no << "," << rid.slot_no << ") 可见，检查条件" << std::endl;
 
                 if (EvaluateConditions(*visible_record, conds_, tab_)) {
                     // Debug: 打印记录内容
                     if (tab_.cols.size() >= 2) {
                         int id = *(int *)(visible_record->data + tab_.cols[0].offset);
                         int score = *(int *)(visible_record->data + tab_.cols[1].offset);
-                        std::cout << "[DEBUG] rid(" << rid.page_no << "," << rid.slot_no << ") 满足条件，加入buffer，内容: id=" << id << " score=" << score << std::endl;
-                    } else {
-                        std::cout << "[DEBUG] rid(" << rid.page_no << "," << rid.slot_no << ") 满足条件，加入buffer" << std::endl;
                     }
                     buffer_.push_back(std::move(visible_record));
                     rids_.push_back(rid);
-                } else {
-                    std::cout << "[DEBUG] rid(" << rid.page_no << "," << rid.slot_no << ") 不满足条件" << std::endl;
                 }
                 scan.next();
             }
@@ -209,18 +200,14 @@ class MvccSelectExecutor : public AbstractExecutor {
     }
 
     std::unique_ptr<RmRecord> GetVisibleVersion(const Rid &rid, Transaction *txn) {
-        std::cout << "[DEBUG] SELECT事务id=" << txn->get_transaction_id() << " start_ts=" << txn->get_start_ts() << std::endl;
         auto version_link = txn_mgr_->GetVersionLink(rid);
         if (!version_link.has_value()) {
             // 没有版本链，返回基础版本
             return fh_->get_record(rid, context_);
         }
-        std::cout << "[DEBUG] rid(" << rid.page_no << "," << rid.slot_no << ") 进入GetVisibleVersion" << std::endl;
         UndoLink link = version_link->prev_;
         while (true) {
             if (link.prev_txn_ == INVALID_TXN_ID) {
-                // 没有更多历史版本，返回物理记录
-                std::cout << "[DEBUG] rid(" << rid.page_no << "," << rid.slot_no << ") 回溯到链尾，判断物理记录可见性" << std::endl;
                 auto insert_version_link = txn_mgr_->GetVersionLink(rid);
                 if (insert_version_link.has_value()) {
                     UndoLink insert_link = insert_version_link->prev_;
@@ -238,35 +225,21 @@ class MvccSelectExecutor : public AbstractExecutor {
             }
             auto undo_log = GetUndoLog(link);
             if (!undo_log) {
-                std::cout << "[DEBUG] rid(" << rid.page_no << "," << rid.slot_no << ") 找不到UndoLog，break" << std::endl;
                 break;
             }
 
             Transaction *log_txn = txn_mgr_->find_transaction(link.prev_txn_);
-            std::cout << "[DEBUG] rid(" << rid.page_no << "," << rid.slot_no << ") link.txn=" << link.prev_txn_
-                      << " undo_log.ts_=" << undo_log->ts_
-                      << " is_deleted=" << undo_log->is_deleted_
-                      << " 当前txn=" << txn->get_transaction_id()
-                      << " log_txn_state=" << (log_txn ? (int)log_txn->get_state() : -1)
-                      << " 当前txn start_ts=" << txn->get_start_ts()
-                      << std::endl;
-
             // 1. 本事务产生的版本：只对本事务可见
             if (link.prev_txn_ == txn->get_transaction_id()) {
-                std::cout << "[DEBUG] 本事务版本，is_deleted=" << undo_log->is_deleted_ << std::endl;
                 if (undo_log->is_deleted_) {
                     // 本事务的DELETE操作，记录不可见
-                    std::cout << "[DEBUG] 本事务DELETE，记录不可见" << std::endl;
                     return nullptr;
                 } else {
-                    // 本事务的INSERT/UPDATE操作，返回物理记录
-                    std::cout << "[DEBUG] 本事务INSERT/UPDATE，返回物理记录" << std::endl;
                     auto physical_record = fh_->get_record(rid, context_);
                     // Debug: 检查物理记录内容
                     if (physical_record && tab_.cols.size() >= 2) {
                         int id_val = *(int *)(physical_record->data + tab_.cols[0].offset);
                         int score_val = *(int *)(physical_record->data + tab_.cols[1].offset);
-                        std::cout << "[DEBUG] 物理记录内容: id=" << id_val << " score=" << score_val << std::endl;
                     }
                     return physical_record;
                 }
@@ -274,7 +247,6 @@ class MvccSelectExecutor : public AbstractExecutor {
 
             // 2. 其他事务产生的未提交版本：对本事务不可见
             if (link.prev_txn_ != txn->get_transaction_id() && log_txn && log_txn->get_state() != TransactionState::COMMITTED) {
-                std::cout << "[DEBUG] 其他事务未提交版本，不可见，回溯" << std::endl;
                 link = undo_log->prev_version_;
                 continue;
             }
@@ -283,26 +255,20 @@ class MvccSelectExecutor : public AbstractExecutor {
             if (log_txn && log_txn->get_state() == TransactionState::COMMITTED) {
                 // 用 commit_ts 判断可见性
                 if (log_txn->get_commit_ts() < txn->get_start_ts()) {
-                    std::cout << "[DEBUG] 已提交版本 commit_ts=" << log_txn->get_commit_ts() << " < start_ts=" << txn->get_start_ts() << std::endl;
                     if (undo_log->is_deleted_) {
-                        std::cout << "[DEBUG] 该版本被删除，直接不可见" << std::endl;
                         return nullptr;
                     }
-                    std::cout << "[DEBUG] 返回可见已提交版本" << std::endl;
                     return RestoreRecordFromUndoLog(*undo_log);
                 } else {
-                    std::cout << "[DEBUG] 已提交版本 commit_ts=" << log_txn->get_commit_ts() << " >= start_ts=" << txn->get_start_ts() << "，回溯" << std::endl;
                     link = undo_log->prev_version_;
                     continue;
                 }
             }
 
             // 4. 其他情况，继续回溯
-            std::cout << "[DEBUG] 其他情况，回溯" << std::endl;
             link = undo_log->prev_version_;
         }
         // 没有可见版本
-        std::cout << "[DEBUG] rid(" << rid.page_no << "," << rid.slot_no << ") 没有可见版本" << std::endl;
         return nullptr;
     }
 

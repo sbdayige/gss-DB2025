@@ -56,18 +56,13 @@ class MvccUpdateExecutor : public AbstractExecutor {
         for (auto &rid : rids_) {
             // 1. 可见性检查：跳过对当前事务不可见的记录
             if (!IsRecordVisible(rid)) {
-                std::cerr << "DEBUG UPDATE: Record rid(" << rid.page_no << "," << rid.slot_no << ") not visible, skipping" << std::endl;
                 continue;
             }
 
             // 2. 写锁冲突检测：如果有写锁冲突则抛出异常
             if (!CheckWriteConflict(rid)) {
-                std::cerr << "DEBUG UPDATE: Write conflict detected for rid(" << rid.page_no << "," << rid.slot_no << "), aborting transaction" << std::endl;
                 throw TransactionAbortException(context_->txn_->get_transaction_id(), AbortReason::DEADLOCK_PREVENTION);
             }
-
-            std::cerr << "DEBUG UPDATE: Processing visible record rid(" << rid.page_no << "," << rid.slot_no << ")" << std::endl;
-
             // 1. 获取当前记录用于生成新记录
             auto record = fh_->get_record(rid, context_);
             auto old_record = *record;
@@ -77,7 +72,6 @@ class MvccUpdateExecutor : public AbstractExecutor {
             if (tab_.cols.size() >= 2) {
                 int old_id = *(int *)(old_record.data + tab_.cols[0].offset);
                 int old_score = *(int *)(old_record.data + tab_.cols[1].offset);
-                std::cout << "[DEBUG] UPDATE rid(" << rid.page_no << "," << rid.slot_no << ") 原始记录: id=" << old_id << " score=" << old_score << std::endl;
             }
 
             // 2. 构造新记录（根据SET子句修改相应字段）
@@ -119,10 +113,8 @@ class MvccUpdateExecutor : public AbstractExecutor {
                     }
                 }
 
-                std::cerr << "[DEBUG] update: before init_raw, value.type=" << value.type << " col.len=" << lhs_col->len << " value.raw=" << (value.raw ? "not null" : "null") << std::endl;
                 value.raw.reset();
                 value.init_raw(lhs_col->len);
-                std::cerr << "[DEBUG] update: after init_raw, value.raw=" << (value.raw ? "not null" : "null") << std::endl;
                 memcpy(new_record.data + lhs_col->offset, value.raw->data, lhs_col->len);
             }
 
@@ -130,7 +122,6 @@ class MvccUpdateExecutor : public AbstractExecutor {
             if (tab_.cols.size() >= 2) {
                 int new_id = *(int *)(new_record.data + tab_.cols[0].offset);
                 int new_score = *(int *)(new_record.data + tab_.cols[1].offset);
-                std::cout << "[DEBUG] UPDATE 构造新记录: id=" << new_id << " score=" << new_score << std::endl;
             }
 
             // 3. 构造新记录的字段值
@@ -148,24 +139,6 @@ class MvccUpdateExecutor : public AbstractExecutor {
                 }
                 new_values.push_back(val);
             }
-
-            // Debug: 打印要INSERT的值
-            std::cout << "[DEBUG] UPDATE 准备INSERT的值: ";
-            for (size_t i = 0; i < new_values.size(); ++i) {
-                if (i < tab_.cols.size()) {
-                    std::cout << tab_.cols[i].name << "=";
-                    if (tab_.cols[i].type == TYPE_INT) {
-                        std::cout << new_values[i].int_val;
-                    } else if (tab_.cols[i].type == TYPE_FLOAT) {
-                        std::cout << new_values[i].float_val;
-                    } else if (tab_.cols[i].type == TYPE_STRING) {
-                        std::cout << new_values[i].str_val;
-                    }
-                    std::cout << " ";
-                }
-            }
-            std::cout << std::endl;
-
             // 4. 执行DELETE操作（删除旧记录）
             std::vector<Rid> delete_rids = {rid};
             std::vector<Condition> empty_conds;

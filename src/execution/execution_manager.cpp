@@ -90,10 +90,12 @@ void QlManager::run_cmd_utility(std::shared_ptr<Plan> plan, txn_id_t *txn_id, Co
                 break;
             }
             case T_ShowIndex: {
+                assert(0);
                 sm_manager_->show_index(x->tab_name_, context);
                 break;
             }
             case T_DescTable: {
+                assert(0);
                 sm_manager_->desc_table(x->tab_name_, context);
                 break;
             }

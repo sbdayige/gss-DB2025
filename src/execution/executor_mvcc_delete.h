@@ -53,17 +53,13 @@ class MvccDeleteExecutor : public AbstractExecutor {
         for (auto &rid : rids_) {
             // 1. 可见性检查：跳过对当前事务不可见的记录
             if (!IsRecordVisible(rid)) {
-                std::cerr << "DEBUG DELETE: Record rid(" << rid.page_no << "," << rid.slot_no << ") not visible, skipping" << std::endl;
                 continue;
             }
 
             // 2. 写锁冲突检测：如果有写锁冲突则抛出异常
             if (!CheckWriteConflict(rid)) {
-                std::cerr << "DEBUG DELETE: Write conflict detected for rid(" << rid.page_no << "," << rid.slot_no << "), aborting transaction" << std::endl;
                 throw TransactionAbortException(context_->txn_->get_transaction_id(), AbortReason::DEADLOCK_PREVENTION);
             }
-
-            std::cerr << "DEBUG DELETE: Processing visible record rid(" << rid.page_no << "," << rid.slot_no << ")" << std::endl;
 
             auto record = fh_->get_record(rid, context_);
 
