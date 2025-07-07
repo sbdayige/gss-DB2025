@@ -9,13 +9,7 @@ fi
 # 创建测试SQL文件
 
 cat > test_commands.sql << EOF
-create table student (id int, name char(8), score float);
-insert into student values (1, 'xiaohong', 90.0);
-begin;
-insert into student values (2, 'xiaoming', 99.0);
-delete from student where id = 2;
-abort;
-select * from student;
+select * from test_rid;
 EOF
 
 echo "正在启动数据库客户端并执行测试命令..."

@@ -454,17 +454,10 @@ void RecoveryManager::redo_insert(InsertLogRecord* log_record) {
             // 页面或记录不存在，继续插入
         }
 
-        // 尝试在指定位置插入
-        try {
-            fh->insert_record(log_record->rid_, log_record->insert_value_.data);
-            std::cout << "Successfully redid insert at specific RID" << std::endl;
-        } catch (...) {
-            // 指定位置插入失败，使用自动分配
-            Context dummy_context(nullptr, nullptr, nullptr);
-            Rid new_rid = fh->insert_record(log_record->insert_value_.data, &dummy_context);
-            std::cout << "Successfully redid insert with auto-allocated RID: ("
-                      << new_rid.page_no << "," << new_rid.slot_no << ")" << std::endl;
-        }
+        // 必须在指定位置插入，不能使用自动分配（保持RID一致性）
+        fh->insert_record(log_record->rid_, log_record->insert_value_.data);
+        std::cout << "Successfully redid insert at RID: (" << log_record->rid_.page_no 
+                  << "," << log_record->rid_.slot_no << ")" << std::endl;
 
     } catch (const std::exception& e) {
         std::cout << "Failed to redo insert: " << e.what() << std::endl;
@@ -578,17 +571,10 @@ void RecoveryManager::undo_delete(DeleteLogRecord* log_record) {
             // 记录不存在，继续插入
         }
 
-        // 尝试在原位置重新插入
-        try {
-            fh->insert_record(log_record->rid_, log_record->delete_value_.data);
-            std::cout << "Successfully undid delete by reinserting record" << std::endl;
-        } catch (...) {
-            // 原位置插入失败，使用自动分配
-            Context dummy_context(nullptr, nullptr, nullptr);
-            Rid new_rid = fh->insert_record(log_record->delete_value_.data, &dummy_context);
-            std::cout << "Successfully undid delete with auto-allocated RID: ("
-                      << new_rid.page_no << "," << new_rid.slot_no << ")" << std::endl;
-        }
+        // 必须在原位置重新插入，不能使用自动分配（保持RID一致性）
+        fh->insert_record(log_record->rid_, log_record->delete_value_.data);
+        std::cout << "Successfully undid delete by reinserting record at RID: (" 
+                  << log_record->rid_.page_no << "," << log_record->rid_.slot_no << ")" << std::endl;
 
     } catch (const std::exception& e) {
         std::cout << "Failed to undo delete: " << e.what() << std::endl;
