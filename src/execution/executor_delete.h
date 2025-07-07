@@ -14,6 +14,7 @@ See the Mulan PSL v2 for more details. */
 #include "executor_abstract.h"
 #include "index/ix.h"
 #include "system/sm.h"
+#include "recovery/log_manager.h"
 
 /**
  * @brief 删除执行器，负责实现DELETE语句的功能
@@ -98,6 +99,14 @@ class DeleteExecutor : public AbstractExecutor {
         for (auto& rid : rids_) {
             // 获取要删除的记录
             auto rec = fh_->get_record(rid, context_);
+
+            // WAL: 记录DELETE日志
+            if (context_ && context_->txn_ && context_->log_mgr_) {
+                DeleteLogRecord log_record(context_->txn_->get_transaction_id(), *rec, rid, tab_name_);
+                log_record.prev_lsn_ = context_->txn_->get_prev_lsn();
+                lsn_t lsn = context_->log_mgr_->add_log_to_buffer(&log_record);
+                context_->txn_->set_prev_lsn(lsn);
+            }
 
             // 记录删除操作到事务日志（在实际删除之前）
             if (context_ && context_->txn_) {

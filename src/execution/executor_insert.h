@@ -14,6 +14,7 @@ See the Mulan PSL v2 for more details. */
 #include "executor_abstract.h"
 #include "index/ix.h"
 #include "system/sm.h"
+#include "recovery/log_manager.h"
 
 // 分支预测优化宏
 #ifndef LIKELY
@@ -168,6 +169,15 @@ class InsertExecutor : public AbstractExecutor {
 
         // 插入记录
         rid_ = fh_->insert_record(rec.data, context_);
+        
+        // WAL: 记录INSERT日志
+        if (context_ && context_->txn_ && context_->log_mgr_) {
+            InsertLogRecord log_record(context_->txn_->get_transaction_id(), rec, rid_, tab_name_);
+            log_record.prev_lsn_ = context_->txn_->get_prev_lsn();
+            lsn_t lsn = context_->log_mgr_->add_log_to_buffer(&log_record);
+            context_->txn_->set_prev_lsn(lsn);
+        }
+        
         // 记录插入操作到事务日志
         if (context_ && context_->txn_) {
             WriteRecord* write_record = new WriteRecord(WType::INSERT_TUPLE, tab_name_, rid_, rec);

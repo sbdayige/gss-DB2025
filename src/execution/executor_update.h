@@ -18,6 +18,7 @@ See the Mulan PSL v2 for more details. */
 #include "executor_abstract.h"
 #include "index/ix.h"
 #include "system/sm.h"
+#include "recovery/log_manager.h"
 
 /**
  * @brief UPDATE操作的执行器类
@@ -298,6 +299,14 @@ class UpdateExecutor : public AbstractExecutor {
 
             // 更新记录数据
             fh_->update_record(rids_[i], new_records[i]->data, context_);
+
+            // WAL: 记录UPDATE日志
+            if (context_ && context_->txn_ && context_->log_mgr_) {
+                UpdateLogRecord log_record(context_->txn_->get_transaction_id(), *old_records[i], *new_records[i], rids_[i], tab_name_);
+                log_record.prev_lsn_ = context_->txn_->get_prev_lsn();
+                lsn_t lsn = context_->log_mgr_->add_log_to_buffer(&log_record);
+                context_->txn_->set_prev_lsn(lsn);
+            }
 
             // 记录写操作到事务日志
             if (context_ && context_->txn_) {
