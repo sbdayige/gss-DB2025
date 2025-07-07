@@ -12,8 +12,10 @@ See the Mulan PSL v2 for more details. */
 
 #include <atomic>
 #include <functional>
+#include <mutex>
 #include <optional>
 #include <shared_mutex>
+#include <thread>
 #include <unordered_map>
 
 #include "common/exception.h"
@@ -45,6 +47,25 @@ struct VersionUndoLink {
             return VersionUndoLink{*undo_link};
         }
         return std::nullopt;
+    }
+};
+
+// 用于MVCC版本链管理的复合键，包含表标识符和记录标识符
+struct TableRid {
+    int fd;   // 表文件描述符，用于区分不同的表
+    Rid rid;  // 记录标识符
+
+    friend bool operator==(const TableRid &x, const TableRid &y) {
+        return x.fd == y.fd && x.rid == y.rid;
+    }
+
+    friend bool operator!=(const TableRid &x, const TableRid &y) { return !(x == y); }
+};
+
+// 为TableRid提供哈希函数，用于unordered_map
+struct TableRidHash {
+    std::size_t operator()(const TableRid &key) const {
+        return std::hash<int>()(key.fd) ^ (std::hash<int>()(key.rid.page_no) << 1) ^ (std::hash<int>()(key.rid.slot_no) << 2);
     }
 };
 
@@ -113,21 +134,21 @@ class TransactionManager {
      * @brief 更新一个撤销链接，该链接将表堆元组与第一个撤销日志连接起来。
      * 在更新之前，将调用 `check` 函数以确保有效性。
      */
-    bool UpdateUndoLink(Rid rid, std::optional<UndoLink> prev_link,
+    bool UpdateUndoLink(int fd, Rid rid, std::optional<UndoLink> prev_link,
                         std::function<bool(std::optional<UndoLink>)> &&check = nullptr);
 
     /**
      * @brief 更新一个撤销链接，该链接将表堆元组与第一个撤销日志连接起来。
      * 在更新之前，将调用 `check` 函数以确保有效性。
      */
-    bool UpdateVersionLink(Rid rid, std::optional<VersionUndoLink> prev_version,
+    bool UpdateVersionLink(int fd, Rid rid, std::optional<VersionUndoLink> prev_version,
                            std::function<bool(std::optional<VersionUndoLink>)> &&check = nullptr);
 
     /** @brief 获取表堆元组的第一个撤销日志。 */
-    std::optional<UndoLink> GetUndoLink(Rid rid);
+    std::optional<UndoLink> GetUndoLink(int fd, Rid rid);
 
     /** @brief 获取表堆元组的第一个撤销日志。*/
-    std::optional<VersionUndoLink> GetVersionLink(Rid rid);
+    std::optional<VersionUndoLink> GetVersionLink(int fd, Rid rid);
 
     /** @brief 访问事务撤销日志缓冲区并获取撤销日志。如果事务不存在，返回 nullopt。
      * 如果索引超出范围仍然会抛出异常。 */
@@ -144,7 +165,7 @@ class TransactionManager {
     void GarbageCollection();
 
     /** @brief MVCC: 检查写入冲突，支持快照隔离级别 */
-    bool CheckWriteConflict(Transaction *txn, const Rid &rid);
+    bool CheckWriteConflict(Transaction *txn, int fd, const Rid &rid);
 
     /** @brief MVCC: 为事务分配读时间戳 */
     void AssignReadTimestamp(Transaction *txn);
@@ -153,18 +174,10 @@ class TransactionManager {
     timestamp_t AssignCommitTimestamp(Transaction *txn);
 
     /** @brief MVCC: 获取元组的最新版本及其事务信息 */
-    std::pair<bool, txn_id_t> GetLatestVersionInfo(const Rid &rid);
+    std::pair<bool, txn_id_t> GetLatestVersionInfo(int fd, const Rid &rid);
 
     /** @brief MVCC: 检查版本可见性 */
     bool IsVersionVisible(Transaction *txn, timestamp_t version_ts, txn_id_t version_txn_id);
-
-    struct PageVersionInfo {
-        std::shared_mutex mutex_;
-        /** 存储所有槽的先前版本信息。注意：不要使用 `[x]` 来访问它，因为
-         * 即使不存在也会创建新元素。请使用 `find` 来代替。
-         */
-        std::unordered_map<slot_offset_t, VersionUndoLink> prev_version_;
-    };
 
     // 获取全局唯一递增的时间戳（用于每次写操作）
     timestamp_t get_next_timestamp() {
@@ -179,8 +192,8 @@ class TransactionManager {
     UndoLink DeleteUpdateVersionLink(const int &fd, Rid rid, Transaction *txn);
     /** 保护版本信息 */
     std::shared_mutex version_info_mutex_;
-    /** 存储表堆中每个元组的先前版本。 */
-    std::unordered_map<page_id_t, std::shared_ptr<PageVersionInfo>> version_info_;
+    /** 存储表堆中每个元组的先前版本，使用TableRid作为键以区分不同表的记录。 */
+    std::unordered_map<TableRid, VersionUndoLink, TableRidHash> version_info_;
 
    private:
     ConcurrencyMode concurrency_mode_;            // 事务使用的并发控制算法，目前只需要考虑2PL

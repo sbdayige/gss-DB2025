@@ -1,6 +1,4 @@
 /**
-// 修正 DeleteUpdateVersionLink 查找逻辑：version_info_ 的 key 是 page_id_t（int32_t），即 fd
-// 所以查找应为 version_info_.find(fd)
  * @file transaction_manager.cpp
  * @author RMDB Development Team
  * @brief 事务管理器实现文件
@@ -54,13 +52,11 @@ Transaction* TransactionManager::begin(Transaction* txn, LogManager* log_manager
     txn_map.emplace(txn->get_transaction_id(), txn);
     lock.unlock();
 
-    // 分配全局唯一递增的 start_ts
-    txn_map.emplace(txn->get_transaction_id(), txn);
-    timestamp_t start_ts = get_next_timestamp();
-    txn->set_start_ts(start_ts);        // 设置事务开始时间戳
-    txn->set_read_ts(last_commit_ts_);  // 设置读取时间戳该事务早的最后一次提交时间戳
-    txn->set_txn_mode(false);
+    timestamp_t start_ts = next_timestamp_.fetch_add(1);
+    txn->set_start_ts(start_ts);  // 设置事务开始时间戳
+    // 不要强制设置txn_mode，保持调用者设置的值
     txn->set_state(TransactionState::DEFAULT);
+
     // MVCC相关设置
     if (concurrency_mode_ == ConcurrencyMode::MVCC) {
         running_txns_.AddTxn(start_ts);  // 添加事务到水位线
@@ -96,14 +92,24 @@ void TransactionManager::commit(Transaction* txn, LogManager* log_manager) {
     // MVCC: 分配提交时间戳
     timestamp_t commit_ts = INVALID_TS;
     if (concurrency_mode_ == ConcurrencyMode::MVCC) {
-        // 分配全局唯一递增的提交时间戳
         commit_ts = next_timestamp_.fetch_add(1);
         last_commit_ts_.store(std::max(last_commit_ts_.load(), commit_ts));
         txn->set_commit_ts(commit_ts);  // 设置事务的提交时间戳
+
         // 更新所有相关版本链的状态为已完成
         auto write_set = txn->get_write_set();
         for (auto write_record : *write_set) {
-            auto version_link_opt = GetVersionLink(write_record->GetRid());
+            // 通过表名获取fd - 需要使用sm_manager_来查找
+            int fd = -1;
+            try {
+                auto& fh = sm_manager_->fhs_.at(write_record->GetTableName());
+                fd = fh->GetFd();
+            } catch (const std::exception& e) {
+                // 表文件未找到，跳过
+                continue;
+            }
+
+            auto version_link_opt = GetVersionLink(fd, write_record->GetRid());
             if (version_link_opt.has_value() &&
                 version_link_opt->prev_.prev_txn_ == txn->get_transaction_id() &&
                 version_link_opt->in_progress_) {
@@ -112,7 +118,7 @@ void TransactionManager::commit(Transaction* txn, LogManager* log_manager) {
                 updated_link.in_progress_ = false;
 
                 // 更新版本链状态
-                UpdateVersionLink(write_record->GetRid(), updated_link,
+                UpdateVersionLink(fd, write_record->GetRid(), updated_link,
                                   [](std::optional<VersionUndoLink>) { return true; });
             }
         }
@@ -151,9 +157,10 @@ void TransactionManager::commit(Transaction* txn, LogManager* log_manager) {
 
 /**
  * @description: 事务的终止（回滚）方法
- * @param {Transaction *} txn 需要回滚的事务
+ * @param {Context *} context 包含事务信息的上下文
  * @param {LogManager} *log_manager 日志管理器指针
  */
+
 void TransactionManager::abort(Context* context, LogManager* log_manager) {
     // 1. 回滚所有写操作
     Transaction* txn = context->txn_;
@@ -210,10 +217,19 @@ void TransactionManager::abort(Context* context, LogManager* log_manager) {
         // 清理版本链：恢复到该事务修改前的状态
         // 注意：使用write_set而不是txn->get_write_set()，因为后者可能已被清空
         for (auto iter = write_set->rbegin(); iter != write_set->rend(); iter++) {
+            const auto table_name = (*iter)->GetTableName();
             const auto rid = (*iter)->GetRid();
+            int fd = -1;
+            try {
+                auto& fh = sm_manager_->fhs_.at(table_name);
+                fd = fh->GetFd();
+            } catch (const std::exception& e) {
+                // 表文件未找到，跳过
+                continue;
+            }
 
             // 获取当前版本链
-            auto current_version_link = GetVersionLink(rid);
+            auto current_version_link = GetVersionLink(fd, rid);
             if (current_version_link.has_value() &&
                 current_version_link->prev_.prev_txn_ == txn->get_transaction_id()) {
                 // 如果当前版本链的最新版本确实是该事务创建的，则恢复到前一个版本
@@ -223,10 +239,10 @@ void TransactionManager::abort(Context* context, LogManager* log_manager) {
                     VersionUndoLink prev_version_link;
                     prev_version_link.prev_ = undo_log_opt->prev_version_;
                     prev_version_link.in_progress_ = false;
-                    UpdateVersionLink(rid, prev_version_link, [](std::optional<VersionUndoLink>) { return true; });
+                    UpdateVersionLink(fd, rid, prev_version_link, [](std::optional<VersionUndoLink>) { return true; });
                 } else {
                     // 没有前一个版本，删除版本链
-                    UpdateVersionLink(rid, std::nullopt, [](std::optional<VersionUndoLink>) { return true; });
+                    UpdateVersionLink(fd, rid, std::nullopt, [](std::optional<VersionUndoLink>) { return true; });
                 }
             }
         }
@@ -235,69 +251,52 @@ void TransactionManager::abort(Context* context, LogManager* log_manager) {
     // 最后清空写集合（在所有清理工作完成后）
     txn->get_write_set()->clear();
 }
-
 /**
  * @brief 更新一个撤销链接，该链接将表堆元组与第一个撤销日志连接起来。
  * 在更新之前，将调用 `check` 函数以确保有效性。
  */
-bool TransactionManager::UpdateUndoLink(Rid rid, std::optional<UndoLink> prev_link,
+bool TransactionManager::UpdateUndoLink(int fd, Rid rid, std::optional<UndoLink> prev_link,
                                         std::function<bool(std::optional<UndoLink>)>&& check) {
     std::optional<VersionUndoLink> prev_version = VersionUndoLink::FromOptionalUndoLink(prev_link);
-    return UpdateVersionLink(rid, prev_version, std::move(check) ? [check = std::move(check)](std::optional<VersionUndoLink> v) {
+    return UpdateVersionLink(fd, rid, prev_version, std::move(check) ? [check = std::move(check)](std::optional<VersionUndoLink> v) {
         return check(v.has_value() ? std::optional<UndoLink>{v->prev_} : std::nullopt);
     }
-                                                                 : std::function<bool(std::optional<VersionUndoLink>)>{});
+                                                                     : std::function<bool(std::optional<VersionUndoLink>)>{});
 }
 
 /**
  * @brief 更新一个撤销链接，该链接将表堆元组与第一个撤销日志连接起来。
  * 在更新之前，将调用 `check` 函数以确保有效性。
  */
-bool TransactionManager::UpdateVersionLink(Rid rid, std::optional<VersionUndoLink> prev_version,
+bool TransactionManager::UpdateVersionLink(int fd, Rid rid, std::optional<VersionUndoLink> prev_version,
                                            std::function<bool(std::optional<VersionUndoLink>)>&& check) {
-    // 获取对应的版本信息
-    std::shared_lock<std::shared_mutex> lock(version_info_mutex_);
-    page_id_t page_id = rid.page_no;
-    auto it = version_info_.find(page_id);
-    if (it == version_info_.end()) {
-        // 如果没有找到对应的版本信息，则创建一个新的
-        lock.unlock();
-        std::unique_lock<std::shared_mutex> write_lock(version_info_mutex_);
-        auto new_version_info = std::make_shared<PageVersionInfo>();
-        version_info_[page_id] = new_version_info;
-        it = version_info_.find(page_id);
-        write_lock.unlock();
-        lock.lock();
-    }
-    auto& version_info = it->second;
-    lock.unlock();
-    std::unique_lock<std::shared_mutex> version_lock(version_info->mutex_);
+    TableRid table_rid{fd, rid};
+    std::unique_lock<std::shared_mutex> lock(version_info_mutex_);
 
     // 检查函数验证
     if (check) {
-        auto current_version_it = version_info->prev_version_.find(rid.slot_no);
+        auto current_version_it = version_info_.find(table_rid);
         std::optional<VersionUndoLink> current_version =
-            current_version_it != version_info->prev_version_.end() ? std::optional<VersionUndoLink>{current_version_it->second} : std::nullopt;
+            current_version_it != version_info_.end() ? std::optional<VersionUndoLink>{current_version_it->second} : std::nullopt;
         if (!check(current_version)) {
             return false;
         }
     }
 
     // 更新版本链接
-    auto& prev_version_map = version_info->prev_version_;
     if (prev_version.has_value()) {
         // 如果提供了版本链接，则更新或插入
-        prev_version_map[rid.slot_no] = *prev_version;
+        version_info_[table_rid] = *prev_version;
     } else {
         // 如果没有提供版本链接，则删除现有链接
-        prev_version_map.erase(rid.slot_no);
+        version_info_.erase(table_rid);
     }
     return true;  // 更新成功，返回 true
 }
 
 /** @brief 获取表堆元组的第一个撤销日志。 */
-std::optional<UndoLink> TransactionManager::GetUndoLink(Rid rid) {
-    std::optional<VersionUndoLink> version_link = GetVersionLink(rid);
+std::optional<UndoLink> TransactionManager::GetUndoLink(int fd, Rid rid) {
+    std::optional<VersionUndoLink> version_link = GetVersionLink(fd, rid);
     if (!version_link.has_value()) {
         return std::nullopt;  // 如果没有找到对应的版本链接，则返回 nullopt
     }
@@ -305,21 +304,33 @@ std::optional<UndoLink> TransactionManager::GetUndoLink(Rid rid) {
 }
 
 /** @brief 获取表堆元组的第一个撤销日志。 */
-std::optional<VersionUndoLink> TransactionManager::GetVersionLink(Rid rid) {
+std::optional<VersionUndoLink> TransactionManager::GetVersionLink(int fd, Rid rid) {
+    /**
+     * @brief 删除指定(fd, rid)的版本链，并返回原有UndoLink
+     */
     std::shared_lock<std::shared_mutex> lock(version_info_mutex_);
-    page_id_t page_id = rid.page_no;
-    auto it = version_info_.find(page_id);
+    TableRid table_rid{fd, rid};
+    auto it = version_info_.find(table_rid);
     if (it == version_info_.end()) {
         return std::nullopt;  // 如果没有找到对应的版本信息，则返回 nullopt
     }
-    auto& version_info = it->second;
-    lock.unlock();
-    std::shared_lock<std::shared_mutex> version_lock(version_info->mutex_);
-    auto prev_version_it = version_info->prev_version_.find(rid.slot_no);
-    if (prev_version_it == version_info->prev_version_.end()) {
-        return std::nullopt;  // 如果没有找到对应的前一个版本链接，则返回 nullopt
+    return it->second;  // 返回版本链接
+}
+
+/**
+ * @brief 删除指定(fd, rid)的版本链，并返回原有UndoLink
+ */
+UndoLink TransactionManager::DeleteUpdateVersionLink(const int& fd, Rid rid, Transaction* txn) {
+    auto version_link_opt = GetVersionLink(fd, rid);
+    UndoLink prev_undo_link;
+    if (version_link_opt.has_value()) {
+        prev_undo_link = version_link_opt->prev_;
+        // 删除版本链
+        UpdateVersionLink(fd, rid, std::nullopt, [](std::optional<VersionUndoLink>) { return true; });
+    } else {
+        prev_undo_link = UndoLink{};  // 返回默认空UndoLink
     }
-    return prev_version_it->second;  // 返回前一个版本链接
+    return prev_undo_link;
 }
 
 /** @brief 访问事务撤销日志缓冲区并获取撤销日志。如果事务不存在，返回 nullopt。
@@ -380,13 +391,13 @@ void TransactionManager::GarbageCollection() {
 }
 
 /** @brief MVCC: 检查写入冲突，支持快照隔离级别 */
-bool TransactionManager::CheckWriteConflict(Transaction* txn, const Rid& rid) {
+bool TransactionManager::CheckWriteConflict(Transaction* txn, int fd, const Rid& rid) {
     if (concurrency_mode_ != ConcurrencyMode::MVCC) {
         return true;  // 非MVCC模式下不检查写入冲突
     }
 
     // 获取元组的最新版本信息
-    auto [has_conflict, latest_txn_id] = GetLatestVersionInfo(rid);
+    auto [has_conflict, latest_txn_id] = GetLatestVersionInfo(fd, rid);
 
     if (!has_conflict) {
         return true;  // 没有冲突
@@ -439,8 +450,8 @@ timestamp_t TransactionManager::AssignCommitTimestamp(Transaction* txn) {
 }
 
 /** @brief MVCC: 获取元组的最新版本及其事务信息 */
-std::pair<bool, txn_id_t> TransactionManager::GetLatestVersionInfo(const Rid& rid) {
-    auto version_link = GetVersionLink(rid);
+std::pair<bool, txn_id_t> TransactionManager::GetLatestVersionInfo(int fd, const Rid& rid) {
+    auto version_link = GetVersionLink(fd, rid);
     if (!version_link.has_value()) {
         return {false, INVALID_TXN_ID};  // 没有版本信息
     }
@@ -479,38 +490,4 @@ bool TransactionManager::IsVersionVisible(Transaction* txn, timestamp_t version_
 
     // 如果版本时间戳小于等于当前事务的读时间戳，版本可见
     return version_ts <= txn->get_read_ts();
-}
-
-UndoLink TransactionManager::DeleteUpdateVersionLink(const int& fd, Rid rid, Transaction* txn) {
-    // 获取对应的版本信息
-    std::unique_lock<std::shared_mutex> lock(version_info_mutex_);
-    page_id_t page_id = rid.page_no;
-    auto it = version_info_.find(page_id);
-    if (it == version_info_.end()) {
-        return UndoLink{};
-    }
-    auto& version_info = it->second;
-    std::unique_lock<std::shared_mutex> version_lock(version_info->mutex_);
-    // 更新版本链接
-    auto& prev_version_map = version_info->prev_version_;
-    auto prev_version_it = prev_version_map.find(rid.slot_no);
-    if (prev_version_it != prev_version_map.end()) {
-        VersionUndoLink version_link = prev_version_it->second;
-        UndoLink undo_link = version_link.prev_;
-        while (undo_link.prev_txn_ == txn->get_transaction_id()) {
-            undo_link = GetUndoLog(undo_link).prev_version_;
-            if (!undo_link.IsValid()) {
-                break;
-            }
-        }
-        if (undo_link.IsValid()) {
-            // 如果撤销链接有效，则更新版本链接
-            prev_version_it->second.prev_ = undo_link;
-        } else {
-            // 如果撤销链接无效，则删除该版本链接
-            prev_version_map.erase(prev_version_it);
-        }
-        return undo_link;
-    }
-    return UndoLink{};
 }

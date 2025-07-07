@@ -239,7 +239,7 @@ class MvccIndexScanExecutor : public AbstractExecutor {
 
     bool IsVisible(const Rid &rid, Transaction *txn) {
         // 与MvccSelectExecutor中的实现相同
-        auto version_link = txn_mgr_->GetVersionLink(rid);
+        auto version_link = txn_mgr_->GetVersionLink(fh_->GetFd(), rid);
         if (!version_link.has_value()) {
             return true;
         }
@@ -278,7 +278,7 @@ class MvccIndexScanExecutor : public AbstractExecutor {
 
     std::unique_ptr<RmRecord> GetVisibleVersion(const Rid &rid, Transaction *txn) {
         // 与MvccSelectExecutor中的实现相同
-        auto version_link = txn_mgr_->GetVersionLink(rid);
+        auto version_link = txn_mgr_->GetVersionLink(fh_->GetFd(), rid);
 
         if (!version_link.has_value()) {
             return fh_->get_record(rid, context_);

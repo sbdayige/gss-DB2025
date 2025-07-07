@@ -73,7 +73,7 @@ class MvccDeleteExecutor : public AbstractExecutor {
             undo_log.txn_id = context_->txn_->get_transaction_id();
 
             // 设置前一个版本的链接信息
-            auto old_version_link = txn_mgr_->GetVersionLink(rid);
+            auto old_version_link = txn_mgr_->GetVersionLink(fh_->GetFd(), rid);
             if (old_version_link.has_value()) {
                 undo_log.prev_version_ = old_version_link->prev_;
             } else {
@@ -106,12 +106,12 @@ class MvccDeleteExecutor : public AbstractExecutor {
             new_link.prev_txn_ = context_->txn_->get_transaction_id();
             new_link.prev_log_idx_ = context_->txn_->GetUndoLogNum() - 1;
 
-            auto old_link = txn_mgr_->GetUndoLink(rid);
+            auto old_link = txn_mgr_->GetUndoLink(fh_->GetFd(), rid);
             VersionUndoLink version_link;
             version_link.prev_ = new_link;
             version_link.in_progress_ = true;
 
-            txn_mgr_->UpdateVersionLink(rid, version_link, [](std::optional<VersionUndoLink>) { return true; });
+            txn_mgr_->UpdateVersionLink(fh_->GetFd(), rid, version_link, [](std::optional<VersionUndoLink>) { return true; });
 
             MarkRecordAsDeleted(rid);
 
@@ -143,7 +143,7 @@ class MvccDeleteExecutor : public AbstractExecutor {
      * 使用与SELECT相同的MVCC可见性规则
      */
     bool IsRecordVisible(const Rid &rid) {
-        auto version_link = txn_mgr_->GetVersionLink(rid);
+        auto version_link = txn_mgr_->GetVersionLink(fh_->GetFd(), rid);
         if (!version_link.has_value()) {
             return true;  // 没有版本链，基础版本可见
         }
@@ -194,7 +194,7 @@ class MvccDeleteExecutor : public AbstractExecutor {
     }
 
     bool CheckWriteConflict(const Rid &rid) {
-        auto version_link = txn_mgr_->GetVersionLink(rid);
+        auto version_link = txn_mgr_->GetVersionLink(fh_->GetFd(), rid);
         if (!version_link.has_value()) {
             return true;  // 没有版本链，可以删除
         }
@@ -255,7 +255,7 @@ class MvccDeleteExecutor : public AbstractExecutor {
     bool IsVisible(const Rid &rid, Transaction *txn) {
         // DELETE操作需要看到所有记录（包括未提交的INSERT）以便进行写冲突检测
         // 这与SELECT的可见性规则不同，DELETE必须能看到所有存在的记录
-        auto version_link = txn_mgr_->GetVersionLink(rid);
+        auto version_link = txn_mgr_->GetVersionLink(fh_->GetFd(), rid);
         if (!version_link.has_value()) {
             return true;  // 没有版本链，记录可见
         }

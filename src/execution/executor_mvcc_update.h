@@ -163,7 +163,7 @@ class MvccUpdateExecutor : public AbstractExecutor {
      * 使用与SELECT相同的MVCC可见性规则
      */
     bool IsRecordVisible(const Rid &rid) {
-        auto version_link = txn_mgr_->GetVersionLink(rid);
+        auto version_link = txn_mgr_->GetVersionLink(fh_->GetFd(), rid);
         if (!version_link.has_value()) {
             return true;  // 没有版本链，基础版本可见
         }
@@ -214,7 +214,7 @@ class MvccUpdateExecutor : public AbstractExecutor {
     }
 
     bool CheckWriteConflict(const Rid &rid) {
-        auto version_link = txn_mgr_->GetVersionLink(rid);
+        auto version_link = txn_mgr_->GetVersionLink(fh_->GetFd(), rid);
         if (!version_link.has_value()) {
             return true;  // 没有版本链，可以更新
         }
@@ -267,7 +267,7 @@ class MvccUpdateExecutor : public AbstractExecutor {
     bool IsVisible(const Rid &rid, Transaction *txn) {
         // UPDATE操作需要看到所有记录（包括未提交的INSERT）以便进行写冲突检测
         // 这与SELECT的可见性规则不同，UPDATE必须能看到所有存在的记录
-        auto version_link = txn_mgr_->GetVersionLink(rid);
+        auto version_link = txn_mgr_->GetVersionLink(fh_->GetFd(), rid);
         if (!version_link.has_value()) {
             return true;  // 没有版本链，记录可见
         }

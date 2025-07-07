@@ -36,10 +36,12 @@ class MvccInsertExecutor : public AbstractExecutor {
         values_ = values;
         tab_name_ = tab_name;
         context_ = context;
-        fh_ = sm_manager_->fhs_.at(tab_name).get();
+        fh_ = sm_manager_->get_file_handle(tab_name);
+        std::cout << "[MvccInsertExecutor] Constructed for table " << tab_name << ", fd=" << fh_->GetFd() << std::endl;
     };
 
     std::unique_ptr<RmRecord> Next() override {
+        std::cout << "[MvccInsertExecutor::Next] Inserting into table " << tab_name_ << ", fd=" << fh_->GetFd() << std::endl;
         if (values_.size() != tab_.cols.size()) {
             throw InvalidValueCountError();
         }
@@ -157,7 +159,7 @@ class MvccInsertExecutor : public AbstractExecutor {
         version_link.prev_ = insert_link;
         version_link.in_progress_ = true;
 
-        txn_mgr_->UpdateVersionLink(rid_, version_link, [](std::optional<VersionUndoLink>) { return true; });
+        txn_mgr_->UpdateVersionLink(fh_->GetFd(), rid_, version_link, [](std::optional<VersionUndoLink>) { return true; });
 
         return nullptr;
     }
@@ -184,7 +186,7 @@ class MvccInsertExecutor : public AbstractExecutor {
 
     bool IsVisible(const Rid &rid, Transaction *txn) {
         // 检查记录版本是否对当前事务可见
-        auto version_link = txn_mgr_->GetVersionLink(rid);
+        auto version_link = txn_mgr_->GetVersionLink(fh_->GetFd(), rid);
         if (!version_link.has_value()) {
             // 没有版本链，说明是基础版本，可见
             return true;

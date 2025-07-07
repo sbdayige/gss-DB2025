@@ -42,7 +42,7 @@ class MvccSelectExecutor : public AbstractExecutor {
 
         tab_ = sm_manager_->db_.get_table(tab_name);
 
-        fh_ = sm_manager_->fhs_.at(tab_name).get();
+        fh_ = sm_manager_->get_file_handle(tab_name);
 
         conds_ = conds;
         cols_ = cols;
@@ -132,7 +132,6 @@ class MvccSelectExecutor : public AbstractExecutor {
                     scan.next();
                     continue;
                 }
-
                 if (EvaluateConditions(*visible_record, conds_, tab_)) {
                     // Debug: 打印记录内容
                     if (tab_.cols.size() >= 2) {
@@ -150,7 +149,7 @@ class MvccSelectExecutor : public AbstractExecutor {
     }
     bool IsVisible(const Rid &rid, Transaction *txn) {
         // 检查记录版本是否对当前事务可见
-        auto version_link = txn_mgr_->GetVersionLink(rid);
+        auto version_link = txn_mgr_->GetVersionLink(fh_->GetFd(), rid);
         if (!version_link.has_value()) {
             return true;  // 没有版本链，基础版本可见
         }
@@ -200,7 +199,7 @@ class MvccSelectExecutor : public AbstractExecutor {
     }
 
     std::unique_ptr<RmRecord> GetVisibleVersion(const Rid &rid, Transaction *txn) {
-        auto version_link = txn_mgr_->GetVersionLink(rid);
+        auto version_link = txn_mgr_->GetVersionLink(fh_->GetFd(), rid);
         if (!version_link.has_value()) {
             // 没有版本链，返回基础版本
             return fh_->get_record(rid, context_);
@@ -208,7 +207,7 @@ class MvccSelectExecutor : public AbstractExecutor {
         UndoLink link = version_link->prev_;
         while (true) {
             if (link.prev_txn_ == INVALID_TXN_ID) {
-                auto insert_version_link = txn_mgr_->GetVersionLink(rid);
+                auto insert_version_link = txn_mgr_->GetVersionLink(fh_->GetFd(), rid);
                 if (insert_version_link.has_value()) {
                     UndoLink insert_link = insert_version_link->prev_;
                     auto insert_undo_log = GetUndoLog(insert_link);
@@ -236,11 +235,6 @@ class MvccSelectExecutor : public AbstractExecutor {
                     return nullptr;
                 } else {
                     auto physical_record = fh_->get_record(rid, context_);
-                    // Debug: 检查物理记录内容
-                    if (physical_record && tab_.cols.size() >= 2) {
-                        int id_val = *(int *)(physical_record->data + tab_.cols[0].offset);
-                        int score_val = *(int *)(physical_record->data + tab_.cols[1].offset);
-                    }
                     return physical_record;
                 }
             }
