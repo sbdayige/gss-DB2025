@@ -435,12 +435,38 @@ void RecoveryManager::undo() {
 }
 
 /**
+ * @description: 确保指定页面存在，如果不存在则创建页面
+ */
+void RecoveryManager::ensure_page_exists(RmFileHandle* fh, int target_page_no) {
+    RmFileHdr file_hdr = fh->get_file_hdr();
+
+    // 如果目标页面已存在，直接返回
+    if (target_page_no < file_hdr.num_pages) {
+        return;
+    }
+
+    std::cout << "Creating missing pages from " << file_hdr.num_pages
+              << " to " << target_page_no << " for recovery" << std::endl;
+
+    // 依次创建页面直到目标页面
+    while (file_hdr.num_pages <= target_page_no) {
+        auto page_handle = fh->create_new_page_handle();
+        buffer_pool_manager_->unpin_page(page_handle.page->get_page_id(), true);
+        file_hdr = fh->get_file_hdr();  // 重新获取更新后的文件头
+        std::cout << "Created page " << (file_hdr.num_pages - 1) << " for recovery" << std::endl;
+    }
+}
+
+/**
  * @description: 重做插入操作
  */
 void RecoveryManager::redo_insert(InsertLogRecord* log_record) {
     try {
         std::string table_name(log_record->table_name_, log_record->table_name_size_);
         auto fh = sm_manager_->get_file_handle(table_name);
+
+        // 【新增】确保目标页面存在
+        ensure_page_exists(fh, log_record->rid_.page_no);
 
         // 检查记录是否已存在
         try {
@@ -454,13 +480,14 @@ void RecoveryManager::redo_insert(InsertLogRecord* log_record) {
             // 页面或记录不存在，继续插入
         }
 
-        // 必须在指定位置插入，不能使用自动分配（保持RID一致性）
+        // 按照原始RID插入
         fh->insert_record(log_record->rid_, log_record->insert_value_.data);
-        std::cout << "Successfully redid insert at RID: (" << log_record->rid_.page_no 
+        std::cout << "Successfully redid insert at RID=(" << log_record->rid_.page_no
                   << "," << log_record->rid_.slot_no << ")" << std::endl;
 
     } catch (const std::exception& e) {
         std::cout << "Failed to redo insert: " << e.what() << std::endl;
+        throw;  // 重新抛出异常，确保调用者知道恢复失败
     }
 }
 
@@ -482,14 +509,18 @@ void RecoveryManager::redo_delete(DeleteLogRecord* log_record) {
             }
         } catch (...) {
             // 记录不存在，跳过删除
+            std::cout << "Record does not exist for delete at rid=(" << log_record->rid_.page_no
+                      << "," << log_record->rid_.slot_no << "), skipping redo delete" << std::endl;
             return;
         }
 
         fh->delete_record(log_record->rid_, nullptr);
-        std::cout << "Successfully redid delete" << std::endl;
+        std::cout << "Successfully redid delete at RID=(" << log_record->rid_.page_no
+                  << "," << log_record->rid_.slot_no << ")" << std::endl;
 
     } catch (const std::exception& e) {
         std::cout << "Failed to redo delete: " << e.what() << std::endl;
+        throw;  // 重新抛出异常，确保调用者知道恢复失败
     }
 }
 
@@ -505,20 +536,26 @@ void RecoveryManager::redo_update(UpdateLogRecord* log_record) {
         try {
             bool exists = fh->is_record(log_record->rid_);
             if (!exists) {
-                std::cout << "Record does not exist for update at rid=(" << log_record->rid_.page_no
-                          << "," << log_record->rid_.slot_no << "), skipping redo update" << std::endl;
-                return;
+                std::cout << "CRITICAL ERROR: Record does not exist for update at rid=("
+                          << log_record->rid_.page_no << "," << log_record->rid_.slot_no
+                          << ") during redo. Database state inconsistent." << std::endl;
+                throw std::runtime_error("RID consistency violation during redo_update");
             }
         } catch (...) {
-            // 记录不存在，跳过更新
-            return;
+            // 记录不存在，这是严重错误
+            std::cout << "CRITICAL ERROR: Cannot access record for update at rid=("
+                      << log_record->rid_.page_no << "," << log_record->rid_.slot_no
+                      << ") during redo" << std::endl;
+            throw std::runtime_error("RID consistency violation during redo_update");
         }
 
         fh->update_record(log_record->rid_, log_record->after_value_.data, nullptr);
-        std::cout << "Successfully redid update" << std::endl;
+        std::cout << "Successfully redid update at RID=(" << log_record->rid_.page_no
+                  << "," << log_record->rid_.slot_no << ")" << std::endl;
 
     } catch (const std::exception& e) {
         std::cout << "Failed to redo update: " << e.what() << std::endl;
+        throw;  // 重新抛出异常，确保调用者知道恢复失败
     }
 }
 
@@ -540,14 +577,18 @@ void RecoveryManager::undo_insert(InsertLogRecord* log_record) {
             }
         } catch (...) {
             // 记录不存在，已经被删除
+            std::cout << "Record does not exist for undo insert at rid=(" << log_record->rid_.page_no
+                      << "," << log_record->rid_.slot_no << "), already removed" << std::endl;
             return;
         }
 
         fh->delete_record(log_record->rid_, nullptr);
-        std::cout << "Successfully undid insert by deleting record" << std::endl;
+        std::cout << "Successfully undid insert by deleting record at RID=("
+                  << log_record->rid_.page_no << "," << log_record->rid_.slot_no << ")" << std::endl;
 
     } catch (const std::exception& e) {
         std::cout << "Failed to undo insert: " << e.what() << std::endl;
+        throw;  // 重新抛出异常，确保调用者知道恢复失败
     }
 }
 
@@ -558,6 +599,9 @@ void RecoveryManager::undo_delete(DeleteLogRecord* log_record) {
     try {
         std::string table_name(log_record->table_name_, log_record->table_name_size_);
         auto fh = sm_manager_->get_file_handle(table_name);
+
+        // 【新增】确保目标页面存在
+        ensure_page_exists(fh, log_record->rid_.page_no);
 
         // 检查记录是否已存在
         try {
@@ -571,13 +615,14 @@ void RecoveryManager::undo_delete(DeleteLogRecord* log_record) {
             // 记录不存在，继续插入
         }
 
-        // 必须在原位置重新插入，不能使用自动分配（保持RID一致性）
+        // 按照原始RID重新插入
         fh->insert_record(log_record->rid_, log_record->delete_value_.data);
-        std::cout << "Successfully undid delete by reinserting record at RID: (" 
+        std::cout << "Successfully undid delete by reinserting record at RID=("
                   << log_record->rid_.page_no << "," << log_record->rid_.slot_no << ")" << std::endl;
 
     } catch (const std::exception& e) {
         std::cout << "Failed to undo delete: " << e.what() << std::endl;
+        throw;  // 重新抛出异常，确保调用者知道恢复失败
     }
 }
 
@@ -593,19 +638,25 @@ void RecoveryManager::undo_update(UpdateLogRecord* log_record) {
         try {
             bool exists = fh->is_record(log_record->rid_);
             if (!exists) {
-                std::cout << "Record does not exist for undo update at rid=(" << log_record->rid_.page_no
-                          << "," << log_record->rid_.slot_no << ")" << std::endl;
-                return;
+                std::cout << "CRITICAL ERROR: Record does not exist for undo update at rid=("
+                          << log_record->rid_.page_no << "," << log_record->rid_.slot_no
+                          << ") during undo. Database state inconsistent." << std::endl;
+                throw std::runtime_error("RID consistency violation during undo_update");
             }
         } catch (...) {
-            // 记录不存在，跳过
-            return;
+            // 记录不存在，这是严重错误
+            std::cout << "CRITICAL ERROR: Cannot access record for undo update at rid=("
+                      << log_record->rid_.page_no << "," << log_record->rid_.slot_no
+                      << ") during undo" << std::endl;
+            throw std::runtime_error("RID consistency violation during undo_update");
         }
 
         fh->update_record(log_record->rid_, log_record->before_value_.data, nullptr);
-        std::cout << "Successfully undid update by restoring old value" << std::endl;
+        std::cout << "Successfully undid update by restoring old value at RID=("
+                  << log_record->rid_.page_no << "," << log_record->rid_.slot_no << ")" << std::endl;
 
     } catch (const std::exception& e) {
         std::cout << "Failed to undo update: " << e.what() << std::endl;
+        throw;  // 重新抛出异常，确保调用者知道恢复失败
     }
 }

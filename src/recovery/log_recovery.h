@@ -38,6 +38,8 @@ public:
     
 private:
     // 恢复相关的辅助方法
+    void ensure_page_exists(RmFileHandle* fh, int target_page_no);
+    
     void redo_insert(InsertLogRecord* log_record);
     void redo_delete(DeleteLogRecord* log_record);
     void redo_update(UpdateLogRecord* log_record);
