@@ -61,6 +61,7 @@ void RecoveryManager::analyze() {
 
     int logs_processed = 0;
     int file_offset = 0;
+
     // 分批读取日志文件
     while (file_offset < total_file_size) {
         // 计算本次读取的数据量
@@ -183,7 +184,7 @@ void RecoveryManager::redo() {
 
     int operations_redone = 0;
     int file_offset = 0;
-
+    std::cout << "Log file size: " << total_file_size << " bytes" << std::endl;
     // 分批读取日志文件进行重做
     while (file_offset < total_file_size) {
         int bytes_to_read = std::min(LOG_BUFFER_SIZE, total_file_size - file_offset);
@@ -228,6 +229,11 @@ void RecoveryManager::redo() {
                     case LogType::INSERT: {
                         InsertLogRecord insert_log;
                         insert_log.deserialize(log_buffer + current_offset);
+                        std::string table_name = insert_log.table_name_;
+                        if (sm_manager_->fhs_.find(table_name) == sm_manager_->fhs_.end()) {
+                            std::cout << "Table " << table_name << " not found, skipping redo" << std::endl;
+                            return;
+                        }
                         redo_insert(&insert_log);
                         operations_redone++;
                         break;
@@ -235,6 +241,11 @@ void RecoveryManager::redo() {
                     case LogType::DELETE: {
                         DeleteLogRecord delete_log;
                         delete_log.deserialize(log_buffer + current_offset);
+                        std::string table_name = delete_log.table_name_;
+                        if (sm_manager_->fhs_.find(table_name) == sm_manager_->fhs_.end()) {
+                            std::cout << "Table " << table_name << " not found, skipping redo" << std::endl;
+                            return;
+                        }
                         redo_delete(&delete_log);
                         operations_redone++;
                         break;
@@ -242,6 +253,11 @@ void RecoveryManager::redo() {
                     case LogType::UPDATE: {
                         UpdateLogRecord update_log;
                         update_log.deserialize(log_buffer + current_offset);
+                        std::string table_name = update_log.table_name_;
+                        if (sm_manager_->fhs_.find(table_name) == sm_manager_->fhs_.end()) {
+                            std::cout << "Table " << table_name << " not found, skipping redo" << std::endl;
+                            return;
+                        }
                         redo_update(&update_log);
                         operations_redone++;
                         break;
@@ -537,6 +553,7 @@ void RecoveryManager::undo_update(UpdateLogRecord* log_record) {
                 throw std::runtime_error("RID consistency violation during undo_update");
             }
         } catch (...) {
+            // 记录不存在，这是严重错误
             throw std::runtime_error("RID consistency violation during undo_update");
         }
 
