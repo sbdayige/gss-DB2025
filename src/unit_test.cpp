@@ -28,7 +28,7 @@ See the Mulan PSL v2 for more details. */
 #include <random>
 #include <set>
 #include <string>
-#include <thread>  // NOLINT
+#include <thread>
 #include <unordered_map>
 #include <vector>
 
