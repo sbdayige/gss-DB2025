@@ -7,7 +7,11 @@ THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND,
 EITHER EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT,
 MERCHANTABILITY OR FIT FOR A PARTICULAR PURPOSE.
 See the Mulan PSL v2 for more details. */
-
+#define LOG_ENABLE 1
+#define logINFO(fmt, ...)                                          \
+    do {                                                           \
+        if (LOG_ENABLE) printf("[INFO] " fmt "\n", ##__VA_ARGS__); \
+    } while (0)
 #pragma once
 
 #include <iostream>
@@ -63,13 +67,13 @@ class LogRecord {
     }
     // used for debug
     virtual void format_print() {
-        std::cout << "log type in father_function: " << LogTypeStr[log_type_] << "\n";
-        printf("Print Log Record:\n");
-        printf("log_type_: %s\n", LogTypeStr[log_type_].c_str());
-        printf("lsn: %d\n", lsn_);
-        printf("log_tot_len: %d\n", log_tot_len_);
-        printf("log_tid: %d\n", log_tid_);
-        printf("prev_lsn: %d\n", prev_lsn_);
+        logINFO("log type in father_function: %s", LogTypeStr[log_type_].c_str());
+        logINFO("Print Log Record:");
+        logINFO("log_type_: %s", LogTypeStr[log_type_].c_str());
+        logINFO("lsn: %d", lsn_);
+        logINFO("log_tot_len: %d", log_tot_len_);
+        logINFO("log_tid: %d", log_tid_);
+        logINFO("prev_lsn: %d", prev_lsn_);
     }
 };
 
@@ -94,7 +98,7 @@ class BeginLogRecord : public LogRecord {
         LogRecord::deserialize(src);
     }
     virtual void format_print() override {
-        std::cout << "log type in son_function: " << LogTypeStr[log_type_] << "\n";
+        logINFO("log type in son_function: %s", LogTypeStr[log_type_].c_str());
         LogRecord::format_print();
     }
 };
@@ -125,7 +129,7 @@ class CommitLogRecord : public LogRecord {
     }
 
     void format_print() override {
-        std::cout << "log type in commit_function: " << LogTypeStr[log_type_] << "\n";
+        logINFO("log type in commit_function: %s", LogTypeStr[log_type_].c_str());
         LogRecord::format_print();
     }
 };
@@ -156,7 +160,7 @@ class AbortLogRecord : public LogRecord {
     }
 
     void format_print() override {
-        std::cout << "log type in abort_function: " << LogTypeStr[log_type_] << "\n";
+        logINFO("log type in abort_function: %s", LogTypeStr[log_type_].c_str());
         LogRecord::format_print();
     }
 };
@@ -183,7 +187,7 @@ class CheckpointLogRecord : public LogRecord {
     }
 
     void format_print() override {
-        std::cout << "log type in checkpoint_function: " << LogTypeStr[log_type_] << "\n";
+        logINFO("log type in checkpoint_function: %s", LogTypeStr[log_type_].c_str());
         LogRecord::format_print();
     }
 };
@@ -239,11 +243,11 @@ class InsertLogRecord : public LogRecord {
         memcpy(table_name_, src + offset, table_name_size_);
     }
     void format_print() override {
-        printf("insert record\n");
+        logINFO("insert record");
         LogRecord::format_print();
-        printf("insert_value: %s\n", insert_value_.data);
-        printf("insert rid: %d, %d\n", rid_.page_no, rid_.slot_no);
-        printf("table name: %s\n", table_name_);
+        logINFO("insert_value: %s", insert_value_.data);
+        logINFO("insert rid: %d, %d", rid_.page_no, rid_.slot_no);
+        logINFO("table name: %s", table_name_);
     }
 
     RmRecord insert_value_;   // 插入的记录
@@ -306,11 +310,11 @@ class DeleteLogRecord : public LogRecord {
         memcpy(table_name_, src + offset, table_name_size_);
     }
     void format_print() override {
-        printf("delete record\n");
+        logINFO("delete record");
         LogRecord::format_print();
-        printf("delete_value: %s\n", delete_value_.data);
-        printf("delete rid: %d, %d\n", rid_.page_no, rid_.slot_no);
-        printf("table name: %s\n", table_name_);
+        logINFO("delete_value: %s", delete_value_.data);
+        logINFO("delete rid: %d, %d", rid_.page_no, rid_.slot_no);
+        logINFO("table name: %s", table_name_);
     }
 
     RmRecord delete_value_;   // 删除的记录
@@ -382,12 +386,12 @@ class UpdateLogRecord : public LogRecord {
         memcpy(table_name_, src + offset, table_name_size_);
     }
     void format_print() override {
-        printf("update record\n");
+        logINFO("update record");
         LogRecord::format_print();
-        printf("before_value: %s\n", before_value_.data);
-        printf("after_value: %s\n", after_value_.data);
-        printf("update rid: %d, %d\n", rid_.page_no, rid_.slot_no);
-        printf("table name: %s\n", table_name_);
+        logINFO("before_value: %s", before_value_.data);
+        logINFO("after_value: %s", after_value_.data);
+        logINFO("update rid: %d, %d", rid_.page_no, rid_.slot_no);
+        logINFO("table name: %s", table_name_);
     }
 
     RmRecord before_value_;   // 更新前的记录
@@ -419,7 +423,10 @@ class LogBuffer {
 /* 日志管理器，负责把日志写入日志缓冲区，以及把日志缓冲区中的内容写入磁盘中 */
 class LogManager {
    public:
-    LogManager(DiskManager* disk_manager) { disk_manager_ = disk_manager; persist_lsn_ = INVALID_LSN; }
+    LogManager(DiskManager* disk_manager) {
+        disk_manager_ = disk_manager;
+        persist_lsn_ = INVALID_LSN;
+    }
 
     lsn_t add_log_to_buffer(LogRecord* log_record);
     void flush_log_to_disk();
@@ -430,7 +437,7 @@ class LogManager {
 
    private:
     void flush_log_to_disk_internal();  // 内部刷盘方法，调用时已持有锁
-    
+
     std::atomic<lsn_t> global_lsn_{0};  // 全局lsn，递增，用于为每条记录分发lsn
     std::mutex latch_;                  // 用于对log_buffer_的互斥访问
     LogBuffer log_buffer_;              // 日志缓冲区
