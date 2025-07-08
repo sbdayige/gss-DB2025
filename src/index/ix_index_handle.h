@@ -68,6 +68,9 @@ class IxNodeHandle {
         keys = page->get_data() + sizeof(IxPageHdr);
         rids = reinterpret_cast<Rid *>(keys + file_hdr->keys_size_);
     }
+    
+    // 析构函数：IxNodeHandle对象本身不拥有page内存，所以不需要释放
+    ~IxNodeHandle() = default;
 
     int get_size() { return page_hdr->num_key; }
 
@@ -173,6 +176,9 @@ class IxIndexHandle {
 
    public:
     IxIndexHandle(DiskManager *disk_manager, BufferPoolManager *buffer_pool_manager, int fd);
+    
+    // 析构函数，释放分配的内存
+    ~IxIndexHandle();
 
     // for search
     bool get_value(const char *key, std::vector<Rid> *result, Transaction *transaction);
