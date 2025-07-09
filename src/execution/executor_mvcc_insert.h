@@ -75,25 +75,6 @@ class MvccInsertExecutor : public AbstractExecutor {
             }
             memcpy(rec.data + col.offset, val.raw->data, col.len);
         }
-        for (auto &index : tab_.indexes) {
-            auto ih = sm_manager_->ihs_.at(sm_manager_->get_ix_manager()->get_index_name(tab_name_, index.cols)).get();
-
-            // 构造索引键
-            char *key = new char[index.col_tot_len];
-            int offset = 0;
-            for (int j = 0; j < index.col_num; ++j) {
-                memcpy(key + offset, rec.data + index.cols[j].offset, index.cols[j].len);
-                offset += index.cols[j].len;
-            }
-
-            // MVCC: 检查键是否已存在（考虑版本可见性）
-            if (CheckKeyExistsWithMvcc(ih, key, index.col_tot_len)) {
-                delete[] key;
-                throw InternalError("Duplicate key");
-            }
-
-            delete[] key;
-        }
 
         rid_ = fh_->insert_record(rec.data, context_);
 
@@ -167,58 +148,6 @@ class MvccInsertExecutor : public AbstractExecutor {
     Rid &rid() override { return rid_; }
 
    private:
-    bool CheckKeyExistsWithMvcc(IxIndexHandle *ih, char *key, int key_len) {
-        // MVCC版本：检查键是否在当前事务的快照中可见
-        std::vector<Rid> result;
-        bool found = ih->get_value(key, &result, context_->txn_);
-
-        if (!found) {
-            return false;  // 键不存在
-        }
-
-        for (auto &rid : result) {
-            if (IsVisible(rid, context_->txn_)) {
-                return true;
-            }
-        }
-        return false;
-    }
-
-    bool IsVisible(const Rid &rid, Transaction *txn) {
-        // 检查记录版本是否对当前事务可见
-        auto version_link = txn_mgr_->GetVersionLink(fh_->GetFd(), rid);
-        if (!version_link.has_value()) {
-            // 没有版本链，说明是基础版本，可见
-            return true;
-        }
-
-        // 检查版本链中的事务状态
-        auto prev_txn_id = version_link->prev_.prev_txn_;
-        if (prev_txn_id == INVALID_TXN_ID) {
-            return true;
-        }
-
-        if (prev_txn_id == txn->get_transaction_id()) {
-            // 自己的修改，可见
-            return true;
-        }
-
-        // 检查其他事务的状态
-        auto prev_txn = GetTransaction(prev_txn_id);
-        if (!prev_txn) {
-            // 事务不存在，可能已经提交或回滚
-            return true;
-        }
-
-        if (prev_txn->get_state() == TransactionState::COMMITTED) {
-            // 已提交的事务，检查时间戳
-            return prev_txn->get_commit_ts() < txn->get_read_ts();
-        }
-
-        // 未提交的事务，不可见
-        return false;
-    }
-
     Transaction *GetTransaction(txn_id_t txn_id) {
         return txn_mgr_->find_transaction(txn_id);
     }

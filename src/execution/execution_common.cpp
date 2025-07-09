@@ -11,6 +11,7 @@ See the Mulan PSL v2 for more details. */
 #include "execution_common.h"
 
 #include "../errors.h"
+#include "transaction/transaction_manager.h"
 
 Value GetColumnValue(const RmRecord& record, const ColMeta& col_meta) {
     Value value;
@@ -222,4 +223,87 @@ bool EvaluateConditions(const RmRecord& record, const std::vector<Condition>& co
         }
     }
     return true;
+}
+
+bool IsRecordVisible(const Rid& rid, RmFileHandle* fh, TransactionManager* txn_mgr, Context* context) {
+    auto version_link = txn_mgr->GetVersionLink(fh->GetFd(), rid);
+    if (!version_link.has_value()) {
+        return true;  // 没有版本链，基础版本可见
+    }
+
+    UndoLink link = version_link->prev_;
+    while (true) {
+        if (link.prev_txn_ == INVALID_TXN_ID) {
+            // 回溯到链尾，基础版本可见
+            return true;
+        }
+
+        auto undo_log_opt = txn_mgr->GetUndoLogOptional(link);
+        if (!undo_log_opt.has_value()) {
+            break;
+        }
+        auto& undo_log = undo_log_opt.value();
+
+        // 1. 本事务产生的版本
+        if (link.prev_txn_ == context->txn_->get_transaction_id()) {
+            if (undo_log.is_deleted_) {
+                return false;  // 本事务DELETE，记录不可见
+            } else {
+                return true;  // 本事务INSERT/UPDATE，记录可见
+            }
+        }
+
+        // 2. 其他事务产生的版本
+        Transaction* log_txn = txn_mgr->find_transaction(link.prev_txn_);
+        if (log_txn && log_txn->get_state() == TransactionState::COMMITTED) {
+            // 已提交版本：只有提交时间早于当前事务start_ts才可见
+            if (log_txn->get_commit_ts() < context->txn_->get_start_ts()) {
+                if (undo_log.is_deleted_) {
+                    return false;  // 已被删除，不可见
+                } else {
+                    return true;
+                }
+            }
+        }
+        // 回溯到前一个版本
+        link = undo_log.prev_version_;
+    }
+    return true;
+}
+
+bool CheckWriteConflict(const Rid& rid, RmFileHandle* fh, TransactionManager* txn_mgr, Context* context) {
+    auto version_link = txn_mgr->GetVersionLink(fh->GetFd(), rid);
+    if (!version_link.has_value()) {
+        return true;  // 没有版本链，可以操作
+    }
+    auto prev_txn_id = version_link->prev_.prev_txn_;
+    if (prev_txn_id == INVALID_TXN_ID) {
+        return true;  // 基础版本，可以操作
+    }
+    if (prev_txn_id == context->txn_->get_transaction_id()) {
+        return true;  // 自己的修改，可以操作
+    }
+    // 检查其他事务的状态
+    auto prev_txn = txn_mgr->find_transaction(prev_txn_id);
+    if (!prev_txn) {
+        return true;  // 事务不存在，可能已经提交
+    }
+    if (prev_txn->get_state() == TransactionState::COMMITTED) {
+        // 已提交的事务，检查时间戳冲突
+        if (prev_txn->get_commit_ts() > context->txn_->get_read_ts()) {
+            return false;  // 写入冲突
+        }
+        return true;
+    } else if (prev_txn->get_state() == TransactionState::ABORTED) {
+        return true;  // ABORTED的事务不应该造成冲突
+    }
+    return false;
+}
+
+std::unique_ptr<UndoLog> GetUndoLog(TransactionManager* txn_mgr_, const UndoLink& link) {
+    auto undo_log_opt = txn_mgr_->GetUndoLogOptional(link);
+    if (undo_log_opt.has_value()) {
+        return std::make_unique<UndoLog>(undo_log_opt.value());
+    }
+    return nullptr;
 }

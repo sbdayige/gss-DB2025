@@ -57,9 +57,13 @@ Value EvaluateExpr(const ExprTerm& expr_term, const RmRecord& record, const std:
  * @brief 评估单个WHERE条件
  * @param record 记录
  * @param cond 条件
- * @param tab_meta 表元数据
- * @return 条件是否满足
+/**
+ * @brief 检查记录对当前事务的可见性（MVCC规则）
  */
+bool IsRecordVisible(const Rid& rid, RmFileHandle* fh, TransactionManager* txn_mgr, Context* context);
+
+bool CheckWriteConflict(const Rid& rid, RmFileHandle* fh, TransactionManager* txn_mgr, Context* context);
+
 bool EvaluateCondition(const RmRecord& record, const Condition& cond, TabMeta& tab_meta);
 
 /**
@@ -70,3 +74,5 @@ bool EvaluateCondition(const RmRecord& record, const Condition& cond, TabMeta& t
  * @return 所有条件是否都满足
  */
 bool EvaluateConditions(const RmRecord& record, const std::vector<Condition>& conditions, TabMeta& tab_meta);
+
+std::unique_ptr<UndoLog> GetUndoLog(TransactionManager* txn_mgr, const UndoLink& link);
