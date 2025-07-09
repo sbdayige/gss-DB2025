@@ -68,7 +68,7 @@ class IxNodeHandle {
         keys = page->get_data() + sizeof(IxPageHdr);
         rids = reinterpret_cast<Rid *>(keys + file_hdr->keys_size_);
     }
-    
+
     // 析构函数：IxNodeHandle对象本身不拥有page内存，所以不需要释放
     ~IxNodeHandle() = default;
 
@@ -174,9 +174,15 @@ class IxIndexHandle {
     IxFileHdr *file_hdr_;  // 存了root_page，但其初始化为2（第0页存FILE_HDR_PAGE，第1页存LEAF_HEADER_PAGE）
     std::mutex root_latch_;
 
+    // 判断节点在当前操作下是否安全
+    static bool is_page_safe(IxNodeHandle *node, Operation operation);
+
+    // 释放事务锁集中的所有祖先节点锁
+    void unlock_ancestors(Transaction *transaction);
+
    public:
     IxIndexHandle(DiskManager *disk_manager, BufferPoolManager *buffer_pool_manager, int fd);
-    
+
     // 析构函数，释放分配的内存
     ~IxIndexHandle();
 
