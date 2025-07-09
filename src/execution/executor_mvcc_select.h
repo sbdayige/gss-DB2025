@@ -147,57 +147,6 @@ class MvccSelectExecutor : public AbstractExecutor {
             throw;
         }
     }
-    bool IsVisible(const Rid &rid, Transaction *txn) {
-        // 检查记录版本是否对当前事务可见
-        auto version_link = txn_mgr_->GetVersionLink(fh_->GetFd(), rid);
-        if (!version_link.has_value()) {
-            return true;  // 没有版本链，基础版本可见
-        }
-
-        // 检查版本链中的事务状态
-        auto prev_txn_id = version_link->prev_.prev_txn_;
-        if (prev_txn_id == INVALID_TXN_ID) {
-            return true;  // 没有前一个事务，基础版本可见
-        }
-
-        if (prev_txn_id == txn->get_transaction_id()) {
-            // 自己的修改，检查是否被删除
-            auto undo_log = GetUndoLog(version_link->prev_);
-            if (undo_log && undo_log->is_deleted_) {
-                return false;  // 被自己删除了，不可见
-            }
-            return true;  // 自己的修改可见
-        }
-
-        // 检查其他事务的状态
-        auto prev_txn = txn_mgr_->find_transaction(prev_txn_id);
-        if (!prev_txn) {
-            // 事务不存在，在无法确定提交时间戳的情况下保守处理
-            // 假设不可见，避免不可重复读问题
-            return false;
-        }
-
-        if (prev_txn->get_state() == TransactionState::COMMITTED) {
-            if (prev_txn->get_commit_ts() <= txn->get_read_ts()) {
-                // 在快照时间内，检查是否是删除操作
-                auto undo_log = GetUndoLog(version_link->prev_);
-                if (undo_log && undo_log->is_deleted_) {
-                    return false;  // 已被删除，不可见
-                }
-                return true;  // 已提交且在快照时间内，可见
-            } else {
-                // 提交时间戳大于读时间戳，不可见，需要查看更早版本
-                return false;
-            }
-        } else if (prev_txn->get_state() == TransactionState::ABORTED) {
-            // 已回滚的事务，不可见，需要查看更早版本
-            return false;
-        } else {
-            // 未提交的事务（DEFAULT状态），不可见，需要查看更早版本
-            return false;
-        }
-    }
-
     std::unique_ptr<RmRecord> GetVisibleVersion(const Rid &rid, Transaction *txn) {
         auto version_link = txn_mgr_->GetVersionLink(fh_->GetFd(), rid);
         if (!version_link.has_value()) {
@@ -210,7 +159,7 @@ class MvccSelectExecutor : public AbstractExecutor {
                 auto insert_version_link = txn_mgr_->GetVersionLink(fh_->GetFd(), rid);
                 if (insert_version_link.has_value()) {
                     UndoLink insert_link = insert_version_link->prev_;
-                    auto insert_undo_log = GetUndoLog(insert_link);
+                    auto insert_undo_log = GetUndoLog(txn_mgr_, insert_link);
                     if (insert_undo_log) {
                         Transaction *insert_txn = txn_mgr_->find_transaction(insert_link.prev_txn_);
                         if (insert_txn && insert_txn->get_state() == TransactionState::COMMITTED &&
@@ -222,7 +171,7 @@ class MvccSelectExecutor : public AbstractExecutor {
                 // 否则不可见
                 return nullptr;
             }
-            auto undo_log = GetUndoLog(link);
+            auto undo_log = GetUndoLog(txn_mgr_, link);
             if (!undo_log) {
                 break;
             }
@@ -263,14 +212,6 @@ class MvccSelectExecutor : public AbstractExecutor {
             link = undo_log->prev_version_;
         }
         // 没有可见版本
-        return nullptr;
-    }
-
-    std::unique_ptr<UndoLog> GetUndoLog(const UndoLink &link) {
-        auto undo_log_opt = txn_mgr_->GetUndoLogOptional(link);
-        if (undo_log_opt.has_value()) {
-            return std::make_unique<UndoLog>(undo_log_opt.value());
-        }
         return nullptr;
     }
 

@@ -52,12 +52,11 @@ class MvccDeleteExecutor : public AbstractExecutor {
     std::unique_ptr<RmRecord> Next() override {
         for (auto &rid : rids_) {
             // 1. 可见性检查：跳过对当前事务不可见的记录
-            if (!IsRecordVisible(rid)) {
+            if (!IsRecordVisible(rid, fh_, txn_mgr_, context_)) {
                 continue;
             }
-
             // 2. 写锁冲突检测：如果有写锁冲突则抛出异常
-            if (!CheckWriteConflict(rid)) {
+            if (!CheckWriteConflict(rid, fh_, txn_mgr_, context_)) {
                 throw TransactionAbortException(context_->txn_->get_transaction_id(), AbortReason::DEADLOCK_PREVENTION);
             }
 
@@ -113,8 +112,6 @@ class MvccDeleteExecutor : public AbstractExecutor {
 
             txn_mgr_->UpdateVersionLink(fh_->GetFd(), rid, version_link, [](std::optional<VersionUndoLink>) { return true; });
 
-            MarkRecordAsDeleted(rid);
-
             // WAL: 记录DELETE日志
             if (context_ && context_->txn_ && context_->log_mgr_) {
                 DeleteLogRecord log_record(context_->txn_->get_transaction_id(), delete_record, rid, tab_name_);
@@ -122,8 +119,6 @@ class MvccDeleteExecutor : public AbstractExecutor {
                 lsn_t lsn = context_->log_mgr_->add_log_to_buffer(&log_record);
                 context_->txn_->set_prev_lsn(lsn);
             }
-
-            DeleteFromIndices(delete_record, rid);
 
             WriteRecord *write_record = new WriteRecord(WType::DELETE_TUPLE, tab_name_, rid, delete_record);
             context_->txn_->append_write_record(write_record);
@@ -135,155 +130,5 @@ class MvccDeleteExecutor : public AbstractExecutor {
     Rid &rid() override {
         static Rid dummy_rid;
         return dummy_rid;
-    }
-
-   private:
-    /**
-     * 检查记录对当前事务的可见性
-     * 使用与SELECT相同的MVCC可见性规则
-     */
-    bool IsRecordVisible(const Rid &rid) {
-        auto version_link = txn_mgr_->GetVersionLink(fh_->GetFd(), rid);
-        if (!version_link.has_value()) {
-            return true;  // 没有版本链，基础版本可见
-        }
-
-        UndoLink link = version_link->prev_;
-        while (true) {
-            if (link.prev_txn_ == INVALID_TXN_ID) {
-                // 回溯到链尾，基础版本可见
-                return true;
-            }
-
-            auto undo_log_opt = txn_mgr_->GetUndoLogOptional(link);
-            if (!undo_log_opt.has_value()) {
-                break;
-            }
-            auto &undo_log = undo_log_opt.value();
-
-            // 1. 本事务产生的版本
-            if (link.prev_txn_ == context_->txn_->get_transaction_id()) {
-                if (undo_log.is_deleted_) {
-                    return false;  // 本事务DELETE，记录不可见
-                } else {
-                    return true;  // 本事务INSERT/UPDATE，记录可见
-                }
-            }
-
-            // 2. 其他事务产生的版本
-            Transaction *log_txn = txn_mgr_->find_transaction(link.prev_txn_);
-            if (log_txn && log_txn->get_state() == TransactionState::COMMITTED) {
-                // 已提交版本：只有提交时间早于当前事务start_ts才可见
-                if (log_txn->get_commit_ts() < context_->txn_->get_start_ts()) {
-                    if (undo_log.is_deleted_) {
-                        return false;  // 已被删除，不可见
-                    }
-                    return true;  // 可见已提交版本
-                } else {
-                    // 提交时间晚于start_ts，继续回溯
-                    link = undo_log.prev_version_;
-                    continue;
-                }
-            } else {
-                // 未提交或已回滚的事务，继续回溯
-                link = undo_log.prev_version_;
-                continue;
-            }
-        }
-        return false;  // 没有可见版本
-    }
-
-    bool CheckWriteConflict(const Rid &rid) {
-        auto version_link = txn_mgr_->GetVersionLink(fh_->GetFd(), rid);
-        if (!version_link.has_value()) {
-            return true;  // 没有版本链，可以删除
-        }
-
-        auto prev_txn_id = version_link->prev_.prev_txn_;
-        if (prev_txn_id == INVALID_TXN_ID) {
-            return true;  // 基础版本，可以删除
-        }
-
-        if (prev_txn_id == context_->txn_->get_transaction_id()) {
-            return true;  // 自己的修改，可以删除
-        }
-
-        // 检查其他事务的状态
-        auto prev_txn = txn_mgr_->find_transaction(prev_txn_id);
-        if (!prev_txn) {
-            return true;  // 事务不存在，可能已经提交
-        }
-
-        if (prev_txn->get_state() == TransactionState::COMMITTED) {
-            // 已提交的事务，检查时间戳冲突
-            if (prev_txn->get_commit_ts() > context_->txn_->get_read_ts()) {
-                return false;  // 写入冲突
-            }
-            return true;
-        } else if (prev_txn->get_state() == TransactionState::ABORTED) {
-            return true;  // ABORTED的事务不应该造成冲突
-        }
-        return false;
-    }
-
-    void MarkRecordAsDeleted(const Rid &rid) {
-        // 在MVCC中，DELETE操作不应该物理删除记录，只在版本链中标记删除
-        // 物理删除由垃圾回收器在事务提交后执行
-        // 这里不需要做任何操作，删除标记已经在版本链和UndoLog中设置了
-    }
-
-    void DeleteFromIndices(const RmRecord &record, const Rid &rid) {
-        // 从所有索引中删除记录
-        for (auto &index : tab_.indexes) {
-            auto ih = sm_manager_->ihs_.at(sm_manager_->get_ix_manager()->get_index_name(tab_name_, index.cols)).get();
-
-            // 构造索引键
-            char *key = new char[index.col_tot_len];
-            int offset = 0;
-            for (int j = 0; j < index.col_num; ++j) {
-                memcpy(key + offset, record.data + index.cols[j].offset, index.cols[j].len);
-                offset += index.cols[j].len;
-            }
-
-            // 从索引中删除
-            ih->delete_entry(key, context_->txn_);
-
-            delete[] key;
-        }
-    }
-
-    bool IsVisible(const Rid &rid, Transaction *txn) {
-        // DELETE操作需要看到所有记录（包括未提交的INSERT）以便进行写冲突检测
-        // 这与SELECT的可见性规则不同，DELETE必须能看到所有存在的记录
-        auto version_link = txn_mgr_->GetVersionLink(fh_->GetFd(), rid);
-        if (!version_link.has_value()) {
-            return true;  // 没有版本链，记录可见
-        }
-
-        auto prev_txn_id = version_link->prev_.prev_txn_;
-        if (prev_txn_id == INVALID_TXN_ID) {
-            return true;  // 无效事务ID，记录可见
-        }
-
-        if (prev_txn_id == txn->get_transaction_id()) {
-            // 自己的修改，检查是否被删除
-            auto undo_log = GetUndoLog(version_link->prev_);
-            if (undo_log && undo_log->is_deleted_) {
-                return false;  // 被自己删除了，不可见
-            }
-            return true;  // 自己的修改，可见
-        }
-
-        // 对于其他事务的修改（包括未提交的INSERT），DELETE操作都应该能看到
-        // 这样才能在CheckWriteConflict中正确检测写冲突并触发回滚
-        return true;
-    }
-
-    std::unique_ptr<UndoLog> GetUndoLog(const UndoLink &link) {
-        auto undo_log_opt = txn_mgr_->GetUndoLogOptional(link);
-        if (undo_log_opt.has_value()) {
-            return std::make_unique<UndoLog>(undo_log_opt.value());
-        }
-        return nullptr;
     }
 };

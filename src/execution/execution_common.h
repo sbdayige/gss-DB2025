@@ -14,10 +14,13 @@ See the Mulan PSL v2 for more details. */
 #include <cstring>
 
 #include "common/common.h"
+#include "common/context.h"
 #include "parser/ast.h"
 #include "record/rm_defs.h"
+#include "record/rm_file_handle.h"
 #include "system/sm_meta.h"
-
+#include "transaction/transaction.h"
+#include "transaction/transaction_manager.h"
 /**
  * @brief 表达式项结构，用于包装算术表达式
  */
@@ -57,9 +60,13 @@ Value EvaluateExpr(const ExprTerm& expr_term, const RmRecord& record, const std:
  * @brief 评估单个WHERE条件
  * @param record 记录
  * @param cond 条件
- * @param tab_meta 表元数据
- * @return 条件是否满足
+/**
+ * @brief 检查记录对当前事务的可见性（MVCC规则）
  */
+bool IsRecordVisible(const Rid& rid, RmFileHandle* fh, TransactionManager* txn_mgr, Context* context);
+
+bool CheckWriteConflict(const Rid& rid, RmFileHandle* fh, TransactionManager* txn_mgr, Context* context);
+
 bool EvaluateCondition(const RmRecord& record, const Condition& cond, TabMeta& tab_meta);
 
 /**
@@ -70,3 +77,5 @@ bool EvaluateCondition(const RmRecord& record, const Condition& cond, TabMeta& t
  * @return 所有条件是否都满足
  */
 bool EvaluateConditions(const RmRecord& record, const std::vector<Condition>& conditions, TabMeta& tab_meta);
+
+std::unique_ptr<UndoLog> GetUndoLog(TransactionManager* txn_mgr, const UndoLink& link);
