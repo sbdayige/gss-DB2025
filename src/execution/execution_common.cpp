@@ -11,7 +11,6 @@ See the Mulan PSL v2 for more details. */
 #include "execution_common.h"
 
 #include "../errors.h"
-#include "transaction/transaction_manager.h"
 
 Value GetColumnValue(const RmRecord& record, const ColMeta& col_meta) {
     Value value;
@@ -300,8 +299,8 @@ bool CheckWriteConflict(const Rid& rid, RmFileHandle* fh, TransactionManager* tx
     return false;
 }
 
-std::unique_ptr<UndoLog> GetUndoLog(TransactionManager* txn_mgr_, const UndoLink& link) {
-    auto undo_log_opt = txn_mgr_->GetUndoLogOptional(link);
+std::unique_ptr<UndoLog> GetUndoLog(TransactionManager* txn_mgr, const UndoLink& link) {
+    auto undo_log_opt = txn_mgr->GetUndoLogOptional(link);
     if (undo_log_opt.has_value()) {
         return std::make_unique<UndoLog>(undo_log_opt.value());
     }

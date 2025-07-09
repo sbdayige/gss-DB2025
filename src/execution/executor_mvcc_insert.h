@@ -37,11 +37,9 @@ class MvccInsertExecutor : public AbstractExecutor {
         tab_name_ = tab_name;
         context_ = context;
         fh_ = sm_manager_->get_file_handle(tab_name);
-        std::cout << "[MvccInsertExecutor] Constructed for table " << tab_name << ", fd=" << fh_->GetFd() << std::endl;
     };
 
     std::unique_ptr<RmRecord> Next() override {
-        std::cout << "[MvccInsertExecutor::Next] Inserting into table " << tab_name_ << ", fd=" << fh_->GetFd() << std::endl;
         if (values_.size() != tab_.cols.size()) {
             throw InvalidValueCountError();
         }
@@ -148,10 +146,6 @@ class MvccInsertExecutor : public AbstractExecutor {
     Rid &rid() override { return rid_; }
 
    private:
-    Transaction *GetTransaction(txn_id_t txn_id) {
-        return txn_mgr_->find_transaction(txn_id);
-    }
-
     void CheckGapLockConflict() {
         // 检查插入的记录是否与现有的间隙锁冲突
         int tab_fd = fh_->GetFd();

@@ -14,10 +14,13 @@ See the Mulan PSL v2 for more details. */
 #include <cstring>
 
 #include "common/common.h"
+#include "common/context.h"
 #include "parser/ast.h"
 #include "record/rm_defs.h"
+#include "record/rm_file_handle.h"
 #include "system/sm_meta.h"
-
+#include "transaction/transaction.h"
+#include "transaction/transaction_manager.h"
 /**
  * @brief 表达式项结构，用于包装算术表达式
  */
