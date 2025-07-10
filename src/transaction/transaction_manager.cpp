@@ -149,10 +149,8 @@ void TransactionManager::commit(Transaction* txn, LogManager* log_manager) {
     }
 
     // MVCC相关清理
-    if (concurrency_mode_ == ConcurrencyMode::MVCC) {
-        running_txns_.UpdateCommitTs(commit_ts);      // 更新水位线的提交时间戳
-        running_txns_.RemoveTxn(txn->get_read_ts());  // 从水位线中移除事务
-    }
+    running_txns_.UpdateCommitTs(commit_ts);      // 更新水位线的提交时间戳
+    running_txns_.RemoveTxn(txn->get_read_ts());  // 从水位线中移除事务
 }
 
 /**

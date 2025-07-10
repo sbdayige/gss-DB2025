@@ -76,26 +76,12 @@ class MvccInsertExecutor : public AbstractExecutor {
 
         rid_ = fh_->insert_record(rec.data, context_);
 
-        // WAL: 记录INSERT日志
+                // WAL: 记录INSERT日志
         if (context_ && context_->txn_ && context_->log_mgr_) {
             InsertLogRecord log_record(context_->txn_->get_transaction_id(), rec, rid_, tab_name_);
             log_record.prev_lsn_ = context_->txn_->get_prev_lsn();
             lsn_t lsn = context_->log_mgr_->add_log_to_buffer(&log_record);
             context_->txn_->set_prev_lsn(lsn);
-        }
-
-        for (auto &index : tab_.indexes) {
-            auto ih = sm_manager_->ihs_.at(sm_manager_->get_ix_manager()->get_index_name(tab_name_, index.cols)).get();
-
-            char *key = new char[index.col_tot_len];
-            int offset = 0;
-            for (int j = 0; j < index.col_num; ++j) {
-                memcpy(key + offset, rec.data + index.cols[j].offset, index.cols[j].len);
-                offset += index.cols[j].len;
-            }
-
-            ih->insert_entry(key, rid_, context_->txn_);
-            delete[] key;
         }
 
         WriteRecord *write_record = new WriteRecord(WType::INSERT_TUPLE, tab_name_, rid_, rec);

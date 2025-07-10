@@ -275,21 +275,12 @@ class Portal {
             // 扫描计划转换 - MVCC版本
             // ===============================
             if (x->tag == T_SeqScan) {
-                try {
-                    auto executor = std::make_unique<MvccSelectExecutor>(sm_manager_, txn_mgr_, x->tab_name_, x->conds_, x->cols_, context);
-                    return executor;
-                } catch (const std::exception& e) {
-                    throw;
-                }
+                auto executor = std::make_unique<MvccSelectExecutor>(sm_manager_, txn_mgr_, x->tab_name_, x->conds_, x->cols_, context);
+                return executor;
             } else {
-                try {
-                    // 需要根据index_col_names生成index_name
-                    std::string index_name = sm_manager_->get_ix_manager()->get_index_name(x->tab_name_, x->index_col_names_);
-                    auto executor = std::make_unique<MvccIndexScanExecutor>(sm_manager_, txn_mgr_, x->tab_name_, x->conds_, x->cols_, index_name, context);
-                    return executor;
-                } catch (const std::exception& e) {
-                    throw;
-                }
+                std::string index_name = sm_manager_->get_ix_manager()->get_index_name(x->tab_name_, x->index_col_names_);
+                auto executor = std::make_unique<MvccIndexScanExecutor>(sm_manager_, txn_mgr_, x->tab_name_, x->conds_, x->cols_, index_name, context);
+                return executor;
             }
         } else if (auto x = std::dynamic_pointer_cast<JoinPlan>(plan)) {
             std::unique_ptr<AbstractExecutor> left = convert_plan_executor(x->left_, context);
