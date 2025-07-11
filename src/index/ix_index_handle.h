@@ -195,9 +195,22 @@ class IxIndexHandle {
     // for insert
     page_id_t insert_entry(const char *key, const Rid &value, Transaction *transaction);
 
+    page_id_t insert_entry_force(const char *key, const Rid &value, Transaction *transaction);
+
     IxNodeHandle *split(IxNodeHandle *node);
 
     void insert_into_parent(IxNodeHandle *old_node, const char *key, IxNodeHandle *new_node, Transaction *transaction);
+
+    /**
+     * @brief 从B+树中删除指定键和RID对
+     * @param key 要删除的键值
+     * @param rid 要删除的特定RID
+     * @param transaction 事务指针
+     * @return bool
+     *         - true：成功删除目标RID
+     *         - false：未找到目标键值对或RID
+     */
+    bool delete_entry_with_rid(const char *key, const Rid &rid, Transaction *transaction);
 
     // for delete
     bool delete_entry(const char *key, Transaction *transaction);
@@ -228,6 +241,48 @@ class IxIndexHandle {
     // for get/create node
     IxNodeHandle *fetch_node(int page_no) const;
 
+    /**
+     * @brief 创建新的溢出页
+     * @return 新创建的溢出页页号
+     * @note 溢出页用于存储重复键值对应的多个RID
+     */
+    page_id_t create_overflow_page();
+
+    /**
+     * @brief 向溢出页中插入RID
+     * @param value 要插入的RID
+     * @param page_no 溢出页页号
+     * @return 是否插入成功
+     * @note 如果当前溢出页已满，会自动链接到新的溢出页
+     */
+    bool insert_into_overflow_page(const Rid &value, page_id_t page_no);
+
+    /**
+     * @brief 从溢出页中删除RID，并自动清理空页面
+     * @param value 要删除的RID
+     * @param page_no 溢出页页号
+     * @param prev_page_no 前一个溢出页的页号，用于维护链表
+     * @return 删除后的下一个溢出页页号（如果当前页被删除）或当前页号
+     */
+    page_id_t remove_from_overflow_page(const Rid &value, page_id_t page_no, page_id_t prev_page_no);
+
+    /**
+     * @brief 获取溢出页中的所有RID
+     * @param page_no 溢出页页号
+     * @param result 存储结果的向量
+     * @note 会遍历整个溢出页链表
+     */
+    void get_all_rids_from_overflow_page(page_id_t page_no, std::vector<Rid> *result) const;
+
+    /**
+     * @brief 释放溢出页链表
+     * @param page_no 溢出页链表的起始页号
+     * @note 释放从指定页开始的整个溢出页链表
+     */
+    void release_overflow_page_chain(page_id_t page_no);
+
+    page_id_t insert_entry_force(const char *key, const Rid &value, Transaction *transaction);
+
     IxNodeHandle *create_node();
 
     // for maintain data structure
@@ -238,6 +293,8 @@ class IxIndexHandle {
     void release_node_handle(IxNodeHandle &node);
 
     void maintain_child(IxNodeHandle *node, int child_idx);
+
+    void UnlockAncestors(Transaction *transaction);
 
     // for index test
     Rid get_rid(const Iid &iid) const;

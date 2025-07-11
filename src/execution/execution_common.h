@@ -15,6 +15,7 @@ See the Mulan PSL v2 for more details. */
 
 #include "common/common.h"
 #include "common/context.h"
+#include "index/ix_index_handle.h"
 #include "parser/ast.h"
 #include "record/rm_defs.h"
 #include "record/rm_file_handle.h"
@@ -79,3 +80,8 @@ bool EvaluateCondition(const RmRecord& record, const Condition& cond, TabMeta& t
 bool EvaluateConditions(const RmRecord& record, const std::vector<Condition>& conditions, TabMeta& tab_meta);
 
 std::unique_ptr<UndoLog> GetUndoLog(TransactionManager* txn_mgr, const UndoLink& link);
+
+bool mvcc_insert_index(const TabMeta& tab_, std::unique_ptr<RmRecord>& rec, Rid rid, Context* context_,
+                       TransactionManager* txn_mgr, SmManager* sm_manager);
+
+bool check_conflict(Transaction* txn, TransactionManager* txn_mgr, RmFileHandle* fh, const Rid& rid);
