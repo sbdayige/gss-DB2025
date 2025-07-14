@@ -64,27 +64,33 @@ class MvccInsertExecutor : public AbstractExecutor {
                 throw StringOverflowError();
             }
         }
-        RmRecord rec(fh_->get_file_hdr().record_size);
+        std::unique_ptr<RmRecord> rec = std::make_unique<RmRecord>(fh_->get_file_hdr().record_size);
         for (size_t i = 0; i < values_.size(); ++i) {
             auto &col = tab_.cols[i];
             auto &val = values_[i];
             if (!val.raw) {  // 只在未初始化时才调用init_raw
                 val.init_raw(col.len);
             }
-            memcpy(rec.data + col.offset, val.raw->data, col.len);
+            memcpy(rec->data + col.offset, val.raw->data, col.len);
         }
 
-        rid_ = fh_->insert_record(rec.data, context_);
+        rid_ = fh_->insert_record(rec->data, context_);
 
-                // WAL: 记录INSERT日志
+        if (!mvcc_insert_index(tab_, rec, rid_, context_, txn_mgr_, sm_manager_)) {
+            fh_->delete_record(rid_, context_);
+            txn_mgr_->abort(context_, context_->log_mgr_);
+            throw RMDBError("Failed to insert into index, rolled back record insertion at " + getType());
+        }
+
+        // WAL: 记录INSERT日志
         if (context_ && context_->txn_ && context_->log_mgr_) {
-            InsertLogRecord log_record(context_->txn_->get_transaction_id(), rec, rid_, tab_name_);
+            InsertLogRecord log_record(context_->txn_->get_transaction_id(), *rec, rid_, tab_name_);
             log_record.prev_lsn_ = context_->txn_->get_prev_lsn();
             lsn_t lsn = context_->log_mgr_->add_log_to_buffer(&log_record);
             context_->txn_->set_prev_lsn(lsn);
         }
 
-        WriteRecord *write_record = new WriteRecord(WType::INSERT_TUPLE, tab_name_, rid_, rec);
+        WriteRecord *write_record = new WriteRecord(WType::INSERT_TUPLE, tab_name_, rid_, *rec);
         context_->txn_->append_write_record(write_record);
 
         // MVCC: 创建版本链
@@ -95,7 +101,7 @@ class MvccInsertExecutor : public AbstractExecutor {
         // 创建UndoLog（INSERT操作的UndoLog记录被插入的记录）
         UndoLog undo_log;
         undo_log.is_deleted_ = false;  // INSERT操作，撤销时需要删除
-        undo_log.tuple_test_ = new RmRecord(rec);
+        undo_log.tuple_test_ = rec.get();
         // 分配全局唯一递增的写时间戳
         undo_log.ts_ = txn_mgr_->get_next_timestamp();
         undo_log.txn_id = context_->txn_->get_transaction_id();
@@ -106,11 +112,11 @@ class MvccInsertExecutor : public AbstractExecutor {
         for (size_t i = 0; i < tab_.cols.size(); ++i) {
             Value val;
             if (tab_.cols[i].type == TYPE_INT) {
-                val.set_int(*(int *)(rec.data + tab_.cols[i].offset));
+                val.set_int(*(int *)(rec->data + tab_.cols[i].offset));
             } else if (tab_.cols[i].type == TYPE_FLOAT) {
-                val.set_float(*(float *)(rec.data + tab_.cols[i].offset));
+                val.set_float(*(float *)(rec->data + tab_.cols[i].offset));
             } else if (tab_.cols[i].type == TYPE_STRING) {
-                std::string str_val(rec.data + tab_.cols[i].offset, tab_.cols[i].len);
+                std::string str_val(rec->data + tab_.cols[i].offset, tab_.cols[i].len);
                 str_val = str_val.c_str();
                 val.set_str(str_val);
             }

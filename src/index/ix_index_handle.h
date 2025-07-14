@@ -246,7 +246,7 @@ class IxIndexHandle {
      * @return 新创建的溢出页页号
      * @note 溢出页用于存储重复键值对应的多个RID
      */
-    page_id_t create_overflow_page();
+    page_id_t create_page();
 
     /**
      * @brief 向溢出页中插入RID
@@ -255,7 +255,7 @@ class IxIndexHandle {
      * @return 是否插入成功
      * @note 如果当前溢出页已满，会自动链接到新的溢出页
      */
-    bool insert_into_overflow_page(const Rid &value, page_id_t page_no);
+    bool insert_into_page(const Rid &value, page_id_t page_no);
 
     /**
      * @brief 从溢出页中删除RID，并自动清理空页面
@@ -264,7 +264,7 @@ class IxIndexHandle {
      * @param prev_page_no 前一个溢出页的页号，用于维护链表
      * @return 删除后的下一个溢出页页号（如果当前页被删除）或当前页号
      */
-    page_id_t remove_from_overflow_page(const Rid &value, page_id_t page_no, page_id_t prev_page_no);
+    page_id_t remove_from_page(const Rid &value, page_id_t page_no, page_id_t prev_page_no);
 
     /**
      * @brief 获取溢出页中的所有RID
@@ -272,16 +272,14 @@ class IxIndexHandle {
      * @param result 存储结果的向量
      * @note 会遍历整个溢出页链表
      */
-    void get_all_rids_from_overflow_page(page_id_t page_no, std::vector<Rid> *result) const;
+    void get_all_rids_from_page(page_id_t page_no, std::vector<Rid> *result) const;
 
     /**
      * @brief 释放溢出页链表
      * @param page_no 溢出页链表的起始页号
      * @note 释放从指定页开始的整个溢出页链表
      */
-    void release_overflow_page_chain(page_id_t page_no);
-
-    page_id_t insert_entry_force(const char *key, const Rid &value, Transaction *transaction);
+    void release_page_chain(page_id_t page_no);
 
     IxNodeHandle *create_node();
 

@@ -431,6 +431,24 @@ void SmManager::drop_index(const std::string& tab_name, const std::vector<ColMet
     drop_index(tab_name, col_names, context);
 }
 
+bool SmManager::delete_index_with_rid(const std::string& tab_name, RmRecord& rec, Rid rid, Transaction* txn) {
+    TabMeta& tab_ = db_.get_table(tab_name);
+    // 遍历表的所有索引
+    for (size_t i = 0; i < tab_.indexes.size(); ++i) {
+        auto& index = tab_.indexes[i];
+        auto ih = ihs_.at(get_ix_manager()->get_index_name(tab_.name, index.cols)).get();
+        auto key = std::make_unique<char[]>(index.col_tot_len);
+        int offset = 0;
+        for (size_t j = 0; j < static_cast<size_t>(index.col_num); ++j) {
+            memcpy(key.get() + offset, rec.data + index.cols[j].offset, index.cols[j].len);
+            offset += index.cols[j].len;
+        }
+        // 删除索引项
+        ih->delete_entry_with_rid(key.get(), rid, txn);
+    }
+    return true;
+}
+
 RmFileHandle* SmManager::get_file_handle(const std::string& tab_name) const {
     return fhs_.at(tab_name).get();
 }

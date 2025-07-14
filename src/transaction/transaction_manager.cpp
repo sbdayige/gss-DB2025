@@ -173,7 +173,7 @@ void TransactionManager::abort(Context* context, LogManager* log_manager) {
         if (write_type == WType::INSERT_TUPLE) {
             auto rec = (*iter)->GetRecord();
             handle->delete_record(rid, context);
-            // sm_manager_->delete_index_with_rid(table_name, rec, rid, context->txn_);
+            sm_manager_->delete_index_with_rid(table_name, rec, rid, context->txn_);
         } else if (write_type == WType::DELETE_TUPLE) {
             // MVCC下delete只打标记，回滚时只需撤销版本链即可
             // 如需恢复索引可在此补充

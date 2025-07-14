@@ -80,12 +80,12 @@ class SmManager {
 
     void drop_index(const std::string& tab_name, const std::vector<ColMeta>& col_names, Context* context);
 
+    bool delete_index_with_rid(const std::string& tab_name, RmRecord& rec, Rid rid, Transaction* txn);
+
     RmFileHandle* get_file_handle(const std::string& tab_name) const;
 
     IxIndexHandle* get_index_handle(const std::string& index_name) const;
 
     bool contains_table(const std::string& tab_name) const;
     void load_csv_data(const std::string& csv_file_path, const std::string& tab_name);
-
-    bool insert_index_force(const std::string& tab_name, RmRecord& rec, Rid rid, Transaction* txn);
 };

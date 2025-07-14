@@ -587,11 +587,11 @@ page_id_t IxIndexHandle::insert_entry_force(const char* key, const Rid& value, T
     int pos = leaf_node->lower_bound(key);
     auto rid_ = leaf_node->get_rid(pos);
     if (rid_->slot_no == IX_NO_SLOT) {
-        insert_into_overflow_page(value, rid_->page_no);
+        insert_into_page(value, rid_->page_no);
     } else {
-        page_id_t overflow_page_no = create_overflow_page();
-        insert_into_overflow_page(*rid_, overflow_page_no);
-        insert_into_overflow_page(value, overflow_page_no);
+        page_id_t overflow_page_no = create_page();
+        insert_into_page(*rid_, overflow_page_no);
+        insert_into_page(value, overflow_page_no);
         // 更新原RID为溢出页引用
         leaf_node->set_rid(pos, Rid{overflow_page_no, IX_NO_SLOT});
     }
@@ -688,7 +688,7 @@ bool IxIndexHandle::delete_entry_with_rid(const char* key, const Rid& rid, Trans
     bool need_delete = true;
     // 检查是否为溢出页引用
     if (rid_->slot_no == IX_NO_SLOT && rid_->page_no != IX_NO_PAGE) {
-        auto next_page_no = remove_from_overflow_page(rid, rid_->page_no, IX_NO_PAGE);
+        auto next_page_no = remove_from_page(rid, rid_->page_no, IX_NO_PAGE);
         is_dirty = (next_page_no != rid_->page_no);
         leaf_node->set_rid(pos, Rid{next_page_no, IX_NO_SLOT});
         if (next_page_no != IX_NO_PAGE) {
@@ -1240,7 +1240,7 @@ void IxIndexHandle::unlock_ancestors(Transaction* transaction) {
  * @return 新创建的溢出页页号
  * @note 溢出页用于存储重复键值对应的多个RID
  */
-page_id_t IxIndexHandle::create_overflow_page() {
+page_id_t IxIndexHandle::create_page() {
     file_hdr_->num_pages_++;
 
     PageId new_page_id = {.fd = fd_, .page_no = INVALID_PAGE_ID};
@@ -1264,7 +1264,7 @@ page_id_t IxIndexHandle::create_overflow_page() {
  * @return 是否插入成功
  * @note 如果当前溢出页已满，会自动链接到新的溢出页
  */
-bool IxIndexHandle::insert_into_overflow_page(const Rid& value, page_id_t page_no) {
+bool IxIndexHandle::insert_into_page(const Rid& value, page_id_t page_no) {
     Page* page = buffer_pool_manager_->fetch_page({fd_, page_no});
     if (page == nullptr) {
         throw RMDBError("Failed to fetch overflow page");
@@ -1286,15 +1286,15 @@ bool IxIndexHandle::insert_into_overflow_page(const Rid& value, page_id_t page_n
     } else if (hdr->next_overflow_page != IX_NO_PAGE) {
         // 当前页面已满，但有下一个溢出页，递归插入
         buffer_pool_manager_->unpin_page(page->get_page_id(), false);
-        return insert_into_overflow_page(value, hdr->next_overflow_page);
+        return insert_into_page(value, hdr->next_overflow_page);
     } else {
         // 当前页面已满且没有下一个溢出页，创建新的溢出页
-        page_id_t new_overflow_page = create_overflow_page();
+        page_id_t new_overflow_page = create_page();
         hdr->next_overflow_page = new_overflow_page;
         buffer_pool_manager_->unpin_page(page->get_page_id(), true);  // 标记为dirty，因为修改了next_overflow_page
 
         // 向新创建的溢出页插入RID
-        return insert_into_overflow_page(value, new_overflow_page);
+        return insert_into_page(value, new_overflow_page);
     }
 }
 
@@ -1305,7 +1305,7 @@ bool IxIndexHandle::insert_into_overflow_page(const Rid& value, page_id_t page_n
  * @param prev_page_no 前一个溢出页的页号，用于维护链表（IX_NO_PAGE表示这是第一个溢出页）
  * @return 删除后的下一个溢出页页号（如果当前页被删除）或当前页号
  */
-page_id_t IxIndexHandle::remove_from_overflow_page(const Rid& value, page_id_t page_no, page_id_t prev_page_no) {
+page_id_t IxIndexHandle::remove_from_page(const Rid& value, page_id_t page_no, page_id_t prev_page_no) {
     if (page_no == IX_NO_PAGE) {
         return IX_NO_PAGE;
     }
@@ -1354,7 +1354,7 @@ page_id_t IxIndexHandle::remove_from_overflow_page(const Rid& value, page_id_t p
 
     // 在当前页面中没找到，继续在下一个溢出页中查找
     if (hdr->next_overflow_page != IX_NO_PAGE) {
-        page_id_t new_next = remove_from_overflow_page(value, hdr->next_overflow_page, page_no);
+        page_id_t new_next = remove_from_page(value, hdr->next_overflow_page, page_no);
         if (new_next != hdr->next_overflow_page) {
             // 下一个页面被删除了，更新当前页面的next指针
             hdr->next_overflow_page = new_next;
@@ -1375,7 +1375,7 @@ page_id_t IxIndexHandle::remove_from_overflow_page(const Rid& value, page_id_t p
  * @param result 存储结果的向量
  * @note 会遍历整个溢出页链表
  */
-void IxIndexHandle::get_all_rids_from_overflow_page(page_id_t page_no, std::vector<Rid>* result) const {
+void IxIndexHandle::get_all_rids_from_page(page_id_t page_no, std::vector<Rid>* result) const {
     Page* page = buffer_pool_manager_->fetch_page({fd_, page_no});
     if (page == nullptr) {
         return;
@@ -1391,7 +1391,7 @@ void IxIndexHandle::get_all_rids_from_overflow_page(page_id_t page_no, std::vect
 
     // 递归处理下一个溢出页
     if (hdr->next_overflow_page != IX_NO_PAGE) {
-        get_all_rids_from_overflow_page(hdr->next_overflow_page, result);
+        get_all_rids_from_page(hdr->next_overflow_page, result);
     }
 
     buffer_pool_manager_->unpin_page(page->get_page_id(), false);
@@ -1402,7 +1402,7 @@ void IxIndexHandle::get_all_rids_from_overflow_page(page_id_t page_no, std::vect
  * @param page_no 溢出页链表的起始页号
  * @note 释放从指定页开始的整个溢出页链表
  */
-void IxIndexHandle::release_overflow_page_chain(page_id_t page_no) {
+void IxIndexHandle::release_page_chain(page_id_t page_no) {
     if (page_no == IX_NO_PAGE) {
         return;
     }
@@ -1421,6 +1421,6 @@ void IxIndexHandle::release_overflow_page_chain(page_id_t page_no) {
 
     // 递归释放下一个溢出页
     if (next_page != IX_NO_PAGE) {
-        release_overflow_page_chain(next_page);
+        release_page_chain(next_page);
     }
 }
