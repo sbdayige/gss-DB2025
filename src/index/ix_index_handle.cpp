@@ -420,7 +420,7 @@ IxNodeHandle* IxIndexHandle::split(IxNodeHandle* node) {
  * 右半部分的键值对分裂为新的右兄弟节点，在参数中称为new_node（参考Split函数来理解old_node和new_node）
  * @note 本函数执行完毕后，new node和old node都需要在函数外面进行unpin
  */
-void IxIndexHandle::insert_into_parent(IxNodeHandle* old_node, const char* key, IxNodeHandle* new_node, Transaction* transaction) {
+void IxIndexHandle::insert_into_parent(IxNodeHandle* old_node, const char* key, IxNodeHandle* new_node) {
     // Todo:
     // 1. 分裂前的结点（原结点, old_node）是否为根结点，如果为根结点需要分配新的root
     // 2. 获取原结点（old_node）的父亲结点
@@ -469,7 +469,7 @@ void IxIndexHandle::insert_into_parent(IxNodeHandle* old_node, const char* key, 
         // 检查是否需要继续分裂父节点
         if (parent->get_size() >= parent->get_max_size()) {
             auto parent_sibling = split(parent);
-            insert_into_parent(parent, parent_sibling->get_key(0), parent_sibling, transaction);
+            insert_into_parent(parent, parent_sibling->get_key(0), parent_sibling);
             buffer_pool_manager_->unpin_page(parent_sibling->get_page_id(), true);
             delete parent_sibling;  // 释放split创建的对象
         }
@@ -481,10 +481,18 @@ void IxIndexHandle::insert_into_parent(IxNodeHandle* old_node, const char* key, 
 }
 
 /**
- * @brief 将指定键值对插入到B+树中
- * @param (key, value) 要插入的键值对
- * @param transaction 事务指针
- * @return page_id_t 插入到的叶结点的page_no
+ * @brief 向B+树中插入键值对
+ * @details 完成键值对的插入操作，必要时进行节点分裂
+ * @param key 要插入的键
+ * @param value 要插入的记录ID
+ * @param transaction 事务指针，用于并发控制
+ * @return page_id_t
+ *         - 插入位置所在叶节点的页面号
+ *         - INVALID_PAGE_ID 表示插入失败
+ * @warning
+ * - 需要正确处理并发控制
+ * - 必须维护最右叶子节点信息
+ * - 要及时释放节点的内存资源
  */
 page_id_t IxIndexHandle::insert_entry(const char* key, const Rid& value, Transaction* transaction) {
     // Todo:
@@ -492,79 +500,21 @@ page_id_t IxIndexHandle::insert_entry(const char* key, const Rid& value, Transac
     // 2. 在该叶子节点中插入键值对
     // 3. 如果结点已满，分裂结点，并把新结点的相关信息插入父节点
     // 提示：记得unpin page；若当前叶子节点是最右叶子节点，则需要更新file_hdr_.last_leaf；记得处理并发的上锁
-
     root_latch_.lock();
     if (is_empty()) {
-        // 创建新的根节点作为第一个叶子节点
-        auto new_node = create_node();
-        new_node->page_hdr->is_leaf = true;
-        new_node->page_hdr->parent = INVALID_PAGE_ID;
-        new_node->page_hdr->num_key = 0;
-        new_node->insert_pair(0, key, value);
-        update_root_page_no(new_node->get_page_no());
-        file_hdr_->last_leaf_ = new_node->get_page_no();
-
-        auto result_page_no = new_node->get_page_no();
+        create_new_root(key, value);
         root_latch_.unlock();
-        buffer_pool_manager_->unpin_page(new_node->get_page_id(), true);
-        delete new_node;
-        return result_page_no;
-    }
-
-    // 查找目标叶子节点
-    auto [leaf_node, root_is_latched] = find_leaf_page(key, Operation::INSERT, transaction);
-    if (!leaf_node) {  // 没有找到叶子节点
-        unlock_ancestors(transaction);
-        throw IndexEntryNotFoundError();
-    }
-
-    int old_size = leaf_node->get_size();  // 记录插入前的大小，用于判断插入是否成功
-    int new_size = leaf_node->insert(key, value);
-    if (old_size == new_size) {
-        // 插入失败（重复键），清理资源并返回
-        unlock_ancestors(transaction);
-        Page* leaf_page = buffer_pool_manager_->fetch_page(leaf_node->get_page_id());
-        leaf_page->WUnlatch();
-        buffer_pool_manager_->unpin_page(leaf_node->get_page_id(), false);
-        delete leaf_node;  // 释放fetch_node创建的对象
-        return INVALID_PAGE_ID;
-    }
-
-    page_id_t result_page_no = leaf_node->get_page_no();
-
-    // 检查是否需要分裂
-    if (leaf_node->get_size() >= leaf_node->get_max_size()) {
-        // 执行节点分裂
-        auto new_node = split(leaf_node);
-
-        // 更新最右叶子节点指针（如果需要）
-        if (leaf_node->get_page_no() == file_hdr_->last_leaf_) {
-            file_hdr_->last_leaf_ = new_node->get_page_no();
-        }
-        insert_into_parent(leaf_node, new_node->get_key(0), new_node, transaction);
-
-        // 释放所有祖先节点锁
-        unlock_ancestors(transaction);
-
-        // unpin节点并标记为dirty
-        Page* leaf_page = buffer_pool_manager_->fetch_page(leaf_node->get_page_id());
-        leaf_page->WUnlatch();
-        buffer_pool_manager_->unpin_page(leaf_node->get_page_id(), true);
-        buffer_pool_manager_->unpin_page(new_node->get_page_id(), true);
-        delete new_node;   // 释放split创建的对象
-        delete leaf_node;  // 释放find_leaf_page创建的对象
+        return file_hdr_->root_page_;
     } else {
-        // 不需要分裂，释放祖先节点锁
-        unlock_ancestors(transaction);
-
-        // 释放叶子节点锁并标记为dirty
-        Page* leaf_page = buffer_pool_manager_->fetch_page(leaf_node->get_page_id());
-        leaf_page->WUnlatch();
+        auto [leaf_node, root_is_latched] = find_leaf_page(key, Operation::INSERT, transaction);
+        bool ok = insert_into_leaf(key, value, leaf_node);
+        auto res = leaf_node->get_page_no();
+        UnlockAncestors(transaction);
+        leaf_node->page->WUnlatch();
         buffer_pool_manager_->unpin_page(leaf_node->get_page_id(), true);
-        delete leaf_node;  // 释放find_leaf_page创建的对象
+        delete leaf_node;
+        return ok ? res : INVALID_PAGE_ID;
     }
-
-    return result_page_no;
 }
 
 /**
@@ -782,6 +732,36 @@ bool IxIndexHandle::coalesce_or_redistribute(IxNodeHandle* node, Transaction* tr
     return true;
 }
 
+void IxIndexHandle::create_new_root(const char* key, const Rid& value) {
+    IxNodeHandle* new_node = create_node();
+    new_node->page_hdr->is_leaf = true;
+    new_node->page_hdr->parent = INVALID_PAGE_ID;
+    new_node->page_hdr->num_key = 0;
+    new_node->insert_pair(0, key, value);
+    update_root_page_no(new_node->get_page_no());
+    file_hdr_->last_leaf_ = new_node->get_page_no();
+    buffer_pool_manager_->unpin_page(new_node->get_page_id(), true);
+    delete new_node;  // 释放new_node内存
+}
+
+bool IxIndexHandle::insert_into_leaf(const char* key, const Rid& value, IxNodeHandle* leaf_node) {
+    int pos = leaf_node->lower_bound(key);
+    if (pos < leaf_node->page_hdr->num_key &&
+        ix_compare(leaf_node->get_key(pos), key, file_hdr_->col_types_, file_hdr_->col_lens_) == 0) {
+        return false;
+    }
+    // 插入键值对
+    leaf_node->insert_pair(pos, key, value);
+    // 如果叶子节点已满，则需要分裂
+    if (leaf_node->get_size() >= leaf_node->get_max_size()) {
+        IxNodeHandle* new_node = split(leaf_node);
+        insert_into_parent(leaf_node, new_node->get_key(0), new_node);
+        // 更新file_hdr_.last_leaf_，在split中处理了
+        buffer_pool_manager_->unpin_page(new_node->get_page_id(), true);
+        delete new_node;  // 释放new_node内存
+    }
+    return true;
+}
 /**
  * @brief 用于当根结点被删除了一个键值对之后的处理
  * @param old_root_node 原根节点

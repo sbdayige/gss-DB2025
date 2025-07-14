@@ -191,15 +191,17 @@ class IxIndexHandle {
 
     std::pair<IxNodeHandle *, bool> find_leaf_page(const char *key, Operation operation, Transaction *transaction,
                                                    bool find_first = false);
-
+    void create_new_root(const char *key, const Rid &value);
     // for insert
     page_id_t insert_entry(const char *key, const Rid &value, Transaction *transaction);
+
+    bool insert_into_leaf(const char *key, const Rid &value, IxNodeHandle *leaf_node);
 
     page_id_t insert_entry_force(const char *key, const Rid &value, Transaction *transaction);
 
     IxNodeHandle *split(IxNodeHandle *node);
 
-    void insert_into_parent(IxNodeHandle *old_node, const char *key, IxNodeHandle *new_node, Transaction *transaction);
+    void insert_into_parent(IxNodeHandle *old_node, const char *key, IxNodeHandle *new_node);
 
     /**
      * @brief 从B+树中删除指定键和RID对
