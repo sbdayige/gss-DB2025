@@ -50,7 +50,6 @@ class MvccSelectExecutor : public AbstractExecutor {
         tuple_idx_ = 0;
         fed_to_upper_ = false;
 
-        // 扫描表并过滤符合条件且可见的记录
         ScanAndFilter();
     }
 
@@ -104,7 +103,6 @@ class MvccSelectExecutor : public AbstractExecutor {
    private:
     void ScanAndFilter() {
         // MVCC Select Logic: 扫描表中的所有记录，过滤出可见且符合条件的记录
-
         try {
             // 检查文件句柄状态
             auto file_hdr = fh_->get_file_hdr();
@@ -115,10 +113,7 @@ class MvccSelectExecutor : public AbstractExecutor {
                 try {
                     auto page_handle = fh_->fetch_page_handle(1);
                     auto bitmap = page_handle.bitmap;
-
                     int next_bit = Bitmap::next_bit(true, bitmap, file_hdr.num_records_per_page, 0);
-
-                    // Note: We won't manually unpin as it should be handled automatically
                 } catch (const std::exception &e) {
                 }
             }
@@ -127,7 +122,7 @@ class MvccSelectExecutor : public AbstractExecutor {
                 auto rid = scan.rid();
 
                 // 1. 获取对当前事务可见的记录版本
-                auto visible_record = GetVisibleVersion(rid, context_->txn_);
+                auto visible_record = GetVisibleRecord(rid, context_->txn_, txn_mgr_, fh_, context_, tab_);
                 if (!visible_record) {
                     scan.next();
                     continue;
@@ -147,74 +142,6 @@ class MvccSelectExecutor : public AbstractExecutor {
             throw;
         }
     }
-    std::unique_ptr<RmRecord> GetVisibleVersion(const Rid &rid, Transaction *txn) {
-        auto version_link = txn_mgr_->GetVersionLink(fh_->GetFd(), rid);
-        if (!version_link.has_value()) {
-            // 没有版本链，返回基础版本
-            return fh_->get_record(rid, context_);
-        }
-        UndoLink link = version_link->prev_;
-        while (true) {
-            if (link.prev_txn_ == INVALID_TXN_ID) {
-                auto insert_version_link = txn_mgr_->GetVersionLink(fh_->GetFd(), rid);
-                if (insert_version_link.has_value()) {
-                    UndoLink insert_link = insert_version_link->prev_;
-                    auto insert_undo_log = GetUndoLog(txn_mgr_, insert_link);
-                    if (insert_undo_log) {
-                        Transaction *insert_txn = txn_mgr_->find_transaction(insert_link.prev_txn_);
-                        if (insert_txn && insert_txn->get_state() == TransactionState::COMMITTED &&
-                            insert_txn->get_commit_ts() < txn->get_start_ts()) {
-                            return fh_->get_record(rid, context_);
-                        }
-                    }
-                }
-                // 否则不可见
-                return nullptr;
-            }
-            auto undo_log = GetUndoLog(txn_mgr_, link);
-            if (!undo_log) {
-                break;
-            }
-
-            Transaction *log_txn = txn_mgr_->find_transaction(link.prev_txn_);
-            // 1. 本事务产生的版本：只对本事务可见
-            if (link.prev_txn_ == txn->get_transaction_id()) {
-                if (undo_log->is_deleted_) {
-                    // 本事务的DELETE操作，记录不可见
-                    return nullptr;
-                } else {
-                    auto physical_record = fh_->get_record(rid, context_);
-                    return physical_record;
-                }
-            }
-
-            // 2. 其他事务产生的未提交版本：对本事务不可见
-            if (link.prev_txn_ != txn->get_transaction_id() && log_txn && log_txn->get_state() != TransactionState::COMMITTED) {
-                link = undo_log->prev_version_;
-                continue;
-            }
-
-            // 3. 已提交版本：只有提交时间早于当前事务start_ts才可见
-            if (log_txn && log_txn->get_state() == TransactionState::COMMITTED) {
-                // 用 commit_ts 判断可见性
-                if (log_txn->get_commit_ts() < txn->get_start_ts()) {
-                    if (undo_log->is_deleted_) {
-                        return nullptr;
-                    }
-                    return RestoreRecordFromUndoLog(*undo_log);
-                } else {
-                    link = undo_log->prev_version_;
-                    continue;
-                }
-            }
-
-            // 4. 其他情况，继续回溯
-            link = undo_log->prev_version_;
-        }
-        // 没有可见版本
-        return nullptr;
-    }
-
     std::unique_ptr<RmRecord> ProjectRecord(const RmRecord &record) {
         // 投影：只返回需要的列
         size_t tuple_size = tupleLen();
@@ -227,37 +154,5 @@ class MvccSelectExecutor : public AbstractExecutor {
         }
 
         return projected_record;
-    }
-
-    std::unique_ptr<RmRecord> RestoreRecordFromUndoLog(const UndoLog &undo_log) {
-        // 从UndoLog恢复记录的原始版本
-        size_t record_size = 0;
-        for (const auto &col : tab_.cols) {
-            record_size += col.len;
-        }
-
-        auto record = std::make_unique<RmRecord>(record_size);
-
-        // 从UndoLog的tuple_数组中恢复数据
-        for (size_t i = 0; i < tab_.cols.size() && i < undo_log.tuple_.size(); ++i) {
-            const auto &col = tab_.cols[i];
-            const auto &value = undo_log.tuple_[i];
-
-            if (col.type == TYPE_INT) {
-                *(int *)(record->data + col.offset) = value.int_val;
-            } else if (col.type == TYPE_FLOAT) {
-                *(float *)(record->data + col.offset) = value.float_val;
-            } else if (col.type == TYPE_STRING) {
-                memcpy(record->data + col.offset, value.str_val.c_str(),
-                       std::min(col.len, static_cast<int>(value.str_val.length())));
-                // 确保字符串以null结尾
-                if (value.str_val.length() < col.len) {
-                    memset(record->data + col.offset + value.str_val.length(), 0,
-                           col.len - value.str_val.length());
-                }
-            }
-        }
-
-        return record;
     }
 };

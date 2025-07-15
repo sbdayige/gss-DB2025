@@ -284,7 +284,6 @@ void RecoveryManager::undo() {
     if (undo_list_.empty()) {
         return;
     }
-
     // 收集需要回滚的操作（按LSN倒序）
     std::vector<std::pair<LogType, std::vector<char>>> undo_operations;
 
@@ -293,7 +292,6 @@ void RecoveryManager::undo() {
     if (total_file_size <= 0) {
         return;
     }
-
     int file_offset = 0;
 
     // 分批读取日志文件收集回滚操作
@@ -353,7 +351,6 @@ void RecoveryManager::undo() {
             file_offset += bytes_read;
         }
     }
-
     // 按LSN倒序执行回滚（ARIES要求）
     std::reverse(undo_operations.begin(), undo_operations.end());
 
@@ -364,6 +361,11 @@ void RecoveryManager::undo() {
             case LogType::INSERT: {
                 InsertLogRecord insert_log;
                 insert_log.deserialize(operation.second.data());
+                std::string table_name = insert_log.table_name_;
+                if (sm_manager_->fhs_.find(table_name) == sm_manager_->fhs_.end()) {
+                    std::cout << "Table " << table_name << " not found, skipping undo" << std::endl;
+                    return;
+                }
                 undo_insert(&insert_log);
                 operations_undone++;
                 break;
@@ -371,6 +373,11 @@ void RecoveryManager::undo() {
             case LogType::DELETE: {
                 DeleteLogRecord delete_log;
                 delete_log.deserialize(operation.second.data());
+                std::string table_name = delete_log.table_name_;
+                if (sm_manager_->fhs_.find(table_name) == sm_manager_->fhs_.end()) {
+                    std::cout << "Table " << table_name << " not found, skipping undo" << std::endl;
+                    return;
+                }
                 undo_delete(&delete_log);
                 operations_undone++;
                 break;
@@ -378,6 +385,11 @@ void RecoveryManager::undo() {
             case LogType::UPDATE: {
                 UpdateLogRecord update_log;
                 update_log.deserialize(operation.second.data());
+                std::string table_name = update_log.table_name_;
+                if (sm_manager_->fhs_.find(table_name) == sm_manager_->fhs_.end()) {
+                    std::cout << "Table " << table_name << " not found, skipping undo" << std::endl;
+                    return;
+                }
                 undo_update(&update_log);
                 operations_undone++;
                 break;

@@ -361,11 +361,9 @@ int main(int argc, char **argv) {
         }
         // Open database
         sm_manager->open_db(db_name);
-
         recovery->analyze();
         recovery->redo();
         recovery->undo();
-
         // 开启服务端，开始接受客户端连接
         start_server();
     } catch (RMDBError &e) {

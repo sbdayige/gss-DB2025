@@ -102,8 +102,6 @@ class MvccIndexScanExecutor : public AbstractExecutor {
 
    private:
     void IndexScanAndFilter() {
-        // MVCC Index Scan Logic: 使用索引扫描，过滤出可见且符合条件的记录
-
         // 1. 分析查询条件，构造索引扫描范围
         char *lower_key = nullptr;
         char *upper_key = nullptr;
@@ -111,7 +109,6 @@ class MvccIndexScanExecutor : public AbstractExecutor {
         bool has_upper = false;
 
         ConstructScanRange(lower_key, upper_key, has_lower, has_upper);
-
         // 2. 执行索引扫描
         std::vector<Rid> candidate_rids;
         if (has_lower && has_upper) {
@@ -145,12 +142,12 @@ class MvccIndexScanExecutor : public AbstractExecutor {
         // 3. 对每个候选RID进行可见性检查和条件过滤
         for (auto &rid : candidate_rids) {
             // 检查记录版本可见性
-            if (!IsVisible(rid, context_->txn_)) {
+            if (!IsRecordVisible(rid, context_->txn_, txn_mgr_, fh_)) {
                 continue;
             }
 
             // 获取记录数据
-            auto record = GetVisibleVersion(rid, context_->txn_);
+            auto record = GetVisibleRecord(rid, context_->txn_, txn_mgr_, fh_, context_, tab_);
             if (!record) {
                 continue;
             }
@@ -183,15 +180,18 @@ class MvccIndexScanExecutor : public AbstractExecutor {
             // 检查条件是否涉及索引列
             bool is_index_col = false;
             size_t col_offset = 0;
+            ColMeta *matched_index_col = nullptr;
+
             for (auto &index_col : index_cols_) {
                 if (cond.lhs_col.col_name == index_col.name) {
                     is_index_col = true;
+                    matched_index_col = &index_col;
                     break;
                 }
                 col_offset += index_col.len;
             }
 
-            if (!is_index_col) continue;
+            if (!is_index_col || !matched_index_col) continue;
 
             // 根据操作符构造扫描范围
             if (cond.op == OP_EQ) {
@@ -207,10 +207,10 @@ class MvccIndexScanExecutor : public AbstractExecutor {
                     has_upper = true;
                 }
 
-                // 设置键值
-                cond.rhs_val.init_raw(index_cols_[0].len);
-                memcpy(lower_key + col_offset, cond.rhs_val.raw->data, index_cols_[0].len);
-                memcpy(upper_key + col_offset, cond.rhs_val.raw->data, index_cols_[0].len);
+                // 设置键值 - 使用正确的列长度
+                cond.rhs_val.init_raw(matched_index_col->len);
+                memcpy(lower_key + col_offset, cond.rhs_val.raw->data, matched_index_col->len);
+                memcpy(upper_key + col_offset, cond.rhs_val.raw->data, matched_index_col->len);
 
             } else if (cond.op == OP_GE || cond.op == OP_GT) {
                 // 范围查询下界
@@ -220,8 +220,8 @@ class MvccIndexScanExecutor : public AbstractExecutor {
                     has_lower = true;
                 }
 
-                cond.rhs_val.init_raw(index_cols_[0].len);
-                memcpy(lower_key + col_offset, cond.rhs_val.raw->data, index_cols_[0].len);
+                cond.rhs_val.init_raw(matched_index_col->len);
+                memcpy(lower_key + col_offset, cond.rhs_val.raw->data, matched_index_col->len);
 
             } else if (cond.op == OP_LE || cond.op == OP_LT) {
                 // 范围查询上界
@@ -231,110 +231,10 @@ class MvccIndexScanExecutor : public AbstractExecutor {
                     has_upper = true;
                 }
 
-                cond.rhs_val.init_raw(index_cols_[0].len);
-                memcpy(upper_key + col_offset, cond.rhs_val.raw->data, index_cols_[0].len);
+                cond.rhs_val.init_raw(matched_index_col->len);
+                memcpy(upper_key + col_offset, cond.rhs_val.raw->data, matched_index_col->len);
             }
         }
-    }
-
-    bool IsVisible(const Rid &rid, Transaction *txn) {
-        // 与MvccSelectExecutor中的实现相同
-        auto version_link = txn_mgr_->GetVersionLink(fh_->GetFd(), rid);
-        if (!version_link.has_value()) {
-            return true;
-        }
-
-        auto prev_txn_id = version_link->prev_.prev_txn_;
-        if (prev_txn_id == INVALID_TXN_ID) {
-            return true;
-        }
-
-        if (prev_txn_id == txn->get_transaction_id()) {
-            auto undo_log = GetUndoLog(version_link->prev_);
-            if (undo_log && undo_log->is_deleted_) {
-                return false;
-            }
-            return true;
-        }
-
-        auto prev_txn = txn_mgr_->find_transaction(prev_txn_id);
-        if (!prev_txn) {
-            return true;
-        }
-
-        if (prev_txn->get_state() == TransactionState::COMMITTED) {
-            if (prev_txn->get_commit_ts() <= txn->get_read_ts()) {
-                auto undo_log = GetUndoLog(version_link->prev_);
-                if (undo_log && undo_log->is_deleted_) {
-                    return false;
-                }
-                return true;
-            }
-            return false;
-        }
-
-        return false;
-    }
-
-    std::unique_ptr<RmRecord> GetVisibleVersion(const Rid &rid, Transaction *txn) {
-        // 与MvccSelectExecutor中的实现相同
-        auto version_link = txn_mgr_->GetVersionLink(fh_->GetFd(), rid);
-
-        if (!version_link.has_value()) {
-            return fh_->get_record(rid, context_);
-        }
-
-        auto current_link = version_link->prev_;
-
-        while (current_link.prev_txn_ != INVALID_TXN_ID) {
-            auto prev_txn_id = current_link.prev_txn_;
-
-            if (prev_txn_id == txn->get_transaction_id()) {
-                auto undo_log = GetUndoLog(current_link);
-                if (undo_log) {
-                    if (undo_log->is_deleted_) {
-                        return nullptr;
-                    } else {
-                        return std::make_unique<RmRecord>(*undo_log->tuple_test_);
-                    }
-                }
-                break;
-            }
-
-            auto prev_txn = txn_mgr_->find_transaction(prev_txn_id);
-
-            if (prev_txn) {
-                if (prev_txn->get_state() == TransactionState::COMMITTED &&
-                    prev_txn->get_commit_ts() <= txn->get_read_ts()) {
-                    auto undo_log = GetUndoLog(current_link);
-                    if (undo_log) {
-                        if (undo_log->is_deleted_) {
-                            return nullptr;
-                        } else {
-                            return std::make_unique<RmRecord>(*undo_log->tuple_test_);
-                        }
-                    }
-                    break;
-                }
-            }
-
-            auto undo_log = GetUndoLog(current_link);
-            if (undo_log && undo_log->prev_version_.prev_log_idx_ >= 0) {
-                current_link = undo_log->prev_version_;
-            } else {
-                break;
-            }
-        }
-
-        return fh_->get_record(rid, context_);
-    }
-
-    std::unique_ptr<UndoLog> GetUndoLog(const UndoLink &link) {
-        auto undo_log_opt = txn_mgr_->GetUndoLogOptional(link);
-        if (undo_log_opt.has_value()) {
-            return std::make_unique<UndoLog>(undo_log_opt.value());
-        }
-        return nullptr;
     }
 
     std::unique_ptr<RmRecord> ProjectRecord(const RmRecord &record) {

@@ -85,3 +85,34 @@ bool mvcc_insert_index(const TabMeta& tab_, std::unique_ptr<RmRecord>& rec, Rid 
                        TransactionManager* txn_mgr, SmManager* sm_manager);
 
 bool check_conflict(Transaction* txn, TransactionManager* txn_mgr, RmFileHandle* fh, const Rid& rid);
+
+/**
+ * @brief 检查记录对事务的可见性（MVCC）
+ * @param rid 记录ID
+ * @param txn 当前事务
+ * @param txn_mgr 事务管理器
+ * @param fh 文件句柄
+ * @return 记录是否对当前事务可见
+ */
+bool IsRecordVisible(const Rid& rid, Transaction* txn, TransactionManager* txn_mgr, RmFileHandle* fh);
+
+/**
+ * @brief 获取记录对事务可见的版本（MVCC）
+ * @param rid 记录ID
+ * @param txn 当前事务
+ * @param txn_mgr 事务管理器
+ * @param fh 文件句柄
+ * @param context 执行上下文
+ * @param tab_meta 表元数据
+ * @return 可见的记录版本，如果不可见则返回nullptr
+ */
+std::unique_ptr<RmRecord> GetVisibleRecord(const Rid& rid, Transaction* txn, TransactionManager* txn_mgr,
+                                           RmFileHandle* fh, Context* context, const TabMeta& tab_meta);
+
+/**
+ * @brief 从UndoLog恢复记录
+ * @param undo_log 撤销日志
+ * @param tab_meta 表元数据
+ * @return 恢复的记录
+ */
+std::unique_ptr<RmRecord> RestoreRecordFromUndoLog(const UndoLog& undo_log, const TabMeta& tab_meta);

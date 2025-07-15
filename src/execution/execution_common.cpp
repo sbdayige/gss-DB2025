@@ -326,24 +326,30 @@ bool mvcc_insert_index(const TabMeta& tab_, std::unique_ptr<RmRecord>& rec, Rid 
         // 检查索引项是否已存在
         std::vector<Rid> result;
         bool is_exist = ih->get_value(key.get(), &result, context_->txn_);
+        printf("[DEBUG] mvcc_insert_index: index %zu, key_exist=%d, result_size=%zu\n", i, is_exist, result.size());
         page_id_t res = INVALID_PAGE_ID;
         if (is_exist == false) {
+            printf("[DEBUG] mvcc_insert_index: key not exist, try insert_entry\n");
             res = ih->insert_entry(key.get(), rid, context_->txn_);
         } else {
             bool ok = true;
             for (const auto& rid_ : result) {
                 bool is_not_deleted = check_conflict(context_->txn_, txn_mgr, fh_, rid_);
+                printf("[DEBUG] mvcc_insert_index: check_conflict for rid(page=%d,slot=%d): is_not_deleted=%d\n", rid_.page_no, rid_.slot_no, is_not_deleted);
                 if (is_not_deleted == true) {
                     ok = false;
                     break;
                 }
             }
+            printf("[DEBUG] mvcc_insert_index: ok=%d, will %s\n", ok, ok ? "insert_entry_force" : "skip");
             if (ok) {
                 res = ih->insert_entry_force(key.get(), rid, context_->txn_);
             }
         }
+        printf("[DEBUG] mvcc_insert_index: res=%d\n", res);
         if (res == INVALID_PAGE_ID) {
             // 插入索引失败，可能是因为索引已存在
+            printf("[DEBUG] mvcc_insert_index: insert failed, rollback\n");
             for (size_t rollback_i = 0; rollback_i < i; ++rollback_i) {
                 auto& rollback_index = tab_.indexes[rollback_i];
                 auto rollback_ih =
@@ -355,6 +361,7 @@ bool mvcc_insert_index(const TabMeta& tab_, std::unique_ptr<RmRecord>& rec, Rid 
         }
         inserted_keys.emplace_back(std::move(key));  // 保存已插入的键值
     }
+    printf("[DEBUG] mvcc_insert_index: all index insert success\n");
     return true;
 }
 
@@ -373,4 +380,155 @@ bool check_conflict(Transaction* txn, TransactionManager* txn_mgr, RmFileHandle*
         }
     }
     return true;
+}
+
+/**
+ * @brief 检查记录对事务的可见性（MVCC）
+ */
+bool IsRecordVisible(const Rid& rid, Transaction* txn, TransactionManager* txn_mgr, RmFileHandle* fh) {
+    auto version_link = txn_mgr->GetVersionLink(fh->GetFd(), rid);
+    if (!version_link.has_value()) {
+        return true;  // 没有版本链，基础版本可见
+    }
+
+    auto prev_txn_id = version_link->prev_.prev_txn_;
+    if (prev_txn_id == INVALID_TXN_ID) {
+        return true;  // 没有前一个事务，基础版本可见
+    }
+
+    if (prev_txn_id == txn->get_transaction_id()) {
+        // 是当前事务的修改，检查是否被删除
+        auto undo_log = GetUndoLog(txn_mgr, version_link->prev_);
+        if (undo_log && undo_log->is_deleted_) {
+            return false;  // 被当前事务删除，不可见
+        }
+        return true;  // 当前事务的修改，可见
+    }
+
+    // 其他事务的修改，检查事务状态和提交时间
+    auto prev_txn = txn_mgr->find_transaction(prev_txn_id);
+    if (!prev_txn) {
+        return true;  // 事务已结束，假设已提交
+    }
+
+    if (prev_txn->get_state() == TransactionState::COMMITTED) {
+        if (prev_txn->get_commit_ts() <= txn->get_read_ts()) {
+            auto undo_log = GetUndoLog(txn_mgr, version_link->prev_);
+            if (undo_log && undo_log->is_deleted_) {
+                return false;  // 记录被删除，不可见
+            }
+            return true;  // 已提交且在读时间戳之前，可见
+        }
+        return false;  // 提交时间晚于读时间戳，不可见
+    }
+
+    return false;  // 未提交或已回滚，不可见
+}
+
+/**
+ * @brief 获取记录对事务可见的版本（MVCC）
+ */
+std::unique_ptr<RmRecord> GetVisibleRecord(const Rid& rid, Transaction* txn, TransactionManager* txn_mgr,
+                                           RmFileHandle* fh, Context* context, const TabMeta& tab_meta) {
+    auto version_link = txn_mgr->GetVersionLink(fh->GetFd(), rid);
+    if (!version_link.has_value()) {
+        // 没有版本链，返回基础版本
+        return fh->get_record(rid, context);
+    }
+
+    UndoLink link = version_link->prev_;
+    while (true) {
+        if (link.prev_txn_ == INVALID_TXN_ID) {
+            // 回溯到链尾，检查INSERT操作的可见性
+            auto insert_version_link = txn_mgr->GetVersionLink(fh->GetFd(), rid);
+            if (insert_version_link.has_value()) {
+                UndoLink insert_link = insert_version_link->prev_;
+                auto insert_undo_log = GetUndoLog(txn_mgr, insert_link);
+                if (insert_undo_log) {
+                    Transaction* insert_txn = txn_mgr->find_transaction(insert_link.prev_txn_);
+                    if (insert_txn && insert_txn->get_state() == TransactionState::COMMITTED &&
+                        insert_txn->get_commit_ts() < txn->get_start_ts()) {
+                        return fh->get_record(rid, context);
+                    }
+                }
+            }
+            return nullptr;  // 记录不可见
+        }
+
+        auto undo_log = GetUndoLog(txn_mgr, link);
+        if (!undo_log) {
+            break;
+        }
+
+        Transaction* log_txn = txn_mgr->find_transaction(link.prev_txn_);
+
+        // 1. 本事务产生的版本：只对本事务可见
+        if (link.prev_txn_ == txn->get_transaction_id()) {
+            if (undo_log->is_deleted_) {
+                return nullptr;  // 本事务的DELETE操作，记录不可见
+            } else {
+                return fh->get_record(rid, context);  // 返回物理记录
+            }
+        }
+
+        // 2. 其他事务产生的未提交版本：对本事务不可见
+        if (link.prev_txn_ != txn->get_transaction_id() && log_txn &&
+            log_txn->get_state() != TransactionState::COMMITTED) {
+            link = undo_log->prev_version_;
+            continue;
+        }
+
+        // 3. 已提交版本：只有提交时间早于当前事务start_ts才可见
+        if (log_txn && log_txn->get_state() == TransactionState::COMMITTED) {
+            if (log_txn->get_commit_ts() < txn->get_start_ts()) {
+                if (undo_log->is_deleted_) {
+                    return nullptr;  // 记录被删除
+                }
+                return RestoreRecordFromUndoLog(*undo_log, tab_meta);  // 从UndoLog恢复
+            } else {
+                link = undo_log->prev_version_;
+                continue;
+            }
+        }
+
+        // 4. 其他情况，继续回溯
+        link = undo_log->prev_version_;
+    }
+
+    return nullptr;  // 没有可见版本
+}
+
+/**
+ * @brief 从UndoLog恢复记录
+ */
+std::unique_ptr<RmRecord> RestoreRecordFromUndoLog(const UndoLog& undo_log, const TabMeta& tab_meta) {
+    // 计算记录大小
+    size_t record_size = 0;
+    for (const auto& col : tab_meta.cols) {
+        record_size += col.len;
+    }
+
+    auto record = std::make_unique<RmRecord>(record_size);
+
+    // 从UndoLog的tuple_数组中恢复数据
+    for (size_t i = 0; i < tab_meta.cols.size() && i < undo_log.tuple_.size(); ++i) {
+        const auto& col = tab_meta.cols[i];
+        const auto& value = undo_log.tuple_[i];
+
+        if (col.type == TYPE_INT) {
+            *(int*)(record->data + col.offset) = value.int_val;
+        } else if (col.type == TYPE_FLOAT) {
+            *(float*)(record->data + col.offset) = value.float_val;
+        } else if (col.type == TYPE_STRING) {
+            memcpy(record->data + col.offset, value.str_val.c_str(),
+                   std::min(col.len, static_cast<int>(value.str_val.length())));
+            // 确保字符串以null结尾
+            if (value.str_val.length() < col.len) {
+                memset(record->data + col.offset + value.str_val.length(), 0,
+                       col.len - value.str_val.length());
+            }
+        }
+    }
+
+    return record;
 }

@@ -75,7 +75,9 @@ struct Value {
                 throw StringOverflowError();
             }
             memset(raw->data, 0, len);
-            memcpy(raw->data, str_val.c_str(), str_val.size());
+            // 复制字符串，但不超过列长度
+            size_t copy_len = std::min((size_t)len, str_val.size());
+            memcpy(raw->data, str_val.c_str(), copy_len);
         }
     }
 
