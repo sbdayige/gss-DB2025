@@ -192,10 +192,8 @@ std::shared_ptr<Query> Analyze::do_analyze(std::shared_ptr<ast::TreeNode> parse)
         // 仅SelectStmt继续往下走
         //  处理聚合函数 - 现在从SelectStmt中直接获取聚合表达式
         //  处理聚合函数 - 现在从SelectStmt中直接获取聚合表达式
-        std::cerr << "DEBUG: analyze.cpp - agg_exprs.size() = " << x->agg_exprs.size() << std::endl;
         if (!x->agg_exprs.empty()) {
             // 有聚合函数，直接使用SelectStmt中的聚合表达式
-            std::cerr << "DEBUG: analyze.cpp - Using agg_exprs from SelectStmt" << std::endl;
             query->agg_exprs = x->agg_exprs;
         } else {
             // 兼容性处理：检查列名中是否包含聚合函数（用于向后兼容）

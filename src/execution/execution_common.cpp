@@ -326,30 +326,24 @@ bool mvcc_insert_index(const TabMeta& tab_, std::unique_ptr<RmRecord>& rec, Rid 
         // 检查索引项是否已存在
         std::vector<Rid> result;
         bool is_exist = ih->get_value(key.get(), &result, context_->txn_);
-        printf("[DEBUG] mvcc_insert_index: index %zu, key_exist=%d, result_size=%zu\n", i, is_exist, result.size());
         page_id_t res = INVALID_PAGE_ID;
         if (is_exist == false) {
-            printf("[DEBUG] mvcc_insert_index: key not exist, try insert_entry\n");
             res = ih->insert_entry(key.get(), rid, context_->txn_);
         } else {
             bool ok = true;
             for (const auto& rid_ : result) {
                 bool is_not_deleted = check_conflict(context_->txn_, txn_mgr, fh_, rid_);
-                printf("[DEBUG] mvcc_insert_index: check_conflict for rid(page=%d,slot=%d): is_not_deleted=%d\n", rid_.page_no, rid_.slot_no, is_not_deleted);
                 if (is_not_deleted == true) {
                     ok = false;
                     break;
                 }
             }
-            printf("[DEBUG] mvcc_insert_index: ok=%d, will %s\n", ok, ok ? "insert_entry_force" : "skip");
             if (ok) {
                 res = ih->insert_entry_force(key.get(), rid, context_->txn_);
             }
         }
-        printf("[DEBUG] mvcc_insert_index: res=%d\n", res);
         if (res == INVALID_PAGE_ID) {
             // 插入索引失败，可能是因为索引已存在
-            printf("[DEBUG] mvcc_insert_index: insert failed, rollback\n");
             for (size_t rollback_i = 0; rollback_i < i; ++rollback_i) {
                 auto& rollback_index = tab_.indexes[rollback_i];
                 auto rollback_ih =
@@ -361,7 +355,6 @@ bool mvcc_insert_index(const TabMeta& tab_, std::unique_ptr<RmRecord>& rec, Rid 
         }
         inserted_keys.emplace_back(std::move(key));  // 保存已插入的键值
     }
-    printf("[DEBUG] mvcc_insert_index: all index insert success\n");
     return true;
 }
 

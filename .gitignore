@@ -58,3 +58,5 @@ src/parser/yacc.tab.*
 
 *_test_db/
 cmake-build-debug-wsl/
+
+TPCC-Tester/

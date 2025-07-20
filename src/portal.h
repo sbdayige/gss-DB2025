@@ -116,10 +116,8 @@ class Portal {
         std::vector<Rid> rids;
         auto tab = sm_manager_->db_.get_table(tab_name);
         auto fh = sm_manager_->fhs_.at(tab_name).get();
-        std::cerr << "DEBUG SCAN: Starting physical scan for table " << tab_name << std::endl;
         for (RmScan scan(fh); !scan.is_end(); scan.next()) {
             auto rid = scan.rid();
-            std::cerr << "DEBUG SCAN: Found physical record at rid(" << rid.page_no << "," << rid.slot_no << ")" << std::endl;
             auto record = fh->get_record(rid, context);
             bool matches = true;
             for (const auto& cond : conds) {
@@ -129,10 +127,7 @@ class Portal {
                 }
             }
             if (matches) {
-                std::cerr << "DEBUG SCAN: Record matches WHERE condition, adding to rids" << std::endl;
                 rids.push_back(rid);
-            } else {
-                std::cerr << "DEBUG SCAN: Record does not match WHERE condition, skipping" << std::endl;
             }
         }
         return rids;
@@ -191,14 +186,12 @@ class Portal {
                 }
 
                 case T_Update: {
-                    std::cerr << "DEBUG UPDATE SCAN: Starting scan for UPDATE statement" << std::endl;
                     auto rids = CollectMatchedRids(x->tab_name_, x->conds_, context);
                     std::unique_ptr<AbstractExecutor> root = std::make_unique<MvccUpdateExecutor>(sm_manager_, txn_mgr_,
                                                                                                   x->tab_name_, x->set_clauses_, x->conds_, rids, context);
                     return std::make_shared<PortalStmt>(PORTAL_DML_WITHOUT_SELECT, std::vector<TabCol>(), std::move(root), plan);
                 }
                 case T_Delete: {
-                    std::cerr << "DEBUG DELETE SCAN: Starting scan for DELETE statement" << std::endl;
                     auto rids = CollectMatchedRids(x->tab_name_, x->conds_, context);
                     std::unique_ptr<AbstractExecutor> root =
                         std::make_unique<MvccDeleteExecutor>(sm_manager_, txn_mgr_, x->tab_name_, x->conds_, rids, context);
