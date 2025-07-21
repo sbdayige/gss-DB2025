@@ -107,58 +107,57 @@ class MvccIndexScanExecutor : public AbstractExecutor {
         char *upper_key = nullptr;
         bool has_lower = false;
         bool has_upper = false;
-
         ConstructScanRange(lower_key, upper_key, has_lower, has_upper);
         // 2. 执行索引扫描
         std::vector<Rid> candidate_rids;
+        int scan_cnt = 0;
         if (has_lower && has_upper) {
-            // 范围扫描：从lower_key到upper_key
             auto lower_iid = ih_->lower_bound(lower_key);
             auto upper_iid = ih_->upper_bound(upper_key);
             for (IxScan scan(ih_, lower_iid, upper_iid, sm_manager_->get_bpm()); !scan.is_end(); scan.next()) {
                 candidate_rids.push_back(scan.rid());
+                ++scan_cnt;
             }
         } else if (has_lower) {
-            // 从lower_key到结尾
             auto lower_iid = ih_->lower_bound(lower_key);
             auto upper_iid = ih_->leaf_end();
             for (IxScan scan(ih_, lower_iid, upper_iid, sm_manager_->get_bpm()); !scan.is_end(); scan.next()) {
                 candidate_rids.push_back(scan.rid());
+                ++scan_cnt;
             }
         } else if (has_upper) {
-            // 从开始到upper_key
             auto lower_iid = ih_->leaf_begin();
             auto upper_iid = ih_->upper_bound(upper_key);
             for (IxScan scan(ih_, lower_iid, upper_iid, sm_manager_->get_bpm()); !scan.is_end(); scan.next()) {
                 candidate_rids.push_back(scan.rid());
+                ++scan_cnt;
             }
         } else {
-            // 全表索引扫描
             for (IxScan scan(ih_, ih_->leaf_begin(), ih_->leaf_end(), sm_manager_->get_bpm()); !scan.is_end(); scan.next()) {
                 candidate_rids.push_back(scan.rid());
+                ++scan_cnt;
             }
         }
 
         // 3. 对每个候选RID进行可见性检查和条件过滤
+        int visible_cnt = 0, cond_pass_cnt = 0;
         for (auto &rid : candidate_rids) {
-            // 检查记录版本可见性
-            if (!IsRecordVisible(rid, context_->txn_, txn_mgr_, fh_)) {
+            if (!IsRecordVisible(rid, fh_, txn_mgr_, context_)) {
                 continue;
             }
+            ++visible_cnt;
 
-            // 获取记录数据
             auto record = GetVisibleRecord(rid, context_->txn_, txn_mgr_, fh_, context_, tab_);
             if (!record) {
                 continue;
             }
 
-            // 检查所有WHERE条件（包括非索引条件）
             if (EvaluateConditions(*record, conds_, tab_)) {
                 buffer_.push_back(std::make_unique<RmRecord>(*record));
+                ++cond_pass_cnt;
             }
         }
 
-        // 清理内存
         if (lower_key) delete[] lower_key;
         if (upper_key) delete[] upper_key;
     }
@@ -172,78 +171,81 @@ class MvccIndexScanExecutor : public AbstractExecutor {
 
         has_lower = false;
         has_upper = false;
+        // 检查哪些索引列有等值条件
+        std::vector<bool> has_eq_condition(index_cols_.size(), false);
+        std::vector<Value *> eq_values(index_cols_.size(), nullptr);
 
-        // 分析条件，构造扫描键值
         for (auto &cond : conds_) {
-            if (!cond.is_rhs_val) continue;  // 只处理与常量比较的条件
+            if (!cond.is_rhs_val || cond.op != OP_EQ) continue;
 
-            // 检查条件是否涉及索引列
-            bool is_index_col = false;
-            size_t col_offset = 0;
-            ColMeta *matched_index_col = nullptr;
-
-            for (auto &index_col : index_cols_) {
-                if (cond.lhs_col.col_name == index_col.name) {
-                    is_index_col = true;
-                    matched_index_col = &index_col;
+            for (size_t i = 0; i < index_cols_.size(); ++i) {
+                if (cond.lhs_col.col_name == index_cols_[i].name) {
+                    has_eq_condition[i] = true;
+                    eq_values[i] = &cond.rhs_val;
                     break;
                 }
-                col_offset += index_col.len;
+            }
+        }
+
+        // 检查是否有连续的等值条件从第一列开始
+        size_t eq_prefix_len = 0;
+        for (size_t i = 0; i < index_cols_.size(); ++i) {
+            if (has_eq_condition[i]) {
+                eq_prefix_len = i + 1;
+            } else {
+                break;
+            }
+        }
+
+        if (eq_prefix_len > 0) {
+            // 有等值条件，构造前缀扫描
+            lower_key = new char[key_size];
+            upper_key = new char[key_size];
+            memset(lower_key, 0, key_size);
+            memset(upper_key, 0, key_size);
+            has_lower = true;
+            has_upper = true;
+
+            size_t offset = 0;
+            for (size_t i = 0; i < eq_prefix_len; ++i) {
+                auto &val = *eq_values[i];
+                if (val.raw == nullptr) {
+                    val.init_raw(index_cols_[i].len);
+                }
+                memcpy(lower_key + offset, val.raw->data, index_cols_[i].len);
+                memcpy(upper_key + offset, val.raw->data, index_cols_[i].len);
+                offset += index_cols_[i].len;
             }
 
-            if (!is_index_col || !matched_index_col) continue;
+            // 如果还有剩余的列，需要构造正确的前缀范围
+            if (eq_prefix_len < index_cols_.size()) {
+                // 对于前缀查询，我们需要特殊处理上界
+                // 方法：构造"下一个前缀"作为上界
+                // 例如：name='Alice' -> 上界应该是name='Alice' + 1（在最后一个字符上+1）
 
-            // 根据操作符构造扫描范围
-            if (cond.op == OP_EQ) {
-                // 等值查询
-                if (!has_lower) {
-                    lower_key = new char[key_size];
-                    memset(lower_key, 0, key_size);
-                    has_lower = true;
-                }
-                if (!has_upper) {
-                    upper_key = new char[key_size];
-                    memset(upper_key, 0, key_size);
-                    has_upper = true;
-                }
+                // 先将下界的剩余部分设为0（最小值）
+                memset(lower_key + offset, 0, key_size - offset);
 
-                // 设置键值 - 使用正确的列长度
-                // 安全判断，避免非法长度导致 assert
-                if (cond.rhs_val.raw == nullptr || cond.rhs_val.raw->size < matched_index_col->len) {
-                    // 跳过该条件或给出警告
-                    continue;
-                }
-                cond.rhs_val.init_raw(matched_index_col->len);
-                memcpy(lower_key + col_offset, cond.rhs_val.raw->data, matched_index_col->len);
-                memcpy(upper_key + col_offset, cond.rhs_val.raw->data, matched_index_col->len);
-
-            } else if (cond.op == OP_GE || cond.op == OP_GT) {
-                // 范围查询下界
-                if (!has_lower) {
-                    lower_key = new char[key_size];
-                    memset(lower_key, 0, key_size);
-                    has_lower = true;
+                // 构造上界：尝试将前缀的最后一个字节+1
+                bool carry_over = true;
+                for (int i = offset - 1; i >= 0 && carry_over; --i) {
+                    if ((unsigned char)upper_key[i] < 255) {
+                        upper_key[i]++;
+                        carry_over = false;
+                        // 将这个字节之后的所有字节设为0
+                        memset(upper_key + i + 1, 0, key_size - i - 1);
+                    } else {
+                        // 当前字节已经是255，需要向前进位
+                        upper_key[i] = 0;
+                    }
                 }
 
-                if (cond.rhs_val.raw == nullptr || cond.rhs_val.raw->size < matched_index_col->len) {
-                    continue;
-                }
-                cond.rhs_val.init_raw(matched_index_col->len);
-                memcpy(lower_key + col_offset, cond.rhs_val.raw->data, matched_index_col->len);
-
-            } else if (cond.op == OP_LE || cond.op == OP_LT) {
-                // 范围查询上界
-                if (!has_upper) {
-                    upper_key = new char[key_size];
-                    memset(upper_key, 0, key_size);
-                    has_upper = true;
-                }
-
-                if (cond.rhs_val.raw == nullptr || cond.rhs_val.raw->size < matched_index_col->len) {
-                    continue;
-                }
-                cond.rhs_val.init_raw(matched_index_col->len);
-                memcpy(upper_key + col_offset, cond.rhs_val.raw->data, matched_index_col->len);
+                delete[] lower_key;
+                delete[] upper_key;
+                lower_key = nullptr;
+                upper_key = nullptr;
+                has_lower = false;
+                has_upper = false;
             }
         }
     }
