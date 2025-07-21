@@ -51,7 +51,17 @@ bool Planner::get_index_cols(std::string tab_name, std::vector<Condition> curr_c
         }
     }
 
+    // 修改：即使没有WHERE条件，也优先选择索引扫描来保证结果有序性
+    // 特别是对于主键索引，应该始终优先使用
     if (cols.empty()) {
+        // 没有WHERE条件时，选择第一个索引（通常是主键）
+        if (!tab.indexes.empty()) {
+            const auto &first_index = tab.indexes[0];
+            for (int i = 0; i < first_index.col_num; ++i) {
+                index_col_names.push_back(first_index.cols[i].name);
+            }
+            return true;
+        }
         return false;
     }
 
