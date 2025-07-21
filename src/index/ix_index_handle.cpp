@@ -346,7 +346,14 @@ bool IxIndexHandle::get_value(const char* key, std::vector<Rid>* result, Transac
     Rid* value = nullptr;
     bool found = leaf_node->leaf_lookup(key, &value);
     if (found && value) {
-        result->push_back(*value);
+        // 检查是否是溢出页引用
+        if (value->slot_no == IX_NO_SLOT && value->page_no != IX_NO_PAGE) {
+            // 这是一个溢出页引用，需要从溢出页中获取所有RID
+            get_all_rids_from_page(value->page_no, result);
+        } else {
+            // 普通RID，直接添加到结果中
+            result->push_back(*value);
+        }
     }
 
     // 读取完毕后释放叶子结点的读锁
@@ -535,16 +542,35 @@ page_id_t IxIndexHandle::insert_entry_force(const char* key, const Rid& value, T
     auto leaf_page = find_leaf_page(key, Operation::INSERT, transaction).first->page;
     auto leaf_node = new IxNodeHandle(file_hdr_, leaf_page);
     int pos = leaf_node->lower_bound(key);
+
+    // 检查键是否存在
+    if (pos >= leaf_node->get_size() ||
+        ix_compare(leaf_node->get_key(pos), key, file_hdr_->col_types_, file_hdr_->col_lens_) != 0) {
+        // 键不存在，执行普通插入
+        leaf_node->insert_pair(pos, key, value);
+        auto res = leaf_node->get_page_no();
+        UnlockAncestors(transaction);
+        leaf_page->WUnlatch();
+        buffer_pool_manager_->unpin_page(leaf_node->get_page_id(), true);
+        delete leaf_node;
+        return res;
+    }
+
+    // 键存在，处理溢出页
     auto rid_ = leaf_node->get_rid(pos);
-    if (rid_->slot_no == IX_NO_SLOT) {
+    if (rid_->slot_no == IX_NO_SLOT && rid_->page_no != IX_NO_PAGE) {
+        // 已经是溢出页引用，直接插入到溢出页
         insert_into_page(value, rid_->page_no);
     } else {
+        // 创建新的溢出页
         page_id_t overflow_page_no = create_page();
+        // 将原记录和新记录都插入溢出页
         insert_into_page(*rid_, overflow_page_no);
         insert_into_page(value, overflow_page_no);
         // 更新原RID为溢出页引用
         leaf_node->set_rid(pos, Rid{overflow_page_no, IX_NO_SLOT});
     }
+
     auto res = leaf_node->get_page_no();
     UnlockAncestors(transaction);
     leaf_page->WUnlatch();  // 插入完毕后释放叶子
@@ -636,21 +662,40 @@ bool IxIndexHandle::delete_entry_with_rid(const char* key, const Rid& rid, Trans
     auto rid_ = leaf_node->get_rid(pos);
     bool is_dirty = false;
     bool need_delete = true;
+
     // 检查是否为溢出页引用
     if (rid_->slot_no == IX_NO_SLOT && rid_->page_no != IX_NO_PAGE) {
+        // 从溢出页中删除指定的RID
         auto next_page_no = remove_from_page(rid, rid_->page_no, IX_NO_PAGE);
         is_dirty = (next_page_no != rid_->page_no);
-        leaf_node->set_rid(pos, Rid{next_page_no, IX_NO_SLOT});
+
         if (next_page_no != IX_NO_PAGE) {
+            // 溢出页中还有其他记录，更新引用
+            leaf_node->set_rid(pos, Rid{next_page_no, IX_NO_SLOT});
             need_delete = false;
+        } else {
+            // 溢出页为空，需要删除索引项
+            need_delete = true;
         }
+    } else if (rid_->page_no == rid.page_no && rid_->slot_no == rid.slot_no) {
+        // 直接匹配的RID，删除索引项
+        need_delete = true;
+    } else {
+        // RID不匹配，不需要删除
+        UnlockAncestors(transaction);
+        leaf_page->WUnlatch();
+        buffer_pool_manager_->unpin_page(leaf_node->get_page_id(), false);
+        delete leaf_node;
+        return false;
     }
+
     if (need_delete) {
         // 删除键
         leaf_node->erase_pair(pos);
         is_dirty = true;  // 删除操作需要标记为脏页
         coalesce_or_redistribute(leaf_node);
     }
+
     UnlockAncestors(transaction);
     leaf_page->WUnlatch();
     buffer_pool_manager_->unpin_page(leaf_node->get_page_id(), is_dirty);
@@ -925,7 +970,26 @@ Rid IxIndexHandle::get_rid(const Iid& iid) const {
         delete node;                                                   // 释放fetch_node创建的对象
         throw IndexEntryNotFoundError();
     }
+
     Rid result = *node->get_rid(iid.slot_no);
+
+    // 检查是否是溢出页引用
+    if (result.slot_no == IX_NO_SLOT && result.page_no != IX_NO_PAGE) {
+        // 这是一个溢出页引用，获取第一个实际记录
+        std::vector<Rid> rids;
+        get_all_rids_from_page(result.page_no, &rids);
+
+        if (!rids.empty()) {
+            // 使用溢出页中的第一个记录
+            result = rids[0];
+        } else {
+            // 溢出页为空，这是一个错误情况
+            buffer_pool_manager_->unpin_page(node->get_page_id(), false);
+            delete node;
+            throw IndexEntryNotFoundError();
+        }
+    }
+
     buffer_pool_manager_->unpin_page(node->get_page_id(), false);  // unpin it!
     delete node;                                                   // 释放fetch_node创建的对象
     return result;

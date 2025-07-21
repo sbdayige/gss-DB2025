@@ -219,11 +219,6 @@ class MvccIndexScanExecutor : public AbstractExecutor {
 
             // 如果还有剩余的列，需要构造正确的前缀范围
             if (eq_prefix_len < index_cols_.size()) {
-                // 对于前缀查询，我们需要特殊处理上界
-                // 方法：构造"下一个前缀"作为上界
-                // 例如：name='Alice' -> 上界应该是name='Alice' + 1（在最后一个字符上+1）
-
-                // 先将下界的剩余部分设为0（最小值）
                 memset(lower_key + offset, 0, key_size - offset);
 
                 // 构造上界：尝试将前缀的最后一个字节+1
