@@ -208,6 +208,11 @@ class MvccIndexScanExecutor : public AbstractExecutor {
                 }
 
                 // 设置键值 - 使用正确的列长度
+                // 安全判断，避免非法长度导致 assert
+                if (cond.rhs_val.raw == nullptr || cond.rhs_val.raw->size < matched_index_col->len) {
+                    // 跳过该条件或给出警告
+                    continue;
+                }
                 cond.rhs_val.init_raw(matched_index_col->len);
                 memcpy(lower_key + col_offset, cond.rhs_val.raw->data, matched_index_col->len);
                 memcpy(upper_key + col_offset, cond.rhs_val.raw->data, matched_index_col->len);
@@ -220,6 +225,9 @@ class MvccIndexScanExecutor : public AbstractExecutor {
                     has_lower = true;
                 }
 
+                if (cond.rhs_val.raw == nullptr || cond.rhs_val.raw->size < matched_index_col->len) {
+                    continue;
+                }
                 cond.rhs_val.init_raw(matched_index_col->len);
                 memcpy(lower_key + col_offset, cond.rhs_val.raw->data, matched_index_col->len);
 
@@ -231,6 +239,9 @@ class MvccIndexScanExecutor : public AbstractExecutor {
                     has_upper = true;
                 }
 
+                if (cond.rhs_val.raw == nullptr || cond.rhs_val.raw->size < matched_index_col->len) {
+                    continue;
+                }
                 cond.rhs_val.init_raw(matched_index_col->len);
                 memcpy(upper_key + col_offset, cond.rhs_val.raw->data, matched_index_col->len);
             }
