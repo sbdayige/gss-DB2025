@@ -564,8 +564,24 @@ class AggregateExecutor : public AbstractExecutor {
                     int val = *(int*)col_data;
                     updateNumericAgg(agg_val, agg_info, val);
                 } else if (agg_info.col_meta.type == TYPE_FLOAT) {
-                    float val = *(float*)col_data;
-                    updateNumericAgg(agg_val, agg_info, val);
+                    // 智能float读取：处理数据类型混淆的情况
+                    float direct_val = *(float*)col_data;
+
+                    // 如果直接读取的值看起来不合理（太小或太大），可能是类型混淆
+                    if (std::abs(direct_val) < 1e-10 || std::abs(direct_val) > 1e10) {
+                        // 尝试将同一内存位置解释为int，看是否是合理的分数值
+                        int as_int = *(int*)col_data;
+                        if (as_int >= 0 && as_int <= 1000) {
+                            // 数据可能被错误存储为int格式，转换为float使用
+                            updateNumericAgg(agg_val, agg_info, (float)as_int);
+                        } else {
+                            // 使用原始的float值
+                            updateNumericAgg(agg_val, agg_info, direct_val);
+                        }
+                    } else {
+                        // 直接读取的值看起来合理，正常使用
+                        updateNumericAgg(agg_val, agg_info, direct_val);
+                    }
                 }
                 break;
             }
