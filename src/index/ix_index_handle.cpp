@@ -791,12 +791,37 @@ void IxIndexHandle::create_new_root(const char* key, const Rid& value) {
 
 bool IxIndexHandle::insert_into_leaf(const char* key, const Rid& value, IxNodeHandle* leaf_node) {
     int pos = leaf_node->lower_bound(key);
+
+    // 检查是否存在完全相同的键值对（键和RID都相同）
     if (pos < leaf_node->page_hdr->num_key &&
         ix_compare(leaf_node->get_key(pos), key, file_hdr_->col_types_, file_hdr_->col_lens_) == 0) {
-        return false;
+        // 键相同，检查RID是否也相同
+        auto existing_rid = leaf_node->get_rid(pos);
+        if (existing_rid->page_no == value.page_no && existing_rid->slot_no == value.slot_no) {
+            // 完全相同的键值对，不需要重复插入
+            return true;  // 返回true表示操作成功
+        }
+
+        // 键相同但RID不同，需要处理重复键
+        // 检查是否已经是溢出页引用
+        if (existing_rid->slot_no == IX_NO_SLOT && existing_rid->page_no != IX_NO_PAGE) {
+            // 已经是溢出页，直接插入到溢出页
+            insert_into_page(value, existing_rid->page_no);
+        } else {
+            // 创建新的溢出页
+            page_id_t overflow_page_no = create_page();
+            // 将原记录和新记录都插入溢出页
+            insert_into_page(*existing_rid, overflow_page_no);
+            insert_into_page(value, overflow_page_no);
+            // 更新原RID为溢出页引用
+            leaf_node->set_rid(pos, Rid{overflow_page_no, IX_NO_SLOT});
+        }
+        return true;
     }
+
     // 插入键值对
     leaf_node->insert_pair(pos, key, value);
+
     // 如果叶子节点已满，则需要分裂
     if (leaf_node->get_size() >= leaf_node->get_max_size()) {
         IxNodeHandle* new_node = split(leaf_node);
@@ -1219,6 +1244,9 @@ void IxIndexHandle::release_node_handle(IxNodeHandle& node) {
 }
 
 void IxIndexHandle::UnlockAncestors(Transaction* transaction) {
+    if (!transaction) {
+        return;  // 如果没有事务，直接返回
+    }
     auto pages = transaction->get_index_latch_page_set();
     for (auto& page : *pages) {
         if (page == nullptr) {

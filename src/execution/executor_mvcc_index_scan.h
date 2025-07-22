@@ -111,12 +111,32 @@ class MvccIndexScanExecutor : public AbstractExecutor {
         // 2. 执行索引扫描
         std::vector<Rid> candidate_rids;
         int scan_cnt = 0;
+
         if (has_lower && has_upper) {
-            auto lower_iid = ih_->lower_bound(lower_key);
-            auto upper_iid = ih_->upper_bound(upper_key);
-            for (IxScan scan(ih_, lower_iid, upper_iid, sm_manager_->get_bpm()); !scan.is_end(); scan.next()) {
-                candidate_rids.push_back(scan.rid());
-                ++scan_cnt;
+            // 计算键的总长度
+            size_t key_total_len = 0;
+            for (auto &col : index_cols_) {
+                key_total_len += col.len;
+            }
+
+            // 对于等值查询，使用get_value方法更精确
+            if (memcmp(lower_key, upper_key, key_total_len) == 0) {
+                // 等值查询，直接使用get_value
+                std::vector<Rid> exact_rids;
+                if (ih_->get_value(lower_key, &exact_rids, context_->txn_)) {
+                    for (auto &rid : exact_rids) {
+                        candidate_rids.push_back(rid);
+                        ++scan_cnt;
+                    }
+                }
+            } else {
+                // 范围查询，使用扫描
+                auto lower_iid = ih_->lower_bound(lower_key);
+                auto upper_iid = ih_->upper_bound(upper_key);
+                for (IxScan scan(ih_, lower_iid, upper_iid, sm_manager_->get_bpm()); !scan.is_end(); scan.next()) {
+                    candidate_rids.push_back(scan.rid());
+                    ++scan_cnt;
+                }
             }
         } else if (has_lower) {
             auto lower_iid = ih_->lower_bound(lower_key);
@@ -133,6 +153,7 @@ class MvccIndexScanExecutor : public AbstractExecutor {
                 ++scan_cnt;
             }
         } else {
+            // 全表扫描
             for (IxScan scan(ih_, ih_->leaf_begin(), ih_->leaf_end(), sm_manager_->get_bpm()); !scan.is_end(); scan.next()) {
                 candidate_rids.push_back(scan.rid());
                 ++scan_cnt;
@@ -171,7 +192,32 @@ class MvccIndexScanExecutor : public AbstractExecutor {
 
         has_lower = false;
         has_upper = false;
-        // 检查哪些索引列有等值条件
+
+        // 对于单列索引的等值查询，直接使用get_value方法
+        if (index_cols_.size() == 1) {
+            for (auto &cond : conds_) {
+                if (cond.is_rhs_val && cond.op == OP_EQ &&
+                    cond.lhs_col.col_name == index_cols_[0].name) {
+                    // 构造查询键
+                    lower_key = new char[key_size];
+                    upper_key = new char[key_size];
+
+                    auto &val = cond.rhs_val;
+                    if (val.raw == nullptr) {
+                        val.init_raw(index_cols_[0].len);
+                    }
+
+                    memcpy(lower_key, val.raw->data, index_cols_[0].len);
+                    memcpy(upper_key, val.raw->data, index_cols_[0].len);
+
+                    has_lower = true;
+                    has_upper = true;
+                    return;
+                }
+            }
+        }
+
+        // 多列索引或复杂条件的处理
         std::vector<bool> has_eq_condition(index_cols_.size(), false);
         std::vector<Value *> eq_values(index_cols_.size(), nullptr);
 
@@ -219,28 +265,12 @@ class MvccIndexScanExecutor : public AbstractExecutor {
 
             // 如果还有剩余的列，需要构造正确的前缀范围
             if (eq_prefix_len < index_cols_.size()) {
+                // 对于前缀查询，我们需要特殊处理上界
+                // 先将下界的剩余部分设为0（最小值）
                 memset(lower_key + offset, 0, key_size - offset);
 
-                // 构造上界：尝试将前缀的最后一个字节+1
-                bool carry_over = true;
-                for (int i = offset - 1; i >= 0 && carry_over; --i) {
-                    if ((unsigned char)upper_key[i] < 255) {
-                        upper_key[i]++;
-                        carry_over = false;
-                        // 将这个字节之后的所有字节设为0
-                        memset(upper_key + i + 1, 0, key_size - i - 1);
-                    } else {
-                        // 当前字节已经是255，需要向前进位
-                        upper_key[i] = 0;
-                    }
-                }
-
-                delete[] lower_key;
-                delete[] upper_key;
-                lower_key = nullptr;
-                upper_key = nullptr;
-                has_lower = false;
-                has_upper = false;
+                // 构造上界：将剩余部分设为最大值
+                memset(upper_key + offset, 0xFF, key_size - offset);
             }
         }
     }

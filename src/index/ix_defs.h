@@ -99,7 +99,6 @@ class IxFileHdr {
         offset += sizeof(page_id_t);
         col_num_ = *reinterpret_cast<const int *>(src + offset);
         offset += sizeof(int);
-        std::cout << col_num_ << "\n";
         for (int i = 0; i < col_num_; ++i) {
             // col_types_[i] = *reinterpret_cast<const ColType*>(src + offset);
             ColType type = *reinterpret_cast<const ColType *>(src + offset);
