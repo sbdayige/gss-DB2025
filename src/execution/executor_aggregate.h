@@ -9,6 +9,8 @@ MERCHANTABILITY OR FIT FOR A PARTICULAR PURPOSE.
 See the Mulan PSL v2 for more details. */
 
 #pragma once
+#include <iomanip>
+#include <iostream>
 #include <limits>
 
 #include "errors.h"
@@ -18,6 +20,22 @@ See the Mulan PSL v2 for more details. */
 #include "index/ix.h"
 #include "parser/ast.h"
 #include "system/sm.h"
+
+// 调试宏定义
+#define DEBUG_AGG 1
+#if DEBUG_AGG
+#define AGG_DEBUG(x) std::cout << "[AGG_DEBUG] " << x << std::endl
+#define AGG_DEBUG_RECORD(stage, record, cols) debugLogRecord(stage, record, cols)
+#define AGG_DEBUG_GROUP(key) debugLogGroupKey(key)
+#define AGG_DEBUG_VALUE(name, value, before) debugLogAggValue(name, value, before)
+#define AGG_DEBUG_COMPARISON(op, old_val, new_val, updated) debugLogComparison(op, old_val, new_val, updated)
+#else
+#define AGG_DEBUG(x)
+#define AGG_DEBUG_RECORD(stage, record, cols)
+#define AGG_DEBUG_GROUP(key)
+#define AGG_DEBUG_VALUE(name, value, before)
+#define AGG_DEBUG_COMPARISON(op, old_val, new_val, updated)
+#endif
 
 /**
  * @brief 聚合函数执行器

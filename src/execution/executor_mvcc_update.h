@@ -110,8 +110,12 @@ class MvccUpdateExecutor : public AbstractExecutor {
                     }
                 }
 
-                value.raw.reset();
-                value.init_raw(lhs_col->len);
+                // 确保value有效且可以初始化raw数据
+                if (!value.raw) {
+                    value.raw.reset();
+                    value.init_raw(lhs_col->len);
+                }
+
                 memcpy(new_record.data + lhs_col->offset, value.raw->data, lhs_col->len);
             }
 
