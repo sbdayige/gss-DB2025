@@ -525,3 +525,94 @@ std::unique_ptr<RmRecord> RestoreRecordFromUndoLog(const UndoLog& undo_log, cons
 
     return record;
 }
+
+/**
+ * @brief 创建DELETE操作的UndoLog
+ */
+UndoLog CreateDeleteUndoLog(const RmRecord& record, const Rid& rid, const TabMeta& tab_meta,
+                            RmFileHandle* fh, TransactionManager* txn_mgr, Context* context) {
+    UndoLog undo_log;
+    undo_log.is_deleted_ = true;  // 表示这是删除操作
+    undo_log.tuple_test_ = new RmRecord(record);
+    undo_log.ts_ = txn_mgr->get_next_timestamp();
+    undo_log.txn_id = context->txn_->get_transaction_id();
+
+    // 设置前一个版本的链接信息
+    auto old_version_link = txn_mgr->GetVersionLink(fh->GetFd(), rid);
+    if (old_version_link.has_value()) {
+        undo_log.prev_version_ = old_version_link->prev_;
+    } else {
+        undo_log.prev_version_.prev_txn_ = INVALID_TXN_ID;
+        undo_log.prev_version_.prev_log_idx_ = -1;
+    }
+
+    // 填充修改字段信息（删除操作影响所有字段）
+    undo_log.modified_fields_.resize(tab_meta.cols.size(), true);
+    undo_log.tuple_.clear();
+    for (size_t i = 0; i < tab_meta.cols.size(); ++i) {
+        Value val;
+        if (tab_meta.cols[i].type == TYPE_INT) {
+            val.set_int(*(int*)(record.data + tab_meta.cols[i].offset));
+        } else if (tab_meta.cols[i].type == TYPE_FLOAT) {
+            val.set_float(*(float*)(record.data + tab_meta.cols[i].offset));
+        } else if (tab_meta.cols[i].type == TYPE_STRING) {
+            std::string str_val(record.data + tab_meta.cols[i].offset, tab_meta.cols[i].len);
+            str_val = str_val.c_str();
+            val.set_str(str_val);
+        }
+        undo_log.tuple_.push_back(val);
+    }
+
+    return undo_log;
+}
+
+/**
+ * @brief 创建INSERT操作的UndoLog
+ */
+UndoLog CreateInsertUndoLog(const RmRecord& record, const Rid& rid, const TabMeta& tab_meta,
+                            TransactionManager* txn_mgr, Context* context) {
+    UndoLog undo_log;
+    undo_log.is_deleted_ = false;  // INSERT操作，撤销时需要删除
+    undo_log.tuple_test_ = new RmRecord(record);
+    undo_log.ts_ = txn_mgr->get_next_timestamp();
+    undo_log.txn_id = context->txn_->get_transaction_id();
+    undo_log.modified_fields_.resize(tab_meta.cols.size(), true);  // INSERT影响所有字段
+    undo_log.prev_version_.prev_txn_ = INVALID_TXN_ID;             // INSERT操作没有前一个版本
+    undo_log.prev_version_.prev_log_idx_ = -1;
+    undo_log.tuple_.clear();
+    for (size_t i = 0; i < tab_meta.cols.size(); ++i) {
+        Value val;
+        if (tab_meta.cols[i].type == TYPE_INT) {
+            val.set_int(*(int*)(record.data + tab_meta.cols[i].offset));
+        } else if (tab_meta.cols[i].type == TYPE_FLOAT) {
+            val.set_float(*(float*)(record.data + tab_meta.cols[i].offset));
+        } else if (tab_meta.cols[i].type == TYPE_STRING) {
+            std::string str_val(record.data + tab_meta.cols[i].offset, tab_meta.cols[i].len);
+            str_val = str_val.c_str();
+            val.set_str(str_val);
+        }
+        undo_log.tuple_.push_back(val);
+    }
+
+    return undo_log;
+}
+
+/**
+ * @brief 检查间隙锁冲突（基于RmRecord）
+ */
+void CheckGapLockConflict(const RmRecord& record, const TabMeta& tab_meta, RmFileHandle* fh, Context* context) {
+    // 检查插入的记录是否与现有的间隙锁冲突
+    int tab_fd = fh->GetFd();
+    auto gap_conditions = context->lock_mgr_->get_gap_condition(tab_fd, context->txn_);
+
+    if (!gap_conditions.empty()) {
+        // 检查插入的记录是否满足任何间隙锁条件
+        TabMeta tab_meta_copy = tab_meta;  // 创建副本，因为EvaluateCondition需要非const引用
+        for (const auto& condition : gap_conditions) {
+            if (EvaluateCondition(record, condition, tab_meta_copy)) {
+                // 插入的记录满足其他事务的间隙锁条件，触发写冲突
+                throw TransactionAbortException(context->txn_->get_transaction_id(), AbortReason::DEADLOCK_PREVENTION);
+            }
+        }
+    }
+}

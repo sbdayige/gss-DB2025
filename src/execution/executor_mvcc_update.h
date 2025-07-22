@@ -48,7 +48,9 @@ class MvccUpdateExecutor : public AbstractExecutor {
         // 防止其他事务插入满足条件的记录
         if (!conds_.empty()) {
             int tab_fd = fh_->GetFd();
-            context_->lock_mgr_->lock_gap(context_->txn_, tab_fd, conds_);
+            if (!context_->lock_mgr_->lock_gap(context_->txn_, tab_fd, conds_)) {
+                throw TransactionAbortException(context_->txn_->get_transaction_id(), AbortReason::DEADLOCK_PREVENTION);
+            }
         }
     }
 
@@ -63,18 +65,13 @@ class MvccUpdateExecutor : public AbstractExecutor {
             if (!CheckWriteConflict(rid, fh_, txn_mgr_, context_)) {
                 throw TransactionAbortException(context_->txn_->get_transaction_id(), AbortReason::DEADLOCK_PREVENTION);
             }
-            // 1. 获取当前记录用于生成新记录
+
+            // 3. 获取当前记录用于生成新记录
             auto record = fh_->get_record(rid, context_);
             auto old_record = *record;
             records_.push_back(std::make_unique<RmRecord>(old_record));
 
-            // Debug: 打印原始记录内容
-            if (tab_.cols.size() >= 2) {
-                int old_id = *(int *)(old_record.data + tab_.cols[0].offset);
-                int old_score = *(int *)(old_record.data + tab_.cols[1].offset);
-            }
-
-            // 2. 构造新记录（根据SET子句修改相应字段）
+            // 4. 构造新记录（根据SET子句修改相应字段）
             RmRecord new_record = old_record;
             for (const auto &set_clause : set_clauses_) {
                 auto lhs_col = tab_.get_col(set_clause.lhs.col_name);
@@ -118,36 +115,118 @@ class MvccUpdateExecutor : public AbstractExecutor {
                 memcpy(new_record.data + lhs_col->offset, value.raw->data, lhs_col->len);
             }
 
-            // Debug: 打印新记录内容
-            if (tab_.cols.size() >= 2) {
-                int new_id = *(int *)(new_record.data + tab_.cols[0].offset);
-                int new_score = *(int *)(new_record.data + tab_.cols[1].offset);
-            }
-
-            // 3. 构造新记录的字段值
-            std::vector<Value> new_values;
-            for (size_t i = 0; i < tab_.cols.size(); ++i) {
-                Value val;
-                if (tab_.cols[i].type == TYPE_INT) {
-                    val.set_int(*(int *)(new_record.data + tab_.cols[i].offset));
-                } else if (tab_.cols[i].type == TYPE_FLOAT) {
-                    val.set_float(*(float *)(new_record.data + tab_.cols[i].offset));
-                } else if (tab_.cols[i].type == TYPE_STRING) {
-                    std::string str_val(new_record.data + tab_.cols[i].offset, tab_.cols[i].len);
-                    str_val = str_val.c_str();
-                    val.set_str(str_val);
+            // 5. 检查唯一索引约束（在删除前检查）
+            for (const auto &index : tab_.indexes) {
+                auto key = std::make_unique<char[]>(index.col_tot_len);
+                int offset = 0;
+                for (size_t j = 0; j < static_cast<size_t>(index.col_num); ++j) {
+                    memcpy(key.get() + offset, new_record.data + index.cols[j].offset, index.cols[j].len);
+                    offset += index.cols[j].len;
                 }
-                new_values.push_back(val);
-            }
-            // 4. 执行DELETE操作（删除旧记录）
-            std::vector<Rid> delete_rids = {rid};
-            std::vector<Condition> empty_conds;
-            MvccDeleteExecutor delete_executor(sm_manager_, txn_mgr_, tab_name_, empty_conds, delete_rids, context_);
-            delete_executor.Next();
 
-            // 5. 执行INSERT操作（插入新记录）
-            MvccInsertExecutor insert_executor(sm_manager_, txn_mgr_, tab_name_, new_values, context_);
-            insert_executor.Next();
+                // 检查索引是否已存在
+                std::vector<Rid> result;
+                auto ih = sm_manager_->ihs_.at(sm_manager_->get_ix_manager()->get_index_name(tab_name_, index.cols)).get();
+                bool is_exist = ih->get_value(key.get(), &result, context_->txn_);
+
+                if (is_exist) {
+                    // 检查是否存在除当前记录外的其他记录
+                    for (const auto &r : result) {
+                        if (r.page_no != rid.page_no || r.slot_no != rid.slot_no) {
+                            throw RMDBError("Failed to insert into index, rolled back record insertion at AbstractExecutor");
+                        }
+                    }
+                }
+            }
+
+            // 6. 执行DELETE操作（删除旧记录和索引项）
+            // 6.1 删除索引项
+            for (const auto &index : tab_.indexes) {
+                auto key = std::make_unique<char[]>(index.col_tot_len);
+                int offset = 0;
+                for (size_t j = 0; j < static_cast<size_t>(index.col_num); ++j) {
+                    memcpy(key.get() + offset, old_record.data + index.cols[j].offset, index.cols[j].len);
+                    offset += index.cols[j].len;
+                }
+
+                auto ih = sm_manager_->ihs_.at(sm_manager_->get_ix_manager()->get_index_name(tab_name_, index.cols)).get();
+                ih->delete_entry_with_rid(key.get(), rid, context_->txn_);
+            }
+
+            // 6.2 创建删除的undo log
+            UndoLog undo_log = CreateDeleteUndoLog(old_record, rid, tab_, fh_, txn_mgr_, context_);
+            context_->txn_->AppendUndoLog(undo_log);
+
+            UndoLink new_link;
+            new_link.prev_txn_ = context_->txn_->get_transaction_id();
+            new_link.prev_log_idx_ = context_->txn_->GetUndoLogNum() - 1;
+
+            VersionUndoLink version_link;
+            version_link.prev_ = new_link;
+            version_link.in_progress_ = true;
+
+            txn_mgr_->UpdateVersionLink(fh_->GetFd(), rid, version_link, [](std::optional<VersionUndoLink>) { return true; });
+
+            // 6.3 记录DELETE日志
+            if (context_ && context_->txn_ && context_->log_mgr_) {
+                DeleteLogRecord log_record(context_->txn_->get_transaction_id(), old_record, rid, tab_name_);
+                log_record.prev_lsn_ = context_->txn_->get_prev_lsn();
+                lsn_t lsn = context_->log_mgr_->add_log_to_buffer(&log_record);
+                context_->txn_->set_prev_lsn(lsn);
+            }
+
+            WriteRecord *write_record = new WriteRecord(WType::DELETE_TUPLE, tab_name_, rid, old_record);
+            context_->txn_->append_write_record(write_record);
+
+            // 7. 执行INSERT操作（插入新记录和索引项）
+            // 7.1 间隙锁冲突检测
+            CheckGapLockConflict(new_record, tab_, fh_, context_);
+
+            // 7.2 插入新记录到表中
+            Rid new_rid = fh_->insert_record(new_record.data, context_);
+
+            // 7.3 插入索引项
+            for (const auto &index : tab_.indexes) {
+                auto key = std::make_unique<char[]>(index.col_tot_len);
+                int offset = 0;
+                for (size_t j = 0; j < static_cast<size_t>(index.col_num); ++j) {
+                    memcpy(key.get() + offset, new_record.data + index.cols[j].offset, index.cols[j].len);
+                    offset += index.cols[j].len;
+                }
+
+                auto ih = sm_manager_->ihs_.at(sm_manager_->get_ix_manager()->get_index_name(tab_name_, index.cols)).get();
+                page_id_t res = ih->insert_entry(key.get(), new_rid, context_->txn_);
+
+                if (res == INVALID_PAGE_ID) {
+                    throw RMDBError("Failed to insert into index, rolled back record insertion at AbstractExecutor");
+                }
+            }
+
+            // 7.4 创建INSERT操作的UndoLog
+            UndoLog insert_undo_log = CreateInsertUndoLog(new_record, new_rid, tab_, txn_mgr_, context_);
+            context_->txn_->AppendUndoLog(insert_undo_log);
+
+            // 7.5 创建INSERT的版本链
+            UndoLink insert_link;
+            insert_link.prev_txn_ = context_->txn_->get_transaction_id();
+            insert_link.prev_log_idx_ = context_->txn_->GetUndoLogNum() - 1;
+
+            VersionUndoLink insert_version_link;
+            insert_version_link.prev_ = insert_link;
+            insert_version_link.in_progress_ = true;
+
+            txn_mgr_->UpdateVersionLink(fh_->GetFd(), new_rid, insert_version_link, [](std::optional<VersionUndoLink>) { return true; });
+
+            // 7.6 记录INSERT日志
+            if (context_ && context_->txn_ && context_->log_mgr_) {
+                InsertLogRecord log_record(context_->txn_->get_transaction_id(), new_record, new_rid, tab_name_);
+                log_record.prev_lsn_ = context_->txn_->get_prev_lsn();
+                lsn_t lsn = context_->log_mgr_->add_log_to_buffer(&log_record);
+                context_->txn_->set_prev_lsn(lsn);
+            }
+
+            WriteRecord *insert_write_record = new WriteRecord(WType::INSERT_TUPLE, tab_name_, new_rid, new_record);
+            context_->txn_->append_write_record(insert_write_record);
         }
         return nullptr;
     }

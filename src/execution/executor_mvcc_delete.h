@@ -10,6 +10,7 @@ See the Mulan PSL v2 for more details. */
 
 #pragma once
 
+#include "execution_common.h"
 #include "execution_defs.h"
 #include "execution_manager.h"
 #include "executor_abstract.h"
@@ -64,40 +65,9 @@ class MvccDeleteExecutor : public AbstractExecutor {
 
             auto delete_record = *record;
             records_.push_back(std::make_unique<RmRecord>(delete_record));
-            UndoLog undo_log;
-            undo_log.is_deleted_ = true;  // 表示这是删除操作
-            undo_log.tuple_test_ = new RmRecord(delete_record);
-            // 分配全局唯一递增的写时间戳
-            undo_log.ts_ = txn_mgr_->get_next_timestamp();
-            undo_log.txn_id = context_->txn_->get_transaction_id();
 
-            // 设置前一个版本的链接信息
-            auto old_version_link = txn_mgr_->GetVersionLink(fh_->GetFd(), rid);
-            if (old_version_link.has_value()) {
-                undo_log.prev_version_ = old_version_link->prev_;
-            } else {
-                undo_log.prev_version_.prev_txn_ = INVALID_TXN_ID;
-                undo_log.prev_version_.prev_log_idx_ = -1;
-            }
-
-            // 填充修改字段信息（删除操作影响所有字段）
-            undo_log.modified_fields_.resize(tab_.cols.size(), true);
-            undo_log.tuple_.clear();
-            for (size_t i = 0; i < tab_.cols.size(); ++i) {
-                Value val;
-                // 从记录数据中提取值
-                if (tab_.cols[i].type == TYPE_INT) {
-                    val.set_int(*(int *)(delete_record.data + tab_.cols[i].offset));
-                } else if (tab_.cols[i].type == TYPE_FLOAT) {
-                    val.set_float(*(float *)(delete_record.data + tab_.cols[i].offset));
-                } else if (tab_.cols[i].type == TYPE_STRING) {
-                    std::string str_val(delete_record.data + tab_.cols[i].offset, tab_.cols[i].len);
-                    // 移除末尾的空字符
-                    str_val = str_val.c_str();
-                    val.set_str(str_val);
-                }
-                undo_log.tuple_.push_back(val);
-            }
+            // 创建DELETE操作的UndoLog
+            UndoLog undo_log = CreateDeleteUndoLog(delete_record, rid, tab_, fh_, txn_mgr_, context_);
 
             context_->txn_->AppendUndoLog(undo_log);
 

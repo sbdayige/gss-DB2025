@@ -116,3 +116,37 @@ std::unique_ptr<RmRecord> GetVisibleRecord(const Rid& rid, Transaction* txn, Tra
  * @return 恢复的记录
  */
 std::unique_ptr<RmRecord> RestoreRecordFromUndoLog(const UndoLog& undo_log, const TabMeta& tab_meta);
+
+/**
+ * @brief 创建DELETE操作的UndoLog
+ * @param record 要删除的记录
+ * @param rid 记录ID
+ * @param tab_meta 表元数据
+ * @param fh 文件句柄
+ * @param txn_mgr 事务管理器
+ * @param context 执行上下文
+ * @return 创建的UndoLog
+ */
+UndoLog CreateDeleteUndoLog(const RmRecord& record, const Rid& rid, const TabMeta& tab_meta,
+                            RmFileHandle* fh, TransactionManager* txn_mgr, Context* context);
+
+/**
+ * @brief 创建INSERT操作的UndoLog
+ * @param record 要插入的记录
+ * @param rid 记录ID
+ * @param tab_meta 表元数据
+ * @param txn_mgr 事务管理器
+ * @param context 执行上下文
+ * @return 创建的UndoLog
+ */
+UndoLog CreateInsertUndoLog(const RmRecord& record, const Rid& rid, const TabMeta& tab_meta,
+                            TransactionManager* txn_mgr, Context* context);
+
+/**
+ * @brief 检查间隙锁冲突（基于RmRecord）
+ * @param record 要检查的记录
+ * @param tab_meta 表元数据
+ * @param fh 文件句柄
+ * @param context 执行上下文
+ */
+void CheckGapLockConflict(const RmRecord& record, const TabMeta& tab_meta, RmFileHandle* fh, Context* context);

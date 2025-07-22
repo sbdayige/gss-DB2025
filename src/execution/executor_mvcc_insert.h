@@ -45,7 +45,17 @@ class MvccInsertExecutor : public AbstractExecutor {
         }
 
         // 间隙锁冲突检测：检查插入的记录是否与现有的间隙锁冲突
-        CheckGapLockConflict();
+        // 为插入的记录构造一个临时记录用于条件检查
+        RmRecord temp_record(fh_->get_file_hdr().record_size);
+        for (size_t i = 0; i < values_.size(); ++i) {
+            auto &col = tab_.cols[i];
+            auto &val = values_[i];
+            if (!val.raw) {
+                val.init_raw(col.len);
+            }
+            memcpy(temp_record.data + col.offset, val.raw->data, col.len);
+        }
+        CheckGapLockConflict(temp_record, tab_, fh_, context_);
 
         for (size_t i = 0; i < values_.size(); ++i) {
             auto &col = tab_.cols[i];
@@ -98,31 +108,8 @@ class MvccInsertExecutor : public AbstractExecutor {
         insert_link.prev_txn_ = context_->txn_->get_transaction_id();
         insert_link.prev_log_idx_ = context_->txn_->GetUndoLogNum();  // 将要添加的UndoLog的索引
 
-        // 创建UndoLog（INSERT操作的UndoLog记录被插入的记录）
-        UndoLog undo_log;
-        undo_log.is_deleted_ = false;  // INSERT操作，撤销时需要删除
-        undo_log.tuple_test_ = rec.get();
-        // 分配全局唯一递增的写时间戳
-        undo_log.ts_ = txn_mgr_->get_next_timestamp();
-        undo_log.txn_id = context_->txn_->get_transaction_id();
-        undo_log.modified_fields_.resize(tab_.cols.size(), true);  // INSERT影响所有字段
-        undo_log.prev_version_.prev_txn_ = INVALID_TXN_ID;         // INSERT操作没有前一个版本
-        undo_log.prev_version_.prev_log_idx_ = -1;
-        undo_log.tuple_.clear();
-        for (size_t i = 0; i < tab_.cols.size(); ++i) {
-            Value val;
-            if (tab_.cols[i].type == TYPE_INT) {
-                val.set_int(*(int *)(rec->data + tab_.cols[i].offset));
-            } else if (tab_.cols[i].type == TYPE_FLOAT) {
-                val.set_float(*(float *)(rec->data + tab_.cols[i].offset));
-            } else if (tab_.cols[i].type == TYPE_STRING) {
-                std::string str_val(rec->data + tab_.cols[i].offset, tab_.cols[i].len);
-                str_val = str_val.c_str();
-                val.set_str(str_val);
-            }
-            undo_log.tuple_.push_back(val);
-        }
-
+        // 创建INSERT操作的UndoLog
+        UndoLog undo_log = CreateInsertUndoLog(*rec, rid_, tab_, txn_mgr_, context_);
         context_->txn_->AppendUndoLog(undo_log);
 
         // 创建版本链
@@ -136,32 +123,4 @@ class MvccInsertExecutor : public AbstractExecutor {
     }
 
     Rid &rid() override { return rid_; }
-
-   private:
-    void CheckGapLockConflict() {
-        // 检查插入的记录是否与现有的间隙锁冲突
-        int tab_fd = fh_->GetFd();
-        auto gap_conditions = context_->lock_mgr_->get_gap_condition(tab_fd, context_->txn_);
-
-        if (!gap_conditions.empty()) {
-            // 为插入的记录构造一个临时记录用于条件检查
-            RmRecord temp_record(fh_->get_file_hdr().record_size);
-            for (size_t i = 0; i < values_.size(); ++i) {
-                auto &col = tab_.cols[i];
-                auto &val = values_[i];
-                if (!val.raw) {
-                    val.init_raw(col.len);
-                }
-                memcpy(temp_record.data + col.offset, val.raw->data, col.len);
-            }
-
-            // 检查插入的记录是否满足任何间隙锁条件
-            for (const auto &condition : gap_conditions) {
-                if (EvaluateCondition(temp_record, condition, tab_)) {
-                    // 插入的记录满足其他事务的间隙锁条件，触发写冲突
-                    throw TransactionAbortException(context_->txn_->get_transaction_id(), AbortReason::DEADLOCK_PREVENTION);
-                }
-            }
-        }
-    }
 };
