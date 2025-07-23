@@ -154,6 +154,45 @@ void TransactionManager::commit(Transaction* txn, LogManager* log_manager) {
 }
 
 /**
+ * @brief 恢复记录的索引项（用于事务回滚）
+ */
+void TransactionManager::RestoreIndexForRecord(const std::string& table_name, const RmRecord& rec,
+                                               const Rid& rid, Context* context) {
+    TabMeta& tab_meta = sm_manager_->db_.get_table(table_name);
+
+    // 遍历表的所有索引
+    for (size_t i = 0; i < tab_meta.indexes.size(); ++i) {
+        auto& index = tab_meta.indexes[i];
+        auto ih = sm_manager_->ihs_.at(sm_manager_->get_ix_manager()->get_index_name(table_name, index.cols)).get();
+        auto key = std::make_unique<char[]>(index.col_tot_len);
+        int offset = 0;
+        for (size_t j = 0; j < static_cast<size_t>(index.col_num); ++j) {
+            memcpy(key.get() + offset, rec.data + index.cols[j].offset, index.cols[j].len);
+            offset += index.cols[j].len;
+        }
+
+        // 检查索引项是否已存在，避免重复插入
+        std::vector<Rid> existing_rids;
+        if (ih->get_value(key.get(), &existing_rids, context->txn_)) {
+            // 检查是否已经存在指向该RID的索引项
+            bool already_exists = false;
+            for (const auto& existing_rid : existing_rids) {
+                if (existing_rid.page_no == rid.page_no && existing_rid.slot_no == rid.slot_no) {
+                    already_exists = true;
+                    break;
+                }
+            }
+            if (!already_exists) {
+                ih->insert_entry_force(key.get(), rid, context->txn_);
+            }
+        } else {
+            // 索引项不存在，直接插入
+            ih->insert_entry_force(key.get(), rid, context->txn_);
+        }
+    }
+}
+
+/**
  * @description: 事务的终止（回滚）方法
  * @param {Context *} context 包含事务信息的上下文
  * @param {LogManager} *log_manager 日志管理器指针
@@ -175,10 +214,8 @@ void TransactionManager::abort(Context* context, LogManager* log_manager) {
             handle->delete_record(rid, context);
             sm_manager_->delete_index_with_rid(table_name, rec, rid, context->txn_);
         } else if (write_type == WType::DELETE_TUPLE) {
-            // MVCC下delete只打标记，回滚时只需撤销版本链即可
-            // 如需恢复索引可在此补充
             auto rec = (*iter)->GetRecord();
-            handle->insert_record_force(rid, rec.data);
+            RestoreIndexForRecord(table_name, rec, rid, context);
         }
         // 删除版本链记录
         DeleteUpdateVersionLink(handle->GetFd(), rid, context->txn_);

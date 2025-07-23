@@ -18,6 +18,7 @@ See the Mulan PSL v2 for more details. */
 #include <thread>
 #include <unordered_map>
 
+#include "common/context.h"
 #include "common/exception.h"
 #include "concurrency/lock_manager.h"
 #include "recovery/log_manager.h"
@@ -190,6 +191,11 @@ class TransactionManager {
     }
 
     UndoLink DeleteUpdateVersionLink(const int &fd, Rid rid, Transaction *txn);
+
+    /** @brief 恢复记录的索引项（用于事务回滚） */
+    void RestoreIndexForRecord(const std::string &table_name, const RmRecord &rec,
+                               const Rid &rid, Context *context);
+
     /** 保护版本信息 */
     std::shared_mutex version_info_mutex_;
     /** 存储表堆中每个元组的先前版本，使用TableRid作为键以区分不同表的记录。 */
