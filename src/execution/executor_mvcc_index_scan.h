@@ -265,12 +265,31 @@ class MvccIndexScanExecutor : public AbstractExecutor {
 
             // 如果还有剩余的列，需要构造正确的前缀范围
             if (eq_prefix_len < index_cols_.size()) {
-                // 对于前缀查询，我们需要特殊处理上界
-                // 先将下界的剩余部分设为0（最小值）
+                // 对于前缀查询，下界的剩余部分设为0（最小值）
                 memset(lower_key + offset, 0, key_size - offset);
-
-                // 构造上界：将剩余部分设为最大值
-                memset(upper_key + offset, 0xFF, key_size - offset);
+                
+                // 上界需要特殊处理：构造下一个前缀
+                // 复制前缀部分到上界
+                memcpy(upper_key, lower_key, offset);
+                
+                // 尝试递增前缀以得到下一个前缀的起始位置
+                bool carry = true;
+                for (int i = offset - 1; i >= 0 && carry; --i) {
+                    if ((unsigned char)upper_key[i] < 0xFF) {
+                        upper_key[i]++;
+                        carry = false;
+                    } else {
+                        upper_key[i] = 0;
+                    }
+                }
+                
+                if (carry) {
+                    // 如果前缀已经是最大值，则使用全局最大上界
+                    memset(upper_key, 0xFF, key_size);
+                } else {
+                    // 将剩余部分设为0，这样就是下一个前缀的最小值
+                    memset(upper_key + offset, 0, key_size - offset);
+                }
             }
         }
     }
