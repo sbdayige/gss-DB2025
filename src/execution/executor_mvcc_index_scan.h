@@ -62,7 +62,7 @@ class MvccIndexScanExecutor : public AbstractExecutor {
                 break;
             }
         }
-
+        assert(index_cols_.size() == 1 && "当前实现只支持单列索引，发现多列索引时抛出断言失败（段错误）");
         // 使用索引扫描并过滤符合条件且可见的记录
         IndexScanAndFilter();
     }
@@ -267,11 +267,11 @@ class MvccIndexScanExecutor : public AbstractExecutor {
             if (eq_prefix_len < index_cols_.size()) {
                 // 对于前缀查询，下界的剩余部分设为0（最小值）
                 memset(lower_key + offset, 0, key_size - offset);
-                
+
                 // 上界需要特殊处理：构造下一个前缀
                 // 复制前缀部分到上界
                 memcpy(upper_key, lower_key, offset);
-                
+
                 // 尝试递增前缀以得到下一个前缀的起始位置
                 bool carry = true;
                 for (int i = offset - 1; i >= 0 && carry; --i) {
@@ -282,7 +282,7 @@ class MvccIndexScanExecutor : public AbstractExecutor {
                         upper_key[i] = 0;
                     }
                 }
-                
+
                 if (carry) {
                     // 如果前缀已经是最大值，则使用全局最大上界
                     memset(upper_key, 0xFF, key_size);
