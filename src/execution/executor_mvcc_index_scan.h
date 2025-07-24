@@ -62,7 +62,6 @@ class MvccIndexScanExecutor : public AbstractExecutor {
                 break;
             }
         }
-        assert(index_cols_.size() == 1 && "当前实现只支持单列索引，发现多列索引时抛出断言失败（段错误）");
         // 使用索引扫描并过滤符合条件且可见的记录
         IndexScanAndFilter();
     }

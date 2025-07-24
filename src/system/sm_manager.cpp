@@ -324,6 +324,8 @@ void SmManager::show_index(const std::string& tab_name, Context* context) {
 void SmManager::create_index(const std::string& tab_name, const std::vector<std::string>& col_names, Context* context) {
     TabMeta& tab = db_.get_table(tab_name);
 
+    assert(col_names.size() == 1 && "当前实现只支持单列索引，发现多列索引时抛出断言失败（段错误）");
+
     if (ix_manager_->exists(tab_name, col_names)) {
         throw IndexExistsError(tab_name, col_names);
     }
