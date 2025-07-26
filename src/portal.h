@@ -157,7 +157,6 @@ class Portal {
             // 数据定义语言计划：CREATE/DROP TABLE/INDEX等
             return std::make_shared<PortalStmt>(PORTAL_MULTI_QUERY, std::vector<TabCol>(), std::unique_ptr<AbstractExecutor>(), plan);
         } else if (auto x = std::dynamic_pointer_cast<DMLPlan>(plan)) {
-            int num_insert = 0;
             switch (x->tag) {
                 case T_Explain: {
                     // EXPLAIN语句处理：直接使用命令工具模式，避免包装成SELECT
@@ -200,8 +199,6 @@ class Portal {
                 }
 
                 case T_Insert: {
-                    num_insert++;
-                    assert(num_insert <= 300);
                     std::unique_ptr<AbstractExecutor> root =
                         std::make_unique<MvccInsertExecutor>(sm_manager_, txn_mgr_, x->tab_name_, x->values_, context);
 

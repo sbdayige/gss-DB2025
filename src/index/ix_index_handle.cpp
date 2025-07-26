@@ -403,6 +403,9 @@ IxNodeHandle* IxIndexHandle::split(IxNodeHandle* node) {
             next_node->set_prev_leaf(new_node->get_page_no());
             buffer_pool_manager_->unpin_page(next_node->get_page_id(), true);
             delete next_node;  // 释放fetch_node创建的对象
+        } else {
+            // 如果新节点是最后一个叶子节点，更新last_leaf_
+            file_hdr_->last_leaf_ = new_node->get_page_no();
         }
     } else {
         // 更新子节点的父指针
