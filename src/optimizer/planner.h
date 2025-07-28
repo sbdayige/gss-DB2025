@@ -17,15 +17,15 @@
 #include "record/rm.h"
 #include "system/sm.h"
 
+extern SmManager sm_manager;
+
 class Planner {
    private:
-    SmManager *sm_manager_;
-
     bool enable_nestedloop_join = true;
     bool enable_sortmerge_join = false;
 
    public:
-    Planner(SmManager *sm_manager) : sm_manager_(sm_manager) {}
+    Planner() = default;
 
     std::shared_ptr<Plan> do_planner(std::shared_ptr<Query> query, Context *context);
 

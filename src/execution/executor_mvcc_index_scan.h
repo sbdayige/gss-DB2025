@@ -17,6 +17,9 @@ See the Mulan PSL v2 for more details. */
 #include "index/ix.h"
 #include "system/sm.h"
 
+extern SmManager sm_manager;
+extern TransactionManager txn_manager;
+
 class MvccIndexScanExecutor : public AbstractExecutor {
    private:
     std::string tab_name_;                           // 表名称
@@ -26,8 +29,6 @@ class MvccIndexScanExecutor : public AbstractExecutor {
     std::vector<ColMeta> cols_;                      // 需要读取的字段
     size_t tuple_idx_;                               // 当前遍历到的tuple位置
     std::vector<std::unique_ptr<RmRecord>> buffer_;  // 符合条件的记录缓冲区
-    SmManager *sm_manager_;
-    TransactionManager *txn_mgr_;  // 事务管理器指针
 
     // 索引相关
     std::string index_name_;           // 使用的索引名称
@@ -36,13 +37,11 @@ class MvccIndexScanExecutor : public AbstractExecutor {
     bool fed_to_upper_;                // 是否已经被上层执行器消费
 
    public:
-    MvccIndexScanExecutor(SmManager *sm_manager, TransactionManager *txn_mgr, const std::string &tab_name, std::vector<Condition> conds,
+    MvccIndexScanExecutor(const std::string &tab_name, std::vector<Condition> conds,
                           std::vector<ColMeta> cols, const std::string &index_name, Context *context) {
-        sm_manager_ = sm_manager;
-        txn_mgr_ = txn_mgr;
         tab_name_ = tab_name;
-        tab_ = sm_manager_->db_.get_table(tab_name);
-        fh_ = sm_manager_->fhs_.at(tab_name).get();
+        tab_ = sm_manager.db_.get_table(tab_name);
+        fh_ = sm_manager.fhs_.at(tab_name).get();
         conds_ = conds;
         cols_ = cols;
         context_ = context;
@@ -51,11 +50,11 @@ class MvccIndexScanExecutor : public AbstractExecutor {
         index_name_ = index_name;
 
         // 获取索引句柄
-        ih_ = sm_manager_->ihs_.at(index_name).get();
+        ih_ = sm_manager.ihs_.at(index_name).get();
 
         // 获取索引列信息
         for (auto &index : tab_.indexes) {
-            if (sm_manager_->get_ix_manager()->get_index_name(tab_name_, index.cols) == index_name_) {
+            if (sm_manager.get_ix_manager()->get_index_name(tab_name_, index.cols) == index_name_) {
                 for (int i = 0; i < index.col_num; ++i) {
                     index_cols_.push_back(index.cols[i]);
                 }
@@ -132,7 +131,7 @@ class MvccIndexScanExecutor : public AbstractExecutor {
                 // 范围查询，使用扫描
                 auto lower_iid = ih_->lower_bound(lower_key);
                 auto upper_iid = ih_->upper_bound(upper_key);
-                for (IxScan scan(ih_, lower_iid, upper_iid, sm_manager_->get_bpm()); !scan.is_end(); scan.next()) {
+                for (IxScan scan(ih_, lower_iid, upper_iid, sm_manager.get_bpm()); !scan.is_end(); scan.next()) {
                     candidate_rids.push_back(scan.rid());
                     ++scan_cnt;
                 }
@@ -140,20 +139,20 @@ class MvccIndexScanExecutor : public AbstractExecutor {
         } else if (has_lower) {
             auto lower_iid = ih_->lower_bound(lower_key);
             auto upper_iid = ih_->leaf_end();
-            for (IxScan scan(ih_, lower_iid, upper_iid, sm_manager_->get_bpm()); !scan.is_end(); scan.next()) {
+            for (IxScan scan(ih_, lower_iid, upper_iid, sm_manager.get_bpm()); !scan.is_end(); scan.next()) {
                 candidate_rids.push_back(scan.rid());
                 ++scan_cnt;
             }
         } else if (has_upper) {
             auto lower_iid = ih_->leaf_begin();
             auto upper_iid = ih_->upper_bound(upper_key);
-            for (IxScan scan(ih_, lower_iid, upper_iid, sm_manager_->get_bpm()); !scan.is_end(); scan.next()) {
+            for (IxScan scan(ih_, lower_iid, upper_iid, sm_manager.get_bpm()); !scan.is_end(); scan.next()) {
                 candidate_rids.push_back(scan.rid());
                 ++scan_cnt;
             }
         } else {
             // 全表扫描
-            for (IxScan scan(ih_, ih_->leaf_begin(), ih_->leaf_end(), sm_manager_->get_bpm()); !scan.is_end(); scan.next()) {
+            for (IxScan scan(ih_, ih_->leaf_begin(), ih_->leaf_end(), sm_manager.get_bpm()); !scan.is_end(); scan.next()) {
                 candidate_rids.push_back(scan.rid());
                 ++scan_cnt;
             }
@@ -162,12 +161,12 @@ class MvccIndexScanExecutor : public AbstractExecutor {
         // 3. 对每个候选RID进行可见性检查和条件过滤
         int visible_cnt = 0, cond_pass_cnt = 0;
         for (auto &rid : candidate_rids) {
-            if (!IsRecordVisible(rid, fh_, txn_mgr_, context_)) {
+            if (!IsRecordVisible(rid, fh_, &txn_manager, context_)) {
                 continue;
             }
             ++visible_cnt;
 
-            auto record = GetVisibleRecord(rid, context_->txn_, txn_mgr_, fh_, context_, tab_);
+            auto record = GetVisibleRecord(rid, context_->txn_, &txn_manager, fh_, context_, tab_);
             if (!record) {
                 continue;
             }

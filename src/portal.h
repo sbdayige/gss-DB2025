@@ -50,6 +50,8 @@ See the Mulan PSL v2 for more details. */
 #include "execution/executor_mvcc_select.h"
 #include "execution/executor_mvcc_update.h"
 
+extern SmManager sm_manager;
+
 /**
  * @brief 门户类型枚举
  *
@@ -108,14 +110,13 @@ struct PortalStmt {
  */
 class Portal {
    private:
-    SmManager* sm_manager_;        ///< 系统管理器指针，用于访问表、索引等元数据
     TransactionManager* txn_mgr_;  ///< 事务管理器指针，用于MVCC执行器
 
    public:
     std::vector<Rid> CollectMatchedRids(const std::string& tab_name, const std::vector<Condition>& conds, Context* context) {
         std::vector<Rid> rids;
-        auto tab = sm_manager_->db_.get_table(tab_name);
-        auto fh = sm_manager_->fhs_.at(tab_name).get();
+        auto tab = sm_manager.db_.get_table(tab_name);
+        auto fh = sm_manager.fhs_.at(tab_name).get();
         for (RmScan scan(fh); !scan.is_end(); scan.next()) {
             auto rid = scan.rid();
             auto record = fh->get_record(rid, context);
@@ -139,7 +140,7 @@ class Portal {
      * @param sm_manager 系统管理器指针
      * @param txn_mgr 事务管理器指针
      */
-    Portal(SmManager* sm_manager, TransactionManager* txn_mgr) : sm_manager_(sm_manager), txn_mgr_(txn_mgr) {}
+    Portal(TransactionManager* txn_mgr) : txn_mgr_(txn_mgr) {}
     ~Portal() {}
 
     std::shared_ptr<PortalStmt> start(std::shared_ptr<Plan> plan, Context* context) {
@@ -187,20 +188,20 @@ class Portal {
 
                 case T_Update: {
                     auto rids = CollectMatchedRids(x->tab_name_, x->conds_, context);
-                    std::unique_ptr<AbstractExecutor> root = std::make_unique<MvccUpdateExecutor>(sm_manager_, txn_mgr_,
-                                                                                                  x->tab_name_, x->set_clauses_, x->conds_, rids, context);
+                    std::unique_ptr<AbstractExecutor> root = std::make_unique<MvccUpdateExecutor>(
+                        x->tab_name_, x->set_clauses_, x->conds_, rids, context);
                     return std::make_shared<PortalStmt>(PORTAL_DML_WITHOUT_SELECT, std::vector<TabCol>(), std::move(root), plan);
                 }
                 case T_Delete: {
                     auto rids = CollectMatchedRids(x->tab_name_, x->conds_, context);
                     std::unique_ptr<AbstractExecutor> root =
-                        std::make_unique<MvccDeleteExecutor>(sm_manager_, txn_mgr_, x->tab_name_, x->conds_, rids, context);
+                        std::make_unique<MvccDeleteExecutor>(x->tab_name_, x->conds_, rids, context);
                     return std::make_shared<PortalStmt>(PORTAL_DML_WITHOUT_SELECT, std::vector<TabCol>(), std::move(root), plan);
                 }
 
                 case T_Insert: {
                     std::unique_ptr<AbstractExecutor> root =
-                        std::make_unique<MvccInsertExecutor>(sm_manager_, txn_mgr_, x->tab_name_, x->values_, context);
+                        std::make_unique<MvccInsertExecutor>(x->tab_name_, x->values_, context);
 
                     return std::make_shared<PortalStmt>(PORTAL_DML_WITHOUT_SELECT, std::vector<TabCol>(), std::move(root), plan);
                 }
@@ -268,11 +269,11 @@ class Portal {
             // 扫描计划转换 - MVCC版本
             // ===============================
             if (x->tag == T_SeqScan) {
-                auto executor = std::make_unique<MvccSelectExecutor>(sm_manager_, txn_mgr_, x->tab_name_, x->conds_, x->cols_, context);
+                auto executor = std::make_unique<MvccSelectExecutor>(x->tab_name_, x->conds_, x->cols_, context);
                 return executor;
             } else {
-                std::string index_name = sm_manager_->get_ix_manager()->get_index_name(x->tab_name_, x->index_col_names_);
-                auto executor = std::make_unique<MvccIndexScanExecutor>(sm_manager_, txn_mgr_, x->tab_name_, x->conds_, x->cols_, index_name, context);
+                std::string index_name = sm_manager.get_ix_manager()->get_index_name(x->tab_name_, x->index_col_names_);
+                auto executor = std::make_unique<MvccIndexScanExecutor>(x->tab_name_, x->conds_, x->cols_, index_name, context);
                 return executor;
             }
         } else if (auto x = std::dynamic_pointer_cast<JoinPlan>(plan)) {

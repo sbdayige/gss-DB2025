@@ -31,6 +31,9 @@ enum class ConcurrencyMode { TWO_PHASE_LOCKING = 0,
                              BASIC_TO,
                              MVCC };
 
+extern SmManager sm_manager;
+extern LockManager lock_manager;
+
 /// 版本链中的第一个撤销链接，将表堆元组链接到撤销日志。
 struct VersionUndoLink {
     /** 版本链中的下一个版本。 */
@@ -72,12 +75,7 @@ struct TableRidHash {
 
 class TransactionManager {
    public:
-    explicit TransactionManager(LockManager *lock_manager, SmManager *sm_manager,
-                                ConcurrencyMode concurrency_mode = ConcurrencyMode::TWO_PHASE_LOCKING) {
-        sm_manager_ = sm_manager;
-        lock_manager_ = lock_manager;
-        concurrency_mode_ = concurrency_mode;
-    }
+    explicit TransactionManager(ConcurrencyMode concurrency_mode = ConcurrencyMode::TWO_PHASE_LOCKING);
 
     ~TransactionManager() = default;
 
@@ -91,7 +89,7 @@ class TransactionManager {
 
     void set_concurrency_mode(ConcurrencyMode concurrency_mode) { concurrency_mode_ = concurrency_mode; }
 
-    LockManager *get_lock_manager() { return lock_manager_; }
+    LockManager *get_lock_manager() { return &lock_manager; }
 
     /**
      * @description: 获取事务ID为txn_id的事务对象
@@ -206,8 +204,6 @@ class TransactionManager {
     std::atomic<txn_id_t> next_txn_id_{0};        // 用于分发事务ID
     std::atomic<timestamp_t> next_timestamp_{0};  // 用于分发事务时间戳
     std::mutex latch_;                            // 用于txn_map的并发
-    SmManager *sm_manager_;
-    LockManager *lock_manager_;
 
     std::atomic<timestamp_t> last_commit_ts_{0};  // 最后提交的时间戳,仅用于MVCC
     Watermark running_txns_{0};                   // 存储所有正在运行事务的读取时间戳，以便于垃圾回收，仅用于MVCC

@@ -19,6 +19,11 @@ See the Mulan PSL v2 for more details. */
 #include "record/rm.h"
 #include "record_printer.h"
 
+extern DiskManager disk_manager;
+extern BufferPoolManager buffer_pool_manager;
+extern RmManager rm_manager;
+extern IxManager ix_manager;
+
 /**
  * @description: 判断是否为一个文件夹
  * @return {bool} 返回是否为一个文件夹
@@ -58,7 +63,7 @@ void SmManager::create_db(const std::string& db_name) {
     delete new_db;
 
     // 创建日志文件
-    disk_manager_->create_file(LOG_FILE_NAME);
+    disk_manager.create_file(LOG_FILE_NAME);
 
     // 回到根目录
     if (chdir("..") < 0) {
@@ -107,10 +112,10 @@ void SmManager::open_db(const std::string& db_name) {
     for (auto& tab : db_.tabs_) {
         const std::string& tab_name = tab.first;
         auto& tab_meta = tab.second;
-        fhs_[tab_name] = rm_manager_->open_file(tab_name);
+        fhs_[tab_name] = rm_manager.open_file(tab_name);
         for (auto& index : tab_meta.indexes) {
             std::string ix_name = get_ix_manager()->get_index_name(tab_name, index.cols);
-            ihs_[ix_name] = ix_manager_->open_index(tab_name, index.cols);
+            ihs_[ix_name] = ix_manager.open_index(tab_name, index.cols);
         }
     }
 }
@@ -222,10 +227,10 @@ void SmManager::create_table(const std::string& tab_name, const std::vector<ColD
     }
     // Create & open record file
     int record_size = curr_offset;  // record_size就是col meta所占的大小（表的元数据也是以记录的形式进行存储的）
-    rm_manager_->create_file(tab_name, record_size);
+    rm_manager.create_file(tab_name, record_size);
     db_.tabs_[tab_name] = tab;
     // fhs_[tab_name] = rm_manager_->open_file(tab_name);
-    fhs_.emplace(tab_name, rm_manager_->open_file(tab_name));
+    fhs_.emplace(tab_name, rm_manager.open_file(tab_name));
 
     flush_meta();
 }
@@ -256,12 +261,12 @@ void SmManager::drop_table(const std::string& tab_name, Context* context) {
 
     // 关闭文件句柄并清理资源
     if (auto it = fhs_.find(tab_name); it != fhs_.end()) {
-        rm_manager_->close_file_and_delete_pages(it->second.get());
+        rm_manager.close_file_and_delete_pages(it->second.get());
         fhs_.erase(it);
     }
 
     // 删除表文件和元数据
-    rm_manager_->destroy_file(tab_name);
+    rm_manager.destroy_file(tab_name);
     db_.tabs_.erase(tab_name);
 
     flush_meta();
@@ -324,7 +329,7 @@ void SmManager::show_index(const std::string& tab_name, Context* context) {
 void SmManager::create_index(const std::string& tab_name, const std::vector<std::string>& col_names, Context* context) {
     TabMeta& tab = db_.get_table(tab_name);
 
-    if (ix_manager_->exists(tab_name, col_names)) {
+    if (ix_manager.exists(tab_name, col_names)) {
         throw IndexExistsError(tab_name, col_names);
     }
 
@@ -344,8 +349,8 @@ void SmManager::create_index(const std::string& tab_name, const std::vector<std:
     }
 
     // 创建索引文件和句柄
-    ix_manager_->create_index(tab_name, cols);
-    auto ih = ix_manager_->open_index(tab_name, cols);
+    ix_manager.create_index(tab_name, cols);
+    auto ih = ix_manager.open_index(tab_name, cols);
     auto* const fh = fhs_[tab_name].get();
 
     // 批量构建索引
@@ -369,13 +374,13 @@ void SmManager::create_index(const std::string& tab_name, const std::vector<std:
         }
     } catch (...) {
         // 清理失败的索引
-        ix_manager_->drop_index(ih.get());
-        disk_manager_->destroy_file(ix_manager_->get_index_name(tab_name, col_names));
+        ix_manager.drop_index(ih.get());
+        disk_manager.destroy_file(ix_manager.get_index_name(tab_name, col_names));
         throw;
     }
 
     // 提交更改
-    const auto index_name = ix_manager_->get_index_name(tab_name, col_names);
+    const auto index_name = ix_manager.get_index_name(tab_name, col_names);
     ihs_.emplace(index_name, std::move(ih));
 
     tab.indexes.emplace_back(IndexMeta{
@@ -394,20 +399,20 @@ void SmManager::create_index(const std::string& tab_name, const std::vector<std:
  * @param {Context*} context 执行上下文
  */
 void SmManager::drop_index(const std::string& tab_name, const std::vector<std::string>& col_names, Context* context) {
-    if (!ix_manager_->exists(tab_name, col_names)) {
+    if (!ix_manager.exists(tab_name, col_names)) {
         throw IndexNotFoundError(tab_name, col_names);
     }
 
-    const auto index_name = ix_manager_->get_index_name(tab_name, col_names);
+    const auto index_name = ix_manager.get_index_name(tab_name, col_names);
 
     // 关闭并删除索引句柄
     if (auto it = ihs_.find(index_name); it != ihs_.end()) {
-        ix_manager_->drop_index(it->second.get());
+        ix_manager.drop_index(it->second.get());
         ihs_.erase(it);
     }
 
     // 删除索引文件，并从表元数据中移除索引
-    disk_manager_->destroy_file(index_name);
+    disk_manager.destroy_file(index_name);
     TabMeta& tab = db_.get_table(tab_name);
     auto index_it = tab.get_index_meta(col_names);
     tab.indexes.erase(index_it);
@@ -620,7 +625,7 @@ void SmManager::load_csv_data(const std::string& csv_file_path, const std::strin
 
         // 更新索引
         for (const auto& index : tab_.indexes) {
-            auto idx_name = ix_manager_->get_index_name(tab_name, index.cols);
+            auto idx_name = ix_manager.get_index_name(tab_name, index.cols);
             auto ih = ihs_.at(idx_name).get();
             auto key = std::make_unique<char[]>(index.col_tot_len);
             int offset_ = 0;

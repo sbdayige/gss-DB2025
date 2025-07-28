@@ -18,6 +18,9 @@ See the Mulan PSL v2 for more details. */
 #include "recovery/log_manager.h"
 #include "system/sm.h"
 
+extern SmManager sm_manager;
+extern TransactionManager txn_manager;
+
 class MvccDeleteExecutor : public AbstractExecutor {
    private:
     TabMeta tab_;                                     // 表的元数据
@@ -26,17 +29,12 @@ class MvccDeleteExecutor : public AbstractExecutor {
     std::string tab_name_;                            // 表名称
     std::vector<std::unique_ptr<RmRecord>> records_;  // 删除前的记录
     RmFileHandle *fh_;                                // 表的数据文件句柄
-    SmManager *sm_manager_;
-    TransactionManager *txn_mgr_;  // 事务管理器指针
-
    public:
-    MvccDeleteExecutor(SmManager *sm_manager, TransactionManager *txn_mgr, const std::string &tab_name, std::vector<Condition> conds,
+    MvccDeleteExecutor(const std::string &tab_name, std::vector<Condition> conds,
                        std::vector<Rid> rids, Context *context) {
-        sm_manager_ = sm_manager;
-        txn_mgr_ = txn_mgr;
         tab_name_ = tab_name;
-        tab_ = sm_manager_->db_.get_table(tab_name);
-        fh_ = sm_manager_->fhs_.at(tab_name).get();
+        tab_ = sm_manager.db_.get_table(tab_name);
+        fh_ = sm_manager.fhs_.at(tab_name).get();
         conds_ = conds;
         rids_ = rids;
         context_ = context;
@@ -53,11 +51,11 @@ class MvccDeleteExecutor : public AbstractExecutor {
     std::unique_ptr<RmRecord> Next() override {
         for (auto &rid : rids_) {
             // 1. 可见性检查：跳过对当前事务不可见的记录
-            if (!IsRecordVisible(rid, fh_, txn_mgr_, context_)) {
+            if (!IsRecordVisible(rid, fh_, &txn_manager, context_)) {
                 continue;
             }
             // 2. 写锁冲突检测：如果有写锁冲突则抛出异常
-            if (!CheckWriteConflict(rid, fh_, txn_mgr_, context_)) {
+            if (!CheckWriteConflict(rid, fh_, &txn_manager, context_)) {
                 throw TransactionAbortException(context_->txn_->get_transaction_id(), AbortReason::DEADLOCK_PREVENTION);
             }
 
@@ -67,7 +65,7 @@ class MvccDeleteExecutor : public AbstractExecutor {
             records_.push_back(std::make_unique<RmRecord>(delete_record));
 
             // 创建DELETE操作的UndoLog
-            UndoLog undo_log = CreateDeleteUndoLog(delete_record, rid, tab_, fh_, txn_mgr_, context_);
+            UndoLog undo_log = CreateDeleteUndoLog(delete_record, rid, tab_, fh_, &txn_manager, context_);
 
             context_->txn_->AppendUndoLog(undo_log);
 
@@ -75,12 +73,12 @@ class MvccDeleteExecutor : public AbstractExecutor {
             new_link.prev_txn_ = context_->txn_->get_transaction_id();
             new_link.prev_log_idx_ = context_->txn_->GetUndoLogNum() - 1;
 
-            auto old_link = txn_mgr_->GetUndoLink(fh_->GetFd(), rid);
+            auto old_link = txn_manager.GetUndoLink(fh_->GetFd(), rid);
             VersionUndoLink version_link;
             version_link.prev_ = new_link;
             version_link.in_progress_ = true;
 
-            txn_mgr_->UpdateVersionLink(fh_->GetFd(), rid, version_link, [](std::optional<VersionUndoLink>) { return true; });
+            txn_manager.UpdateVersionLink(fh_->GetFd(), rid, version_link, [](std::optional<VersionUndoLink>) { return true; });
 
             // WAL: 记录DELETE日志
             if (context_ && context_->txn_ && context_->log_mgr_) {

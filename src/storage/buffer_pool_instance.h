@@ -24,6 +24,8 @@ See the Mulan PSL v2 for more details. */
 #include "replacer/lru_replacer.h"
 #include "replacer/replacer.h"
 
+extern DiskManager disk_manager;
+
 /**
  * @brief 缓冲池管理器类
  */
@@ -33,13 +35,12 @@ class BufferPoolInstance {
     Page* pages_;                                        // 缓冲池中的页面数组，连续分配
     std::unordered_map<PageId, frame_id_t> page_table_;  // 页面到帧的映射表
     std::list<frame_id_t> free_list_;                    // 空闲帧链表
-    DiskManager* disk_manager_;                          // 磁盘管理器
     Replacer* replacer_;                                 // 页面替换策略实现
     std::mutex latch_;                                   // 并发控制锁
 
    public:
-    BufferPoolInstance(size_t pool_size, DiskManager* disk_manager)
-        : pool_size_(pool_size), disk_manager_(disk_manager) {
+   public:
+    BufferPoolInstance(size_t pool_size) : pool_size_(pool_size) {
         // 为buffer pool分配一块连续的内存空间
         pages_ = new Page[pool_size_];
         // 可以被Replacer改变

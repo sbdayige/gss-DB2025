@@ -24,6 +24,9 @@ See the Mulan PSL v2 for more details. */
 #include "index/ix.h"
 #include "record_printer.h"
 
+extern SmManager sm_manager;
+extern TransactionManager txn_manager;
+
 const char *help_info =
     "Supported SQL syntax:\n"
     "  command ;\n"
@@ -54,19 +57,19 @@ void QlManager::run_mutli_query(std::shared_ptr<Plan> plan, Context *context) {
     if (auto x = std::dynamic_pointer_cast<DDLPlan>(plan)) {
         switch (x->tag) {
             case T_CreateTable: {
-                sm_manager_->create_table(x->tab_name_, x->cols_, context);
+                sm_manager.create_table(x->tab_name_, x->cols_, context);
                 break;
             }
             case T_DropTable: {
-                sm_manager_->drop_table(x->tab_name_, context);
+                sm_manager.drop_table(x->tab_name_, context);
                 break;
             }
             case T_CreateIndex: {
-                sm_manager_->create_index(x->tab_name_, x->tab_col_names_, context);
+                sm_manager.create_index(x->tab_name_, x->tab_col_names_, context);
                 break;
             }
             case T_DropIndex: {
-                sm_manager_->drop_index(x->tab_name_, x->tab_col_names_, context);
+                sm_manager.drop_index(x->tab_name_, x->tab_col_names_, context);
                 break;
             }
             default:
@@ -86,15 +89,15 @@ void QlManager::run_cmd_utility(std::shared_ptr<Plan> plan, txn_id_t *txn_id, Co
                 break;
             }
             case T_ShowTable: {
-                sm_manager_->show_tables(context);
+                sm_manager.show_tables(context);
                 break;
             }
             case T_ShowIndex: {
-                sm_manager_->show_index(x->tab_name_, context);
+                sm_manager.show_index(x->tab_name_, context);
                 break;
             }
             case T_DescTable: {
-                sm_manager_->desc_table(x->tab_name_, context);
+                sm_manager.desc_table(x->tab_name_, context);
                 break;
             }
             case T_Transaction_begin: {
@@ -103,18 +106,18 @@ void QlManager::run_cmd_utility(std::shared_ptr<Plan> plan, txn_id_t *txn_id, Co
                 break;
             }
             case T_Transaction_commit: {
-                context->txn_ = txn_mgr_->get_transaction(*txn_id);
-                txn_mgr_->commit(context->txn_, context->log_mgr_);
+                context->txn_ = txn_manager.get_transaction(*txn_id);
+                txn_manager.commit(context->txn_, context->log_mgr_);
                 break;
             }
             case T_Transaction_rollback: {
-                context->txn_ = txn_mgr_->get_transaction(*txn_id);
-                txn_mgr_->abort(context, context->log_mgr_);
+                context->txn_ = txn_manager.get_transaction(*txn_id);
+                txn_manager.abort(context, context->log_mgr_);
                 break;
             }
             case T_Transaction_abort: {
-                context->txn_ = txn_mgr_->get_transaction(*txn_id);
-                txn_mgr_->abort(context, context->log_mgr_);
+                context->txn_ = txn_manager.get_transaction(*txn_id);
+                txn_manager.abort(context, context->log_mgr_);
                 break;
             }
             case T_CreateStaticCheckpoint: {
@@ -127,66 +130,13 @@ void QlManager::run_cmd_utility(std::shared_ptr<Plan> plan, txn_id_t *txn_id, Co
                 }
                 break;
             }
-            case T_Crash: {
-                // 模拟系统崩溃
-                std::string msg = "System crashed by user command.\n";
-                memcpy(context->data_send_ + *(context->offset_), msg.c_str(), msg.length());
-                *(context->offset_) = msg.length();
-                // 强制退出程序模拟崩溃
-                exit(0);
-                break;
-            }
             case T_LoadData: {
-                sm_manager_->load_csv_data(x->file_name_, x->tab_name_);
+                sm_manager.load_csv_data(x->file_name_, x->tab_name_);
                 break;
             }
             default:
                 throw InternalError("Unexpected field type");
                 break;
-        }
-    } else if (auto x = std::dynamic_pointer_cast<DMLPlan>(plan)) {
-        if (x->tag == T_Explain) {
-            // 处理EXPLAIN语句：获取查询计划并发送给客户端
-            // 从DMLPlan中获取表别名映射
-            ExplainExecutor explain_executor(x->subplan_, context, x->table_alias_map_, x->is_select_star_);
-            explain_executor.beginTuple();
-            auto result = explain_executor.Next();
-
-            if (result && result->data) {
-                // 将查询计划输出发送给客户端
-                std::string plan_output(reinterpret_cast<char *>(result->data));
-                memcpy(context->data_send_ + *(context->offset_), plan_output.c_str(), plan_output.length());
-                *(context->offset_) += plan_output.length();
-
-                // 同时将EXPLAIN结果写入output.txt文件（受 output_file_enabled 控制）
-                extern bool output_file_enabled;
-                if (output_file_enabled) {
-                    std::fstream outfile;
-                    outfile.open("output.txt", std::ios::out | std::ios::app);
-                    if (outfile.is_open()) {
-                        outfile << plan_output;
-                        if (!plan_output.empty() && plan_output.back() != '\n') {
-                            outfile << "\n";
-                        }
-                        outfile.close();
-                    }
-                }
-            }
-        }
-    } else if (auto x = std::dynamic_pointer_cast<SetKnobPlan>(plan)) {
-        switch (x->set_knob_type_) {
-            case ast::SetKnobType::EnableNestLoop: {
-                planner_->set_enable_nestedloop_join(x->bool_value_);
-                break;
-            }
-            case ast::SetKnobType::EnableSortMerge: {
-                planner_->set_enable_sortmerge_join(x->bool_value_);
-                break;
-            }
-            default: {
-                throw RMDBError("Not implemented!\n");
-                break;
-            }
         }
     }
 }

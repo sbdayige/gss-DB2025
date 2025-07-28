@@ -10,6 +10,8 @@ See the Mulan PSL v2 for more details. */
 
 #include "buffer_pool_instance.h"
 
+extern DiskManager disk_manager;
+
 /**
  * @description: 查找可以被替换的缓冲池页面
  *
@@ -66,7 +68,7 @@ void BufferPoolInstance::update_page(Page* page, PageId new_page_id, frame_id_t 
 
     // 如果是脏页,写回磁盘
     if (page->is_dirty_) {
-        disk_manager_->write_page(page->id_.fd, page->id_.page_no, page->data_, PAGE_SIZE);
+        disk_manager.write_page(page->id_.fd, page->id_.page_no, page->data_, PAGE_SIZE);
     }
 
     // 从页表中删除旧映射
@@ -130,7 +132,7 @@ Page* BufferPoolInstance::fetch_page(PageId page_id) {
     // 获取victim frame对应的页面
     Page* page = &pages_[frame_id];
     update_page(page, page_id, frame_id);
-    disk_manager_->read_page(page_id.fd, page_id.page_no, page->data_, PAGE_SIZE);
+    disk_manager.read_page(page_id.fd, page_id.page_no, page->data_, PAGE_SIZE);
     page->pin_count_ = 1;  // 固定该页
     //! 本来就是新页不在缓存中，test中可以调用replacer_->unpin(frame_id)来固定该页，不保证
     replacer_->pin(frame_id);
@@ -222,7 +224,7 @@ bool BufferPoolInstance::flush_page(PageId page_id) {
     Page* page = &pages_[frame_id];
 
     // 写回磁盘
-    disk_manager_->write_page(page_id.fd, page_id.page_no, page->data_, PAGE_SIZE);
+    disk_manager.write_page(page_id.fd, page_id.page_no, page->data_, PAGE_SIZE);
 
     // 更新dirty标记
     page->is_dirty_ = false;
@@ -295,7 +297,7 @@ bool BufferPoolInstance::delete_page(PageId page_id) {
 
     // 如果是脏页写回磁盘
     if (page->is_dirty_) {
-        disk_manager_->write_page(page_id.fd, page_id.page_no, page->data_, PAGE_SIZE);
+        disk_manager.write_page(page_id.fd, page_id.page_no, page->data_, PAGE_SIZE);
     }
 
     // 重置页面元数据
@@ -335,7 +337,7 @@ void BufferPoolInstance::flush_all_pages(int fd) {
 
         // 获取页面并写回磁盘
         Page* page = &pages_[frame_id];
-        disk_manager_->write_page(fd, page_id.page_no, page->data_, PAGE_SIZE);
+        disk_manager.write_page(fd, page_id.page_no, page->data_, PAGE_SIZE);
         page->is_dirty_ = false;
     }
 }
@@ -356,7 +358,7 @@ void BufferPoolInstance::delete_all_pages(int fd) {
 
             // 如果是脏页写回磁盘
             if (page->is_dirty_) {
-                disk_manager_->write_page(fd, page->id_.page_no, page->data_, PAGE_SIZE);
+                disk_manager.write_page(fd, page->id_.page_no, page->data_, PAGE_SIZE);
             }
 
             // 重置页面元数据
@@ -418,7 +420,7 @@ auto BufferPoolInstance::fetch_page_basic(PageId page_id) -> BasicPageGuard {
     // 获取victim frame对应的页面
     Page* page = &pages_[frame_id];
     update_page(page, page_id, frame_id);
-    disk_manager_->read_page(page_id.fd, page_id.page_no, page->data_, PAGE_SIZE);
+    disk_manager.read_page(page_id.fd, page_id.page_no, page->data_, PAGE_SIZE);
     page->pin_count_ = 1;  // 固定该页
     replacer_->pin(frame_id);
 

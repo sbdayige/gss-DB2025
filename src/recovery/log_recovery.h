@@ -18,6 +18,11 @@ See the Mulan PSL v2 for more details. */
 #include "storage/disk_manager.h"
 #include "system/sm_manager.h"
 
+extern DiskManager disk_manager;
+extern BufferPoolManager buffer_pool_manager;
+extern SmManager sm_manager;
+extern LogManager log_manager;
+
 class RedoLogsInPage {
    public:
     RedoLogsInPage() { table_file_ = nullptr; }
@@ -27,11 +32,7 @@ class RedoLogsInPage {
 
 class RecoveryManager {
    public:
-    RecoveryManager(DiskManager* disk_manager, BufferPoolManager* buffer_pool_manager, SmManager* sm_manager) {
-        disk_manager_ = disk_manager;
-        buffer_pool_manager_ = buffer_pool_manager;
-        sm_manager_ = sm_manager;
-    }
+    RecoveryManager() = default;
 
     void analyze();
     void redo();
@@ -49,10 +50,7 @@ class RecoveryManager {
     void undo_delete(DeleteLogRecord* log_record);
     void undo_update(UpdateLogRecord* log_record);
 
-    LogBuffer buffer_;                        // 读入日志
-    DiskManager* disk_manager_;               // 用来读写文件
-    BufferPoolManager* buffer_pool_manager_;  // 对页面进行读写
-    SmManager* sm_manager_;                   // 访问数据库元数据
+    LogBuffer buffer_;  // 读入日志
 
     std::set<txn_id_t> undo_list_;  // 需要回滚的事务列表
     std::set<txn_id_t> redo_list_;  // 需要重做的事务列表

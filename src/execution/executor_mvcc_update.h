@@ -19,6 +19,9 @@ See the Mulan PSL v2 for more details. */
 #include "recovery/log_manager.h"
 #include "system/sm.h"
 
+extern SmManager sm_manager;
+extern TransactionManager txn_manager;
+
 class MvccUpdateExecutor : public AbstractExecutor {
    private:
     TabMeta tab_;                                     // 表的元数据
@@ -28,18 +31,14 @@ class MvccUpdateExecutor : public AbstractExecutor {
     std::string tab_name_;                            // 表名称
     std::vector<std::unique_ptr<RmRecord>> records_;  // 更新前的记录
     RmFileHandle *fh_;                                // 表的数据文件句柄
-    SmManager *sm_manager_;
-    TransactionManager *txn_mgr_;  // 事务管理器指针
 
    public:
-    MvccUpdateExecutor(SmManager *sm_manager, TransactionManager *txn_mgr, const std::string &tab_name, std::vector<SetClause> set_clauses,
+    MvccUpdateExecutor(const std::string &tab_name, std::vector<SetClause> set_clauses,
                        std::vector<Condition> conds, std::vector<Rid> rids, Context *context) {
-        sm_manager_ = sm_manager;
-        txn_mgr_ = txn_mgr;
         tab_name_ = tab_name;
         set_clauses_ = set_clauses;
-        tab_ = sm_manager_->db_.get_table(tab_name);
-        fh_ = sm_manager_->fhs_.at(tab_name).get();
+        tab_ = sm_manager.db_.get_table(tab_name);
+        fh_ = sm_manager.fhs_.at(tab_name).get();
         conds_ = conds;
         rids_ = rids;
         context_ = context;
@@ -57,12 +56,12 @@ class MvccUpdateExecutor : public AbstractExecutor {
     std::unique_ptr<RmRecord> Next() override {
         for (auto &rid : rids_) {
             // 1. 可见性检查：跳过对当前事务不可见的记录
-            if (!IsRecordVisible(rid, fh_, txn_mgr_, context_)) {
+            if (!IsRecordVisible(rid, fh_, &txn_manager, context_)) {
                 continue;
             }
 
             // 2. 写锁冲突检测：如果有写锁冲突则抛出异常
-            if (!CheckWriteConflict(rid, fh_, txn_mgr_, context_)) {
+            if (!CheckWriteConflict(rid, fh_, &txn_manager, context_)) {
                 throw TransactionAbortException(context_->txn_->get_transaction_id(), AbortReason::DEADLOCK_PREVENTION);
             }
 
@@ -130,7 +129,7 @@ class MvccUpdateExecutor : public AbstractExecutor {
 
                 // 检查索引是否已存在
                 std::vector<Rid> result;
-                auto ih = sm_manager_->ihs_.at(sm_manager_->get_ix_manager()->get_index_name(tab_name_, index.cols)).get();
+                auto ih = sm_manager.ihs_.at(sm_manager.get_ix_manager()->get_index_name(tab_name_, index.cols)).get();
                 bool is_exist = ih->get_value(key.get(), &result, context_->txn_);
 
                 if (is_exist) {
@@ -153,12 +152,12 @@ class MvccUpdateExecutor : public AbstractExecutor {
                     offset += index.cols[j].len;
                 }
 
-                auto ih = sm_manager_->ihs_.at(sm_manager_->get_ix_manager()->get_index_name(tab_name_, index.cols)).get();
+                auto ih = sm_manager.ihs_.at(sm_manager.get_ix_manager()->get_index_name(tab_name_, index.cols)).get();
                 ih->delete_entry_with_rid(key.get(), rid, context_->txn_);
             }
 
             // 6.2 创建删除的undo log
-            UndoLog undo_log = CreateDeleteUndoLog(old_record, rid, tab_, fh_, txn_mgr_, context_);
+            UndoLog undo_log = CreateDeleteUndoLog(old_record, rid, tab_, fh_, &txn_manager, context_);
             context_->txn_->AppendUndoLog(undo_log);
 
             UndoLink new_link;
@@ -169,7 +168,7 @@ class MvccUpdateExecutor : public AbstractExecutor {
             version_link.prev_ = new_link;
             version_link.in_progress_ = true;
 
-            txn_mgr_->UpdateVersionLink(fh_->GetFd(), rid, version_link, [](std::optional<VersionUndoLink>) { return true; });
+            txn_manager.UpdateVersionLink(fh_->GetFd(), rid, version_link, [](std::optional<VersionUndoLink>) { return true; });
 
             // 6.3 记录DELETE日志
             if (context_ && context_->txn_ && context_->log_mgr_) {
@@ -198,7 +197,7 @@ class MvccUpdateExecutor : public AbstractExecutor {
                     offset += index.cols[j].len;
                 }
 
-                auto ih = sm_manager_->ihs_.at(sm_manager_->get_ix_manager()->get_index_name(tab_name_, index.cols)).get();
+                auto ih = sm_manager.ihs_.at(sm_manager.get_ix_manager()->get_index_name(tab_name_, index.cols)).get();
                 page_id_t res = ih->insert_entry(key.get(), new_rid, context_->txn_);
 
                 if (res == INVALID_PAGE_ID) {
@@ -207,7 +206,7 @@ class MvccUpdateExecutor : public AbstractExecutor {
             }
 
             // 7.4 创建INSERT操作的UndoLog
-            UndoLog insert_undo_log = CreateInsertUndoLog(new_record, new_rid, tab_, txn_mgr_, context_);
+            UndoLog insert_undo_log = CreateInsertUndoLog(new_record, new_rid, tab_, &txn_manager, context_);
             context_->txn_->AppendUndoLog(insert_undo_log);
 
             // 7.5 创建INSERT的版本链
@@ -219,7 +218,7 @@ class MvccUpdateExecutor : public AbstractExecutor {
             insert_version_link.prev_ = insert_link;
             insert_version_link.in_progress_ = true;
 
-            txn_mgr_->UpdateVersionLink(fh_->GetFd(), new_rid, insert_version_link, [](std::optional<VersionUndoLink>) { return true; });
+            txn_manager.UpdateVersionLink(fh_->GetFd(), new_rid, insert_version_link, [](std::optional<VersionUndoLink>) { return true; });
 
             // 7.6 记录INSERT日志
             if (context_ && context_->txn_ && context_->log_mgr_) {

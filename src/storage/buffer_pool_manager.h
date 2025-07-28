@@ -23,24 +23,20 @@ See the Mulan PSL v2 for more details. */
 #include "page.h"
 #include "page_guard.h"
 
+extern DiskManager disk_manager;
+
 class BufferPoolManager {
    private:
-    size_t pool_size_;  // buffer_pool中可容纳页面的个数，即帧的个数
-    // Page *pages_;                                                    // buffer_pool中的Page对象数组，在构造空间中申请内存空间，在析构函数中释放，大小为BUFFER_POOL_SIZE
-    // std::unordered_map<PageId, frame_id_t, PageIdHash> page_table_;  // 帧号和页面号的映射哈希表，用于根据页面的PageId定位该页面的帧编号
-    // std::list<frame_id_t> free_list_;                                // 空闲帧编号的链表
+    size_t pool_size_;  // buffer_pool中可容纳页面的个数，即帧的个数                               // 空闲帧编号的链表
     DiskManager *disk_manager_;
-    // Replacer *replacer_;  // buffer_pool的置换策略，当前赛题中为LRU置换策略
-    // std::mutex latch_;    // 用于共享数据结构的并发控制
     std::hash<PageId> hasher_;  // 用于计算PageId的哈希值
     BufferPoolInstance *buffer_pool_instances_[BUFFER_POOL_INSTANCE_SIZE];
 
    public:
-    BufferPoolManager(size_t pool_size, DiskManager *disk_manager)
-        : pool_size_(pool_size), disk_manager_(disk_manager) {
+    BufferPoolManager(size_t pool_size) : pool_size_(pool_size) {
         // 为buffer pool分配一块连续的内存空间
         for (size_t i = 0; i < BUFFER_POOL_INSTANCE_SIZE; ++i) {
-            buffer_pool_instances_[i] = new BufferPoolInstance(pool_size / BUFFER_POOL_INSTANCE_SIZE, disk_manager);
+            buffer_pool_instances_[i] = new BufferPoolInstance(pool_size / BUFFER_POOL_INSTANCE_SIZE);
         }
     }
 

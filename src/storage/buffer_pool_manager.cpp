@@ -10,6 +10,8 @@ See the Mulan PSL v2 for more details. */
 
 #include "buffer_pool_manager.h"
 
+extern DiskManager disk_manager;
+
 Page* BufferPoolManager::fetch_page(PageId page_id) {
     return buffer_pool_instances_[get_instance_no(page_id)]->fetch_page(page_id);
 }

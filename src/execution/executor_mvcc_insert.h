@@ -18,6 +18,9 @@ See the Mulan PSL v2 for more details. */
 #include "recovery/log_manager.h"
 #include "system/sm.h"
 
+extern SmManager sm_manager;
+extern TransactionManager txn_manager;
+
 class MvccInsertExecutor : public AbstractExecutor {
    private:
     TabMeta tab_;                // 表的元数据
@@ -25,18 +28,14 @@ class MvccInsertExecutor : public AbstractExecutor {
     RmFileHandle *fh_;           // 表的数据文件句柄
     std::string tab_name_;       // 表名称
     Rid rid_;                    // 插入的位置，在字段不为空时赋值
-    SmManager *sm_manager_;
-    TransactionManager *txn_mgr_;  // 事务管理器指针
 
    public:
-    MvccInsertExecutor(SmManager *sm_manager, TransactionManager *txn_mgr, const std::string &tab_name, std::vector<Value> values, Context *context) {
-        sm_manager_ = sm_manager;
-        txn_mgr_ = txn_mgr;
-        tab_ = sm_manager_->db_.get_table(tab_name);
+    MvccInsertExecutor(const std::string &tab_name, std::vector<Value> values, Context *context) {
+        tab_ = sm_manager.db_.get_table(tab_name);
         values_ = values;
         tab_name_ = tab_name;
         context_ = context;
-        fh_ = sm_manager_->get_file_handle(tab_name);
+        fh_ = sm_manager.get_file_handle(tab_name);
     };
 
     std::unique_ptr<RmRecord> Next() override {
@@ -86,9 +85,9 @@ class MvccInsertExecutor : public AbstractExecutor {
 
         rid_ = fh_->insert_record(rec->data, context_);
 
-        if (!mvcc_insert_index(tab_, rec, rid_, context_, txn_mgr_, sm_manager_)) {
+        if (!mvcc_insert_index(tab_, rec, rid_, context_, &txn_manager, &sm_manager)) {
             fh_->delete_record(rid_, context_);
-            txn_mgr_->abort(context_, context_->log_mgr_);
+            txn_manager.abort(context_, context_->log_mgr_);
             throw RMDBError("Failed to insert into index, rolled back record insertion at " + getType());
         }
 
@@ -109,7 +108,7 @@ class MvccInsertExecutor : public AbstractExecutor {
         insert_link.prev_log_idx_ = context_->txn_->GetUndoLogNum();  // 将要添加的UndoLog的索引
 
         // 创建INSERT操作的UndoLog
-        UndoLog undo_log = CreateInsertUndoLog(*rec, rid_, tab_, txn_mgr_, context_);
+        UndoLog undo_log = CreateInsertUndoLog(*rec, rid_, tab_, &txn_manager, context_);
         context_->txn_->AppendUndoLog(undo_log);
 
         // 创建版本链
@@ -117,7 +116,7 @@ class MvccInsertExecutor : public AbstractExecutor {
         version_link.prev_ = insert_link;
         version_link.in_progress_ = true;
 
-        txn_mgr_->UpdateVersionLink(fh_->GetFd(), rid_, version_link, [](std::optional<VersionUndoLink>) { return true; });
+        txn_manager.UpdateVersionLink(fh_->GetFd(), rid_, version_link, [](std::optional<VersionUndoLink>) { return true; });
 
         return nullptr;
     }

@@ -21,14 +21,12 @@ See the Mulan PSL v2 for more details. */
 #include "system/sm.h"
 #include "transaction/transaction_manager.h"
 
-class Optimizer {
-   private:
-    SmManager *sm_manager_;
-    Planner *planner_;
+extern SmManager sm_manager;
+extern Planner planner;
 
+class Optimizer {
    public:
-    Optimizer(SmManager *sm_manager, Planner *planner)
-        : sm_manager_(sm_manager), planner_(planner) {}
+    Optimizer() = default;
 
     std::shared_ptr<Plan> plan_query(std::shared_ptr<Query> query, Context *context) {
         if (auto x = std::dynamic_pointer_cast<ast::Help>(query->parse)) {
@@ -67,7 +65,7 @@ class Optimizer {
             // Set Knob Plan
             return std::make_shared<SetKnobPlan>(x->set_knob_type_, x->bool_val_);
         } else {
-            return planner_->do_planner(query, context);
+            return planner.do_planner(query, context);
         }
     }
 };

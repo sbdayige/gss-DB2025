@@ -29,9 +29,11 @@ See the Mulan PSL v2 for more details. */
 #include "record/rm.h"
 #include "record_printer.h"
 
+extern SmManager sm_manager;
+
 bool Planner::get_index_cols(std::string tab_name, std::vector<Condition> curr_conds, std::vector<std::string> &index_col_names) {
     index_col_names.clear();
-    TabMeta &tab = sm_manager_->db_.get_table(tab_name);
+    TabMeta &tab = sm_manager.db_.get_table(tab_name);
     if (tab.indexes.empty()) {
         return false;
     }
@@ -204,12 +206,12 @@ std::shared_ptr<Plan> Planner::make_one_rel(std::shared_ptr<Query> query) {
             // 将WHERE条件传递给ScanPlan，让执行器处理Filter节点生成
             index_col_names.clear();
             table_scan_executors[i] =
-                std::make_shared<ScanPlan>(T_SeqScan, sm_manager_, tables[i], curr_conds, index_col_names);
+                std::make_shared<ScanPlan>(T_SeqScan, &sm_manager, tables[i], curr_conds, index_col_names);
         } else {
             // 有可用索引：使用索引扫描（Index Scan）
             // 将WHERE条件传递给ScanPlan，让执行器处理Filter节点生成
             table_scan_executors[i] =
-                std::make_shared<ScanPlan>(T_IndexScan, sm_manager_, tables[i], curr_conds, index_col_names);
+                std::make_shared<ScanPlan>(T_IndexScan, &sm_manager, tables[i], curr_conds, index_col_names);
         }
     }
 
@@ -397,7 +399,7 @@ std::shared_ptr<Plan> Planner::generate_sort_plan(std::shared_ptr<Query> query, 
     for (auto &sel_tab_name : tables) {
         // 重要注意：这里db_不能写成get_db()，必须直接访问数据库对象
         // 因为需要传递指针而不是值，避免不必要的拷贝操作
-        const auto &sel_tab_cols = sm_manager_->db_.get_table(sel_tab_name).cols;
+        const auto &sel_tab_cols = sm_manager.db_.get_table(sel_tab_name).cols;
 
         // 将当前表的所有列元数据添加到总集合中
         // 这样可以支持跨表排序的情况（虽然通常排序列来自单个表）
@@ -583,12 +585,12 @@ std::shared_ptr<Plan> Planner::do_planner(std::shared_ptr<Query> query, Context 
             // 清空索引列名，表示使用全表扫描
             index_col_names.clear();
             table_scan_executors =
-                std::make_shared<ScanPlan>(T_SeqScan, sm_manager_, x->tab_name, query->conds, index_col_names);
+                std::make_shared<ScanPlan>(T_SeqScan, &sm_manager, x->tab_name, query->conds, index_col_names);
         } else {
             // 情况2：存在可用索引，使用索引扫描
             // 利用索引快速定位符合条件的记录，提升删除效率
             table_scan_executors =
-                std::make_shared<ScanPlan>(T_IndexScan, sm_manager_, x->tab_name, query->conds, index_col_names);
+                std::make_shared<ScanPlan>(T_IndexScan, &sm_manager, x->tab_name, query->conds, index_col_names);
         }
 
         // 第二步：创建DELETE的DML执行计划
@@ -613,12 +615,12 @@ std::shared_ptr<Plan> Planner::do_planner(std::shared_ptr<Query> query, Context 
             // 情况1：没有合适的索引，使用顺序扫描
             index_col_names.clear();
             table_scan_executors =
-                std::make_shared<ScanPlan>(T_SeqScan, sm_manager_, x->tab_name, query->conds, index_col_names);
+                std::make_shared<ScanPlan>(T_SeqScan, &sm_manager, x->tab_name, query->conds, index_col_names);
         } else {
             // 情况2：存在可用索引，使用索引扫描
             // 索引扫描可以显著减少需要检查的记录数量
             table_scan_executors =
-                std::make_shared<ScanPlan>(T_IndexScan, sm_manager_, x->tab_name, query->conds, index_col_names);
+                std::make_shared<ScanPlan>(T_IndexScan, &sm_manager, x->tab_name, query->conds, index_col_names);
         }
 
         // 第二步：创建UPDATE的DML执行计划
@@ -796,12 +798,12 @@ std::shared_ptr<Query> Planner::join_order_optimization(std::shared_ptr<Query> q
 size_t Planner::estimate_table_cardinality(const std::string &table_name) {
     try {
         // 获取表的文件句柄
-        if (sm_manager_->fhs_.find(table_name) == sm_manager_->fhs_.end()) {
+        if (sm_manager.fhs_.find(table_name) == sm_manager.fhs_.end()) {
             // 表文件未打开，使用默认估计值
             return 1000;
         }
 
-        auto &file_handle = sm_manager_->fhs_[table_name];
+        auto &file_handle = sm_manager.fhs_[table_name];
         auto file_hdr = file_handle->get_file_hdr();
 
         // 尝试通过实际扫描获取更准确的记录数

@@ -19,6 +19,7 @@ See the Mulan PSL v2 for more details. */
 #include <cstdio>
 
 #include "analyze/analyze.h"
+#include "common/config.h"
 #include "errors.h"
 #include "optimizer/optimizer.h"
 #include "optimizer/plan.h"
@@ -32,51 +33,46 @@ See the Mulan PSL v2 for more details. */
 static bool should_exit = false;
 
 // 构建全局所需的管理器对象
-auto disk_manager = std::make_unique<DiskManager>();
-auto buffer_pool_manager =
-    std::make_unique<BufferPoolManager>(BUFFER_POOL_SIZE, disk_manager.get());
-auto rm_manager =
-    std::make_unique<RmManager>(disk_manager.get(), buffer_pool_manager.get());
-auto ix_manager =
-    std::make_unique<IxManager>(disk_manager.get(), buffer_pool_manager.get());
-auto sm_manager =
-    std::make_unique<SmManager>(disk_manager.get(), buffer_pool_manager.get(),
-                                rm_manager.get(), ix_manager.get());
-auto lock_manager = std::make_unique<LockManager>();
-auto txn_manager =
-    std::make_unique<TransactionManager>(lock_manager.get(), sm_manager.get(), ConcurrencyMode::MVCC);
-auto planner = std::make_unique<Planner>(sm_manager.get());
-auto optimizer = std::make_unique<Optimizer>(sm_manager.get(), planner.get());
-auto ql_manager =
-    std::make_unique<QlManager>(sm_manager.get(), txn_manager.get(), nullptr);
-auto log_manager = std::make_unique<LogManager>(disk_manager.get());
-auto recovery = std::make_unique<RecoveryManager>(
-    disk_manager.get(), buffer_pool_manager.get(), sm_manager.get());
-auto portal = std::make_unique<Portal>(sm_manager.get(), txn_manager.get());
-auto analyze = std::make_unique<Analyze>(sm_manager.get());
+DiskManager disk_manager;
+BufferPoolManager buffer_pool_manager(BUFFER_POOL_SIZE);
+RmManager rm_manager;
+IxManager ix_manager;
+SmManager sm_manager;
+LockManager lock_manager;
+TransactionManager txn_manager(ConcurrencyMode::MVCC);
+Planner planner;
+Optimizer optimizer;
+LogManager log_manager;
+RecoveryManager recovery;
+QlManager ql_manager;
+Portal portal;
+Analyze analyze;
+
+auto log_manager = std::make_unique<LogManager>(&disk_manager);
+
 pthread_mutex_t *buffer_mutex;
 pthread_mutex_t *sockfd_mutex;
 
 static jmp_buf jmpbuf;
 void sigint_handler(int signo) {
     should_exit = true;
-    log_manager->flush_log_to_disk();
+    // log_manager->flush_log_to_disk();
     std::cout << "The Server receive Crtl+C, will been closed\n";
     longjmp(jmpbuf, 1);
 }
 
 // 判断当前正在执行的是显式事务还是单条SQL语句的事务，并更新事务ID
 void SetTransaction(txn_id_t *txn_id, Context *context) {
-    if (txn_manager->exsit_transaction(*txn_id)) {
+    if (txn_manager.exsit_transaction(*txn_id)) {
         // 如果事务ID存在，则获取对应的事务对象
-        context->txn_ = txn_manager->get_transaction(*txn_id);
+        context->txn_ = txn_manager.get_transaction(*txn_id);
     } else {
         context->txn_ = nullptr;
     }
     // 如果事务对象为空 或者已提交 或者已中止， 则创建新事务
     if (context->txn_ == nullptr || context->txn_->get_state() == TransactionState::COMMITTED ||
         context->txn_->get_state() == TransactionState::ABORTED) {
-        context->txn_ = txn_manager->begin(nullptr, context->log_mgr_);
+        context->txn_ = txn_manager.begin(nullptr, context->log_mgr_);
         *txn_id = context->txn_->get_transaction_id();
     }
 }
@@ -159,7 +155,7 @@ void *client_handler(void *sock_fd) {
         memset(data_send, '\0', BUFFER_LENGTH);
         offset = 0;
 
-        auto context = std::make_unique<Context>(lock_manager.get(), log_manager.get(), nullptr, data_send, &offset);
+        auto context = std::make_unique<Context>(&lock_manager, &log_manager, nullptr, data_send, &offset);
         SetTransaction(&txn_id, context.get());
 
         // 用于判断是否已经调用了yy_delete_buffer来删除buf
@@ -170,21 +166,21 @@ void *client_handler(void *sock_fd) {
             if (ast::parse_tree != nullptr) {
                 try {
                     std::shared_ptr<Query> query =
-                        analyze->do_analyze(ast::parse_tree);
+                        analyze.do_analyze(ast::parse_tree);
                     yy_delete_buffer(buf);
 
                     finish_analyze = true;
                     pthread_mutex_unlock(buffer_mutex);
                     // 优化器
                     std::shared_ptr<Plan> plan =
-                        optimizer->plan_query(query, context.get());
+                        optimizer.plan_query(query, context.get());
                     // portal
 
                     std::shared_ptr<PortalStmt> portalStmt =
-                        portal->start(plan, context.get());
-                    portal->run(portalStmt, ql_manager.get(), &txn_id,
-                                context.get());
-                    portal->drop();
+                        portal.start(plan, context.get());
+                    portal.run(portalStmt, &ql_manager, &txn_id,
+                               context.get());
+                    portal.drop();
                 } catch (TransactionAbortException &e) {
                     // 事务需要回滚，需要把abort信息返回给客户端并写入output.txt文件中
                     std::string str = "abort\n";
@@ -193,7 +189,7 @@ void *client_handler(void *sock_fd) {
                     offset = str.length();
 
                     // 回滚事务
-                    txn_manager->abort(context.get(), log_manager.get());
+                    txn_manager.abort(context.get(), &log_manager);
                     std::cout << e.GetInfo() << std::endl;
 
                     if (output_file_enabled) {
@@ -247,7 +243,7 @@ void *client_handler(void *sock_fd) {
         // 如果是单挑语句，需要按照一个完整的事务来执行，所以执行完当前语句后，自动提交事务
         if (context->txn_ != nullptr &&
             context->txn_->get_txn_mode() == false) {
-            txn_manager->commit(context->txn_, context->log_mgr_);
+            txn_manager.commit(context->txn_, context->log_mgr_);
         }
     }
 
@@ -328,7 +324,7 @@ void start_server() {
         printf("%s\n", strerror(errno));
     }
     //    assert(ret != -1);
-    sm_manager->close_db();
+    sm_manager.close_db();
     std::cout << " DB has been closed.\n";
     std::cout << "Server shuts down." << std::endl;
 }
@@ -355,15 +351,15 @@ int main(int argc, char **argv) {
                      "\n";
         // Database name is passed by args
         std::string db_name = argv[1];
-        if (!sm_manager->is_dir(db_name)) {
+        if (!sm_manager.is_dir(db_name)) {
             // Database not found, create a new one
-            sm_manager->create_db(db_name);
+            sm_manager.create_db(db_name);
         }
         // Open database
-        sm_manager->open_db(db_name);
-        recovery->analyze();
-        recovery->redo();
-        recovery->undo();
+        sm_manager.open_db(db_name);
+        // recovery->analyze();
+        // recovery->redo();
+        // recovery->undo();
         // 开启服务端，开始接受客户端连接
         start_server();
     } catch (RMDBError &e) {

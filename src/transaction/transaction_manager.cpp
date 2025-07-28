@@ -26,8 +26,12 @@
 #include "record/rm_file_handle.h"
 #include "system/sm_manager.h"
 
+extern SmManager sm_manager;
+extern LockManager lock_manager;
+
 std::unordered_map<txn_id_t, Transaction*> TransactionManager::txn_map = {};
 
+TransactionManager::TransactionManager(ConcurrencyMode concurrency_mode) { concurrency_mode_ = concurrency_mode; }
 /**
  * @description: 事务的开始方法
  * @return {Transaction*} 开始事务的指针
@@ -102,7 +106,7 @@ void TransactionManager::commit(Transaction* txn, LogManager* log_manager) {
             // 通过表名获取fd - 需要使用sm_manager_来查找
             int fd = -1;
             try {
-                auto& fh = sm_manager_->fhs_.at(write_record->GetTableName());
+                auto& fh = sm_manager.fhs_.at(write_record->GetTableName());
                 fd = fh->GetFd();
             } catch (const std::exception& e) {
                 // 表文件未找到，跳过
@@ -128,13 +132,13 @@ void TransactionManager::commit(Transaction* txn, LogManager* log_manager) {
 
     auto lock_set_copy = *lock_set;  // 复制锁集合以避免迭代时修改
     for (const LockDataId& lock : lock_set_copy) {
-        lock_manager_->unlock(txn, lock);
+        lock_manager.unlock(txn, lock);
     }
 
     auto lock_gap_set = txn->get_lock_gap_set();
     auto lock_gap_set_copy = *lock_gap_set;  // 复制间隙锁集合以避免迭代时修改
     for (const int& tab_fd : lock_gap_set_copy) {
-        lock_manager_->unlock_gap(txn, tab_fd);
+        lock_manager.unlock_gap(txn, tab_fd);
     }
 
     // 清空事务相关的集合
@@ -158,12 +162,12 @@ void TransactionManager::commit(Transaction* txn, LogManager* log_manager) {
  */
 void TransactionManager::RestoreIndexForRecord(const std::string& table_name, const RmRecord& rec,
                                                const Rid& rid, Context* context) {
-    TabMeta& tab_meta = sm_manager_->db_.get_table(table_name);
+    TabMeta& tab_meta = sm_manager.db_.get_table(table_name);
 
     // 遍历表的所有索引
     for (size_t i = 0; i < tab_meta.indexes.size(); ++i) {
         auto& index = tab_meta.indexes[i];
-        auto ih = sm_manager_->ihs_.at(sm_manager_->get_ix_manager()->get_index_name(table_name, index.cols)).get();
+        auto ih = sm_manager.ihs_.at(sm_manager.get_ix_manager()->get_index_name(table_name, index.cols)).get();
         auto key = std::make_unique<char[]>(index.col_tot_len);
         int offset = 0;
         for (size_t j = 0; j < static_cast<size_t>(index.col_num); ++j) {
@@ -207,12 +211,12 @@ void TransactionManager::abort(Context* context, LogManager* log_manager) {
         const auto write_type = (*iter)->GetWriteType();
         const auto table_name = (*iter)->GetTableName();
         const auto rid = (*iter)->GetRid();
-        std::unique_ptr<RmFileHandle>& handle = sm_manager_->fhs_.at(table_name);
+        std::unique_ptr<RmFileHandle>& handle = sm_manager.fhs_.at(table_name);
 
         if (write_type == WType::INSERT_TUPLE) {
             auto rec = (*iter)->GetRecord();
             handle->delete_record(rid, context);
-            sm_manager_->delete_index_with_rid(table_name, rec, rid, context->txn_);
+            sm_manager.delete_index_with_rid(table_name, rec, rid, context->txn_);
         } else if (write_type == WType::DELETE_TUPLE) {
             auto rec = (*iter)->GetRecord();
             RestoreIndexForRecord(table_name, rec, rid, context);
@@ -225,13 +229,13 @@ void TransactionManager::abort(Context* context, LogManager* log_manager) {
     std::shared_ptr<std::unordered_set<LockDataId>> lock_set = txn->get_lock_set();
     auto lock_set_copy = *lock_set;  // 复制锁集合以避免迭代时修改
     for (const LockDataId& lock : lock_set_copy) {
-        lock_manager_->unlock(txn, lock);
+        lock_manager.unlock(txn, lock);
     }
 
     auto lock_gap_set = txn->get_lock_gap_set();
     auto lock_gap_set_copy = *lock_gap_set;  // 复制间隙锁集合以避免迭代时修改
     for (const int& tab_fd : lock_gap_set_copy) {
-        lock_manager_->unlock_gap(txn, tab_fd);
+        lock_manager.unlock_gap(txn, tab_fd);
     }
 
     // 清空事务状态并设置为ABORTED
@@ -256,7 +260,7 @@ void TransactionManager::abort(Context* context, LogManager* log_manager) {
             const auto rid = (*iter)->GetRid();
             int fd = -1;
             try {
-                auto& fh = sm_manager_->fhs_.at(table_name);
+                auto& fh = sm_manager.fhs_.at(table_name);
                 fd = fh->GetFd();
             } catch (const std::exception& e) {
                 // 表文件未找到，跳过

@@ -16,15 +16,13 @@ See the Mulan PSL v2 for more details. */
 #include "rm_defs.h"
 #include "rm_file_handle.h"
 
+extern DiskManager disk_manager;
+extern BufferPoolManager buffer_pool_manager;
+
 /* 记录管理器，用于管理表的数据文件，进行文件的创建、打开、删除、关闭 */
 class RmManager {
-   private:
-    DiskManager *disk_manager_;
-    BufferPoolManager *buffer_pool_manager_;
-
    public:
-    RmManager(DiskManager *disk_manager, BufferPoolManager *buffer_pool_manager)
-        : disk_manager_(disk_manager), buffer_pool_manager_(buffer_pool_manager) {}
+    RmManager() = default;
 
     /**
      * @description: 创建表的数据文件并初始化相关信息
@@ -35,8 +33,8 @@ class RmManager {
         if (record_size < 1 || record_size > RM_MAX_RECORD_SIZE) {
             throw InvalidRecordSizeError(record_size);
         }
-        disk_manager_->create_file(filename);
-        int fd = disk_manager_->open_file(filename);
+        disk_manager.create_file(filename);
+        int fd = disk_manager.open_file(filename);
 
         // 初始化file header
         RmFileHdr file_hdr{};
@@ -50,15 +48,15 @@ class RmManager {
 
         // 将file header写入磁盘文件（名为file name，文件描述符为fd）中的第0页
         // head page直接写入磁盘，没有经过缓冲区的NewPage，那么也就不需要FlushPage
-        disk_manager_->write_page(fd, RM_FILE_HDR_PAGE, (char *)&file_hdr, sizeof(file_hdr));
-        disk_manager_->close_file(fd);
+        disk_manager.write_page(fd, RM_FILE_HDR_PAGE, (char *)&file_hdr, sizeof(file_hdr));
+        disk_manager.close_file(fd);
     }
 
     /**
      * @description: 删除表的数据文件
      * @param {string&} filename 要删除的文件名称
      */
-    void destroy_file(const std::string &filename) { disk_manager_->destroy_file(filename); }
+    void destroy_file(const std::string &filename) { disk_manager.destroy_file(filename); }
 
     // 注意这里打开文件，创建并返回了record file handle的指针
     /**
@@ -67,19 +65,19 @@ class RmManager {
      * @return {unique_ptr<RmFileHandle>} 文件句柄的指针
      */
     std::unique_ptr<RmFileHandle> open_file(const std::string &filename) {
-        int fd = disk_manager_->open_file(filename);
-        return std::make_unique<RmFileHandle>(disk_manager_, buffer_pool_manager_, fd);
+        int fd = disk_manager.open_file(filename);
+        return std::make_unique<RmFileHandle>(&disk_manager, &buffer_pool_manager, fd);
     }
     /**
      * @description: 关闭表的数据文件
      * @param {RmFileHandle*} file_handle 要关闭文件的句柄
      */
     void close_file(const RmFileHandle *file_handle) {
-        disk_manager_->write_page(file_handle->fd_, RM_FILE_HDR_PAGE, (char *)&file_handle->file_hdr_,
-                                  sizeof(file_handle->file_hdr_));
+        disk_manager.write_page(file_handle->fd_, RM_FILE_HDR_PAGE, (char *)&file_handle->file_hdr_,
+                                sizeof(file_handle->file_hdr_));
         // 缓冲区的所有页刷到磁盘，注意这句话必须写在close_file前面
-        buffer_pool_manager_->flush_all_pages(file_handle->fd_);
-        disk_manager_->close_file(file_handle->fd_);
+        buffer_pool_manager.flush_all_pages(file_handle->fd_);
+        disk_manager.close_file(file_handle->fd_);
     }
 
     /**
@@ -88,11 +86,11 @@ class RmManager {
      * @param file_handle 要关闭文件的句柄
      */
     void close_file_and_delete_pages(const RmFileHandle *file_handle) {
-        disk_manager_->write_page(file_handle->fd_, RM_FILE_HDR_PAGE, (char *)&file_handle->file_hdr_, sizeof(file_handle->file_hdr_));
+        disk_manager.write_page(file_handle->fd_, RM_FILE_HDR_PAGE, (char *)&file_handle->file_hdr_, sizeof(file_handle->file_hdr_));
         // 缓冲区的所有页刷到磁盘，注意这句话必须写在close_file前面
-        buffer_pool_manager_->flush_all_pages(file_handle->fd_);
+        buffer_pool_manager.flush_all_pages(file_handle->fd_);
         // 删除缓冲池中该文件的所有页面
-        buffer_pool_manager_->delete_all_pages(file_handle->fd_);
-        disk_manager_->close_file(file_handle->fd_);
+        buffer_pool_manager.delete_all_pages(file_handle->fd_);
+        disk_manager.close_file(file_handle->fd_);
     }
 };

@@ -232,7 +232,7 @@ echo "正在启动数据库客户端并执行测试命令..."
 echo "=========================================="
 
 # 运行客户端并传入测试命令
-rmdb_client/build/rmdb_client < test_commands.sql
+rmdb_client/build/rmdb_client < stress_test_multi_index.sql
 
 echo "=========================================="
 echo "测试完成"

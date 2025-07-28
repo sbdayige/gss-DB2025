@@ -19,6 +19,9 @@ See the Mulan PSL v2 for more details. */
 #include "index/ix.h"
 #include "system/sm.h"
 
+extern SmManager sm_manager;
+extern TransactionManager txn_manager;
+
 class MvccSelectExecutor : public AbstractExecutor {
    private:
     TabMeta tab_;                                    // 表的元数据
@@ -29,20 +32,16 @@ class MvccSelectExecutor : public AbstractExecutor {
     size_t tuple_idx_;                               // 当前遍历到的tuple位置
     std::vector<std::unique_ptr<RmRecord>> buffer_;  // 符合条件的记录缓冲区
     std::vector<Rid> rids_;                          // 对应记录的rid
-    SmManager *sm_manager_;
-    TransactionManager *txn_mgr_;  // 事务管理器指针
-    bool fed_to_upper_;            // 是否已经被上层执行器消费
+    bool fed_to_upper_;                              // 是否已经被上层执行器消费
 
    public:
-    MvccSelectExecutor(SmManager *sm_manager, TransactionManager *txn_mgr, const std::string &tab_name, std::vector<Condition> conds,
+    MvccSelectExecutor(const std::string &tab_name, std::vector<Condition> conds,
                        std::vector<ColMeta> cols, Context *context) {
-        sm_manager_ = sm_manager;
-        txn_mgr_ = txn_mgr;
         tab_name_ = tab_name;
 
-        tab_ = sm_manager_->db_.get_table(tab_name);
+        tab_ = sm_manager.db_.get_table(tab_name);
 
-        fh_ = sm_manager_->get_file_handle(tab_name);
+        fh_ = sm_manager.get_file_handle(tab_name);
 
         conds_ = conds;
         cols_ = cols;
@@ -122,7 +121,7 @@ class MvccSelectExecutor : public AbstractExecutor {
                 auto rid = scan.rid();
 
                 // 1. 获取对当前事务可见的记录版本
-                auto visible_record = GetVisibleRecord(rid, context_->txn_, txn_mgr_, fh_, context_, tab_);
+                auto visible_record = GetVisibleRecord(rid, context_->txn_, &txn_manager, fh_, context_, tab_);
                 if (!visible_record) {
                     scan.next();
                     continue;

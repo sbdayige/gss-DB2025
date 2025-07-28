@@ -22,6 +22,8 @@ See the Mulan PSL v2 for more details. */
 #include "log_defs.h"
 #include "record/rm_defs.h"
 
+extern DiskManager disk_manager;
+
 /* 日志记录对应操作的类型 */
 enum LogType : int {
     UPDATE = 0,
@@ -423,10 +425,7 @@ class LogBuffer {
 /* 日志管理器，负责把日志写入日志缓冲区，以及把日志缓冲区中的内容写入磁盘中 */
 class LogManager {
    public:
-    LogManager(DiskManager* disk_manager) {
-        disk_manager_ = disk_manager;
-        persist_lsn_ = INVALID_LSN;
-    }
+    LogManager() = default;
 
     lsn_t add_log_to_buffer(LogRecord* log_record);
     void flush_log_to_disk();
@@ -442,5 +441,4 @@ class LogManager {
     std::mutex latch_;                  // 用于对log_buffer_的互斥访问
     LogBuffer log_buffer_;              // 日志缓冲区
     lsn_t persist_lsn_;                 // 记录已经持久化到磁盘中的最后一条日志的日志号
-    DiskManager* disk_manager_;
 };
