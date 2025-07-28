@@ -463,175 +463,114 @@ bool SmManager::contains_table(const std::string& tab_name) const {
 }
 
 void SmManager::load_csv_data(const std::string& csv_file_path, const std::string& tab_name) {
-    // 路径解析：支持绝对路径和两种相对路径（当前目录和上级目录）
-    std::string resolved_path;
-    bool found = false;
-    char cwd[4096];
-    getcwd(cwd, sizeof(cwd));
-
-    // 绝对路径
-    if (!csv_file_path.empty() && (csv_file_path[0] == '/' || (csv_file_path.size() > 1 && csv_file_path[1] == ':'))) {
-        std::ifstream test(csv_file_path);
-        if (test.is_open()) {
-            resolved_path = csv_file_path;
-            found = true;
-        }
-    }
-    // 相对路径：当前目录
-    if (!found) {
-        std::string try1 = std::string(cwd) + "/" + csv_file_path;
-        std::ifstream test(try1);
-        if (test.is_open()) {
-            resolved_path = try1;
-            found = true;
-        }
-    }
-    // 相对路径：上级目录
-    if (!found) {
-        std::string parent = std::string(cwd);
-        size_t pos = parent.find_last_of('/');
-        if (pos != std::string::npos) parent = parent.substr(0, pos);
-        std::string try2 = parent + "/" + csv_file_path;
-        std::ifstream test(try2);
-        if (test.is_open()) {
-            resolved_path = try2;
-            found = true;
-        }
-    }
-    // 最后兜底
-    if (!found) {
-        resolved_path = csv_file_path;
+    // 检查表是否存在
+    if (!db_.is_table(tab_name)) {
+        throw TableNotFoundError(tab_name);
     }
 
-    std::ifstream file(resolved_path);
-    if (!file.is_open()) {
-        throw std::runtime_error("无法打开CSV文件: " + resolved_path + "（原始路径: " + csv_file_path + ")");
-    }
+    // 获取表的元数据
+    TabMeta& tab = db_.get_table(tab_name);
+    auto* fh = fhs_[tab_name].get();
 
-    auto tab_ = db_.get_table(tab_name);
-    auto fh_ = fhs_.at(tab_name).get();
-    size_t record_size = fh_->get_file_hdr().record_size;
-    char* record = new char[record_size];
+    // 打开CSV文件
+    std::ifstream csv_file(csv_file_path);
+    if (!csv_file.is_open()) {
+        throw FileNotFoundError(csv_file_path);
+    }
 
     std::string line;
     bool first_line = true;
-    std::vector<std::string> headers;
 
-    // 健壮CSV分割，支持引号、逗号、空字段
-    auto parse_csv_line = [](const std::string& line) -> std::vector<std::string> {
-        std::vector<std::string> result;
-        std::string field;
-        bool in_quotes = false;
-        for (size_t i = 0; i < line.size(); ++i) {
-            char c = line[i];
-            if (c == '"') {
-                if (in_quotes && i + 1 < line.size() && line[i + 1] == '"') {
-                    field += '"';
-                    ++i;
-                } else {
-                    in_quotes = !in_quotes;
-                }
-            } else if (c == ',' && !in_quotes) {
-                result.push_back(field);
-                field.clear();
-            } else {
-                field += c;
-            }
-        }
-        result.push_back(field);
-        return result;
-    };
-
-    size_t line_num = 0;
-    while (std::getline(file, line)) {
-        ++line_num;
-        if (line.empty()) continue;
-        auto fields = parse_csv_line(line);
-
-        // 处理第一行(表头)
+    while (std::getline(csv_file, line)) {
+        // 跳过第一行（表头）
         if (first_line) {
-            headers = fields;
-            if (headers.size() != tab_.cols.size()) {
-                delete[] record;
-                throw std::runtime_error("CSV字段数与表结构不一致，表字段数: " + std::to_string(tab_.cols.size()) +
-                                         "，CSV字段数: " + std::to_string(headers.size()));
-            }
-            for (size_t i = 0; i < headers.size(); ++i) {
-                std::string csv_col = headers[i];
-                std::string tab_col = tab_.cols[i].name;
-                // 去除空格
-                while (!csv_col.empty() && (csv_col.front() == ' ' || csv_col.front() == '"')) csv_col.erase(0, 1);
-                while (!csv_col.empty() && (csv_col.back() == ' ' || csv_col.back() == '"')) csv_col.pop_back();
-                if (csv_col != tab_col) {
-                    delete[] record;
-                    throw std::runtime_error("CSV表头与表结构不一致，第" + std::to_string(i + 1) + "列: " + csv_col + " != " + tab_col);
-                }
-            }
             first_line = false;
             continue;
         }
 
-        if (fields.size() != tab_.cols.size()) {
-            delete[] record;
-            throw std::runtime_error("第" + std::to_string(line_num) + "行字段数与表结构不一致，期望" +
-                                     std::to_string(tab_.cols.size()) + "，实际" + std::to_string(fields.size()));
+        // 跳过空行
+        if (line.empty() || line.find_first_not_of(" \t\r\n") == std::string::npos) {
+            continue;
         }
 
-        std::memset(record, 0, record_size);
+        // 解析CSV行
+        std::vector<std::string> fields;
+        std::stringstream ss(line);
+        std::string field;
 
-        for (size_t i = 0; i < tab_.cols.size(); ++i) {
-            const auto& col = tab_.cols[i];
-            std::string value = fields[i];
-            // 去除字段值前后空格和引号
-            while (!value.empty() && (value.front() == ' ' || value.front() == '"')) value.erase(0, 1);
-            while (!value.empty() && (value.back() == ' ' || value.back() == '"')) value.pop_back();
+        while (std::getline(ss, field, ',')) {
+            // 去除字段前后的空白字符
+            field.erase(0, field.find_first_not_of(" \t\r\n"));
+            field.erase(field.find_last_not_of(" \t\r\n") + 1);
+            fields.push_back(field);
+        }
 
+        // 检查字段数量是否匹配
+        if (fields.size() != tab.cols.size()) {
+            throw RMDBError("CSV field count (" + std::to_string(fields.size()) + 
+                          ") doesn't match table column count (" + std::to_string(tab.cols.size()) + ")");
+        }
+
+        // 构造记录
+        auto record = std::make_unique<RmRecord>(fh->get_file_hdr().record_size);
+        
+        for (size_t i = 0; i < fields.size(); ++i) {
+            const auto& col = tab.cols[i];
+            const std::string& field_str = fields[i];
+            
             try {
                 switch (col.type) {
                     case TYPE_INT: {
-                        int int_value = value.empty() ? 0 : std::stoi(value);
-                        memcpy(record + col.offset, &int_value, col.len);
+                        int int_val = std::stoi(field_str);
+                        memcpy(record->data + col.offset, &int_val, sizeof(int));
                         break;
                     }
                     case TYPE_FLOAT: {
-                        float float_value = value.empty() ? 0.0f : std::stof(value);
-                        memcpy(record + col.offset, &float_value, col.len);
+                        float float_val = std::stof(field_str);
+                        memcpy(record->data + col.offset, &float_val, sizeof(float));
                         break;
                     }
                     case TYPE_STRING: {
-                        memset(record + col.offset, 0, col.len);
-                        size_t copy_len = std::min(value.size(), static_cast<size_t>(col.len));
-                        memcpy(record + col.offset, value.c_str(), copy_len);
+                        if (field_str.length() > static_cast<size_t>(col.len)) {
+                            throw StringOverflowError();
+                        }
+                        // 清零内存并复制字符串
+                        memset(record->data + col.offset, 0, col.len);
+                        memcpy(record->data + col.offset, field_str.c_str(), field_str.length());
                         break;
                     }
                     default:
-                        delete[] record;
-                        throw std::runtime_error("未知字段类型: " + std::to_string(static_cast<int>(col.type)));
+                        throw InternalError("Unsupported column type in load_csv_data");
                 }
-            } catch (const std::exception& e) {
-                delete[] record;
-                throw std::runtime_error("第" + std::to_string(line_num) + "行，第" + std::to_string(i + 1) +
-                                         "列（" + col.name + "）类型转换失败，值: " + value + "，错误: " + e.what());
+            } catch (const std::invalid_argument& e) {
+                throw RMDBError("Invalid data format in CSV field: " + field_str + 
+                              " for column " + col.name + " (type: " + coltype2str(col.type) + ")");
+            } catch (const std::out_of_range& e) {
+                throw RMDBError("Data out of range in CSV field: " + field_str + 
+                              " for column " + col.name + " (type: " + coltype2str(col.type) + ")");
             }
         }
 
-        // 插入记录
-        auto rid_ = fh_->insert_record(record, nullptr);
+        // 插入记录到表中
+        Rid rid = fh->insert_record(record->data, nullptr);
 
         // 更新索引
-        for (const auto& index : tab_.indexes) {
-            auto idx_name = ix_manager_->get_index_name(tab_name, index.cols);
-            auto ih = ihs_.at(idx_name).get();
+        for (const auto& index : tab.indexes) {
+            auto ih = ihs_.at(get_ix_manager()->get_index_name(tab_name, index.cols)).get();
             auto key = std::make_unique<char[]>(index.col_tot_len);
-            int offset_ = 0;
-            for (size_t i = 0; i < static_cast<unsigned long>(index.col_num); ++i) {
-                std::memcpy(key.get() + offset_, record + index.cols[i].offset, index.cols[i].len);
-                offset_ += index.cols[i].len;
+            int offset = 0;
+            for (size_t j = 0; j < static_cast<size_t>(index.col_num); ++j) {
+                memcpy(key.get() + offset, record->data + index.cols[j].offset, index.cols[j].len);
+                offset += index.cols[j].len;
             }
-            ih->insert_entry(key.get(), rid_, nullptr);
+            
+            if (ih->insert_entry(key.get(), rid, nullptr) == INVALID_PAGE_ID) {
+                // 如果索引插入失败，需要删除已插入的记录
+                fh->delete_record(rid, nullptr);
+                throw RMDBError("Failed to insert index entry during CSV load for table: " + tab_name);
+            }
         }
     }
 
-    delete[] record;
-    file.close();
+    csv_file.close();
 }

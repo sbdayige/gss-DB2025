@@ -60,3 +60,5 @@ src/parser/yacc.tab.*
 cmake-build-debug-wsl/
 
 TPCC-Tester/
+.venv/
+src/test/performance_test
