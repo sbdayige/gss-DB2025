@@ -127,11 +127,6 @@ class MvccSelectExecutor : public AbstractExecutor {
                     continue;
                 }
                 if (EvaluateConditions(*visible_record, conds_, tab_)) {
-                    // Debug: 打印记录内容
-                    if (tab_.cols.size() >= 2) {
-                        int id = *(int *)(visible_record->data + tab_.cols[0].offset);
-                        int score = *(int *)(visible_record->data + tab_.cols[1].offset);
-                    }
                     buffer_.push_back(std::move(visible_record));
                     rids_.push_back(rid);
                 }

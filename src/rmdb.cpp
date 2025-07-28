@@ -45,10 +45,8 @@ Optimizer optimizer;
 LogManager log_manager;
 RecoveryManager recovery;
 QlManager ql_manager;
-Portal portal;
-Analyze analyze;
-
-auto log_manager = std::make_unique<LogManager>(&disk_manager);
+Portal portal(&txn_manager);
+Analyze analyze(&sm_manager);
 
 pthread_mutex_t *buffer_mutex;
 pthread_mutex_t *sockfd_mutex;

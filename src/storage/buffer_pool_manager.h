@@ -27,8 +27,7 @@ extern DiskManager disk_manager;
 
 class BufferPoolManager {
    private:
-    size_t pool_size_;  // buffer_pool中可容纳页面的个数，即帧的个数                               // 空闲帧编号的链表
-    DiskManager *disk_manager_;
+    size_t pool_size_;          // buffer_pool中可容纳页面的个数，即帧的个数                               // 空闲帧编号的链表
     std::hash<PageId> hasher_;  // 用于计算PageId的哈希值
     BufferPoolInstance *buffer_pool_instances_[BUFFER_POOL_INSTANCE_SIZE];
 
