@@ -80,6 +80,6 @@ class SmManager {
     IxIndexHandle* get_index_handle(const std::string& index_name) const;
 
     bool contains_table(const std::string& tab_name) const;
+    
     void load_csv_data(const std::string& csv_file_path, const std::string& tab_name, Context* context = nullptr);
-    void insert_record_mvcc(const std::string& tab_name, const std::vector<Value>& values, Context* context);
 };
