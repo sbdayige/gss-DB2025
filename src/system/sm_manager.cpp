@@ -18,6 +18,7 @@ See the Mulan PSL v2 for more details. */
 #include "index/ix.h"
 #include "record/rm.h"
 #include "record_printer.h"
+#include "execution/executor_mvcc_insert.h"
 
 extern DiskManager disk_manager;
 extern BufferPoolManager buffer_pool_manager;
@@ -476,7 +477,7 @@ bool SmManager::contains_table(const std::string& tab_name) const {
     return db_.is_table(tab_name);
 }
 
-void SmManager::load_csv_data(const std::string& csv_file_path, const std::string& tab_name) {
+void SmManager::load_csv_data(const std::string& csv_file_path, const std::string& tab_name, Context* context) {
     // 检查表是否存在
     if (!db_.is_table(tab_name)) {
         throw TableNotFoundError(tab_name);
@@ -484,7 +485,6 @@ void SmManager::load_csv_data(const std::string& csv_file_path, const std::strin
 
     // 获取表的元数据
     TabMeta& tab = db_.get_table(tab_name);
-    auto* fh = fhs_[tab_name].get();
 
     // 打开CSV文件
     std::ifstream csv_file(csv_file_path);
@@ -525,32 +525,32 @@ void SmManager::load_csv_data(const std::string& csv_file_path, const std::strin
                             ") doesn't match table column count (" + std::to_string(tab.cols.size()) + ")");
         }
 
-        // 构造记录
-        auto record = std::make_unique<RmRecord>(fh->get_file_hdr().record_size);
+        // 构造Value向量
+        std::vector<Value> values;
+        values.reserve(fields.size());
 
         for (size_t i = 0; i < fields.size(); ++i) {
             const auto& col = tab.cols[i];
             const std::string& field_str = fields[i];
 
+            Value val;
             try {
                 switch (col.type) {
                     case TYPE_INT: {
                         int int_val = std::stoi(field_str);
-                        memcpy(record->data + col.offset, &int_val, sizeof(int));
+                        val.set_int(int_val);
                         break;
                     }
                     case TYPE_FLOAT: {
                         float float_val = std::stof(field_str);
-                        memcpy(record->data + col.offset, &float_val, sizeof(float));
+                        val.set_float(float_val);
                         break;
                     }
                     case TYPE_STRING: {
                         if (field_str.length() > static_cast<size_t>(col.len)) {
                             throw StringOverflowError();
                         }
-                        // 清零内存并复制字符串
-                        memset(record->data + col.offset, 0, col.len);
-                        memcpy(record->data + col.offset, field_str.c_str(), field_str.length());
+                        val.set_str(field_str);
                         break;
                     }
                     default:
@@ -563,26 +563,17 @@ void SmManager::load_csv_data(const std::string& csv_file_path, const std::strin
                 throw RMDBError("Data out of range in CSV field: " + field_str +
                                 " for column " + col.name + " (type: " + coltype2str(col.type) + ")");
             }
+            
+            values.push_back(std::move(val));
         }
 
-        // 插入记录到表中
-        Rid rid = fh->insert_record(record->data, nullptr);
-
-        // 更新索引
-        for (const auto& index : tab.indexes) {
-            auto ih = ihs_.at(get_ix_manager()->get_index_name(tab_name, index.cols)).get();
-            auto key = std::make_unique<char[]>(index.col_tot_len);
-            int offset = 0;
-            for (size_t j = 0; j < static_cast<size_t>(index.col_num); ++j) {
-                memcpy(key.get() + offset, record->data + index.cols[j].offset, index.cols[j].len);
-                offset += index.cols[j].len;
-            }
-
-            if (ih->insert_entry(key.get(), rid, nullptr) == INVALID_PAGE_ID) {
-                // 如果索引插入失败，需要删除已插入的记录
-                fh->delete_record(rid, nullptr);
-                throw RMDBError("Failed to insert index entry during CSV load for table: " + tab_name);
-            }
+        // 使用MVCC插入记录
+        try {
+            MvccInsertExecutor executor(tab_name, values, context);
+            executor.Next();
+        } catch (const RMDBError& e) {
+            // 如果插入失败，抛出错误
+            throw RMDBError("Failed to insert CSV record for table " + tab_name + ": " + e.what());
         }
     }
 
