@@ -137,6 +137,15 @@ void SmManager::close_db() {
         throw DatabaseNotFoundError(db_.name_);
     }
 
+    for (const auto& [table_name, file_handle] : fhs_) {
+        rm_manager.close_file_and_clear_buffer(file_handle.get());
+    }
+
+    // 正确关闭所有索引文件，确保数据持久化
+    for (auto& [index_name, ih] : ihs_) {
+        ix_manager.close_index(ih.get());
+    }
+
     flush_meta();
 
     ihs_.clear();

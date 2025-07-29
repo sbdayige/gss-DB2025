@@ -211,7 +211,6 @@ int IxNodeHandle::remove(const char* key) {
 
     return page_hdr->num_key;
 }
-
 IxIndexHandle::IxIndexHandle(DiskManager* disk_manager, BufferPoolManager* buffer_pool_manager, int fd)
     : disk_manager_(disk_manager), buffer_pool_manager_(buffer_pool_manager), fd_(fd) {
     // init file_hdr_
@@ -225,9 +224,14 @@ IxIndexHandle::IxIndexHandle(DiskManager* disk_manager, BufferPoolManager* buffe
     // 释放临时缓冲区内存
     delete[] buf;
 
-    // disk_manager管理的fd对应的文件中，设置从file_hdr_->num_pages开始分配page_no
-    int now_page_no = disk_manager_->get_fd2pageno(fd);
-    disk_manager_->set_fd2pageno(fd, now_page_no + 1);
+    off_t file_size = lseek(fd, 0, SEEK_END);
+    lseek(fd, 0, SEEK_SET);  // 重置文件指针
+    int expected_pages = file_size / PAGE_SIZE;
+    // 验证num_pages_的合理性
+    if (file_hdr_->num_pages_ < IX_INIT_NUM_PAGES) {
+        file_hdr_->num_pages_ = IX_INIT_NUM_PAGES;
+    }
+    disk_manager_->set_fd2pageno(fd, file_hdr_->num_pages_);
 }
 
 /**
@@ -838,7 +842,11 @@ void IxIndexHandle::create_new_root(const char* key, const Rid& value) {
     new_node->page_hdr->num_key = 0;
     new_node->insert_pair(0, key, value);
     update_root_page_no(new_node->get_page_no());
+
+    // 正确设置first_leaf_和last_leaf_
+    file_hdr_->first_leaf_ = new_node->get_page_no();
     file_hdr_->last_leaf_ = new_node->get_page_no();
+
     buffer_pool_manager_->unpin_page(new_node->get_page_id(), true);
     delete new_node;  // 释放new_node内存
 }
