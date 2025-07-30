@@ -10,15 +10,20 @@ See the Mulan PSL v2 for more details. */
 
 #include "sm_manager.h"
 
+#include <fcntl.h>
+#include <sys/mman.h>
 #include <sys/stat.h>
 #include <unistd.h>
 
+#include <algorithm>
 #include <fstream>
+#include <utility>
 
+#include "errors.h"
 #include "index/ix.h"
 #include "record/rm.h"
+#include "record/rm_file_handle.h"
 #include "record_printer.h"
-#include "execution/executor_mvcc_insert.h"
 
 extern DiskManager disk_manager;
 extern BufferPoolManager buffer_pool_manager;
@@ -483,99 +488,197 @@ void SmManager::load_csv_data(const std::string& csv_file_path, const std::strin
         throw TableNotFoundError(tab_name);
     }
 
-    // 获取表的元数据
-    TabMeta& tab = db_.get_table(tab_name);
-
-    // 打开CSV文件
-    std::ifstream csv_file(csv_file_path);
-    if (!csv_file.is_open()) {
+    // 根据文件大小选择最优加载策略
+    struct stat file_stat;
+    if (stat(csv_file_path.c_str(), &file_stat) == -1) {
         throw FileNotFoundError(csv_file_path);
     }
 
-    std::string line;
-    bool first_line = true;
+    const size_t file_size = file_stat.st_size;
+    const size_t FILE_THRESHOLD = 100 * 1024 * 1024;  // 100MB阈值
 
-    while (std::getline(csv_file, line)) {
-        // 跳过第一行（表头）
-        if (first_line) {
-            first_line = false;
-            continue;
-        }
+    if (file_size < FILE_THRESHOLD) {
+        // 小文件：使用优化的批量读取
+        load_csv_data_optimized(csv_file_path, tab_name, context);
+    } else {
+        // 大文件：使用内存映射
+        load_csv_data_mmap(csv_file_path, tab_name, context);
+    }
+}
 
-        // 跳过空行
-        if (line.empty() || line.find_first_not_of(" \t\r\n") == std::string::npos) {
-            continue;
-        }
-
-        // 解析CSV行
-        std::vector<std::string> fields;
-        std::stringstream ss(line);
-        std::string field;
-
-        while (std::getline(ss, field, ',')) {
-            // 去除字段前后的空白字符
-            field.erase(0, field.find_first_not_of(" \t\r\n"));
-            field.erase(field.find_last_not_of(" \t\r\n") + 1);
-            fields.push_back(field);
-        }
-
-        // 检查字段数量是否匹配
-        if (fields.size() != tab.cols.size()) {
-            throw RMDBError("CSV field count (" + std::to_string(fields.size()) +
-                            ") doesn't match table column count (" + std::to_string(tab.cols.size()) + ")");
-        }
-
-        // 构造Value向量
-        std::vector<Value> values;
-        values.reserve(fields.size());
-
-        for (size_t i = 0; i < fields.size(); ++i) {
-            const auto& col = tab.cols[i];
-            const std::string& field_str = fields[i];
-
-            Value val;
-            try {
-                switch (col.type) {
-                    case TYPE_INT: {
-                        int int_val = std::stoi(field_str);
-                        val.set_int(int_val);
-                        break;
-                    }
-                    case TYPE_FLOAT: {
-                        float float_val = std::stof(field_str);
-                        val.set_float(float_val);
-                        break;
-                    }
-                    case TYPE_STRING: {
-                        if (field_str.length() > static_cast<size_t>(col.len)) {
-                            throw StringOverflowError();
-                        }
-                        val.set_str(field_str);
-                        break;
-                    }
-                    default:
-                        throw InternalError("Unsupported column type in load_csv_data");
-                }
-            } catch (const std::invalid_argument& e) {
-                throw RMDBError("Invalid data format in CSV field: " + field_str +
-                                " for column " + col.name + " (type: " + coltype2str(col.type) + ")");
-            } catch (const std::out_of_range& e) {
-                throw RMDBError("Data out of range in CSV field: " + field_str +
-                                " for column " + col.name + " (type: " + coltype2str(col.type) + ")");
-            }
-            
-            values.push_back(std::move(val));
-        }
-
-        // 使用MVCC插入记录
-        try {
-            MvccInsertExecutor executor(tab_name, values, context);
-            executor.Next();
-        } catch (const RMDBError& e) {
-            // 如果插入失败，抛出错误
-            throw RMDBError("Failed to insert CSV record for table " + tab_name + ": " + e.what());
-        }
+/**
+ * @brief 优化版CSV加载 - 适用于中小文件
+ */
+void SmManager::load_csv_data_optimized(const std::string& csv_file_path, const std::string& tab_name, Context* context) {
+    // 一次性读取整个文件
+    std::ifstream file(csv_file_path, std::ios::binary);
+    if (!file.is_open()) {
+        throw RMDBError("Cannot open CSV file: " + csv_file_path);
     }
 
-    csv_file.close();
+    file.seekg(0, std::ios::end);
+    const size_t file_size = file.tellg();
+    file.seekg(0, std::ios::beg);
+
+    std::vector<char> file_buffer(file_size + 1);
+    file.read(file_buffer.data(), file_size);
+    file_buffer[file_size] = '\0';
+    file.close();
+
+    // 批量处理数据
+    load_data_from_buffer(file_buffer.data(), file_buffer.data() + file_size, tab_name, context);
+}
+
+/**
+ * @brief 内存映射版CSV加载 - 适用于大文件
+ */
+void SmManager::load_csv_data_mmap(const std::string& csv_file_path, const std::string& tab_name, Context* context) {
+    // 打开文件获取文件描述符
+    int fd = open(csv_file_path.c_str(), O_RDONLY);
+    if (fd == -1) {
+        throw RMDBError("Cannot open CSV file: " + csv_file_path);
+    }
+
+    // 获取文件大小
+    struct stat file_stat;
+    if (fstat(fd, &file_stat) == -1) {
+        close(fd);
+        throw RMDBError("Cannot get file size: " + csv_file_path);
+    }
+
+    const size_t file_size = file_stat.st_size;
+    if (file_size == 0) {
+        close(fd);
+        return;  // 空文件
+    }
+
+    // 内存映射文件
+    char* file_data = static_cast<char*>(mmap(nullptr, file_size, PROT_READ, MAP_PRIVATE, fd, 0));
+    if (file_data == MAP_FAILED) {
+        close(fd);
+        throw RMDBError("Cannot memory map file: " + csv_file_path);
+    }
+
+    // 建议内核顺序读取
+    madvise(file_data, file_size, MADV_SEQUENTIAL);
+
+    load_data_from_buffer(file_data, file_data + file_size, tab_name, context);
+
+    munmap(file_data, file_size);
+    close(fd);
+}
+
+/**
+ * @brief 从内存缓冲区批量加载数据 - 模仿DB2025的高效批量处理
+ */
+void SmManager::load_data_from_buffer(char* start_pos, char* end_pos, const std::string& tab_name, Context* context) {
+    TabMeta& tab = db_.get_table(tab_name);
+    auto fh = fhs_[tab_name].get();
+    const size_t record_size = fh->file_hdr_.record_size;
+
+    // 跳过第一行（表头）
+    char* current_pos = std::find(start_pos, end_pos, '\n');
+    if (current_pos != end_pos) {
+        current_pos++;  // 跳过换行符
+    }
+
+    // 批量处理记录 - 每次处理一批记录
+    const int BATCH_SIZE = 1000;
+    std::vector<std::unique_ptr<RmRecord>> record_batch;
+    std::vector<Rid> rid_batch;
+    record_batch.reserve(BATCH_SIZE);
+    rid_batch.reserve(BATCH_SIZE);
+
+    while (current_pos < end_pos) {
+        // 创建记录
+        auto record = std::make_unique<RmRecord>(record_size);
+        char* record_data = record->data;
+        memset(record_data, 0, record_size);
+
+        // 解析一行数据
+        for (size_t i = 0; i < tab.cols.size() && current_pos < end_pos; ++i) {
+            char* line_end = std::find_if(current_pos, end_pos, [](char c) { return c == ',' || c == '\n'; });
+            const auto& col = tab.cols[i];
+            int field_len = line_end - current_pos;
+
+            switch (col.type) {
+                case ColType::TYPE_INT: {
+                    // 快速整数解析
+                    int int_val = 0;
+                    bool negative = false;
+                    char* parse_pos = current_pos;
+                    if (*parse_pos == '-') {
+                        negative = true;
+                        parse_pos++;
+                    }
+                    while (parse_pos < line_end && *parse_pos >= '0' && *parse_pos <= '9') {
+                        int_val = int_val * 10 + (*parse_pos - '0');
+                        parse_pos++;
+                    }
+                    if (negative) int_val = -int_val;
+                    memcpy(record_data + col.offset, &int_val, col.len);
+                    break;
+                }
+                case ColType::TYPE_FLOAT: {
+                    std::string field_value(current_pos, field_len);
+                    float float_val = std::stof(field_value);
+                    memcpy(record_data + col.offset, &float_val, col.len);
+                    break;
+                }
+                case ColType::TYPE_STRING: {
+                    int copy_len = std::min(field_len, col.len);
+                    memcpy(record_data + col.offset, current_pos, copy_len);
+                    break;
+                }
+                default:
+                    throw RMDBError("Unsupported column type");
+            }
+
+            current_pos = line_end;
+            if (current_pos < end_pos && (*current_pos == ',' || *current_pos == '\n')) {
+                current_pos++;
+            }
+        }
+
+        // 跳到下一行
+        while (current_pos < end_pos && *(current_pos - 1) != '\n') {
+            current_pos++;
+        }
+
+        record_batch.push_back(std::move(record));
+
+        // 当批次满了或处理完所有数据时，执行批量插入
+        if (record_batch.size() >= BATCH_SIZE || current_pos >= end_pos) {
+            // 批量插入记录
+            for (auto& rec : record_batch) {
+                Rid rid = fh->insert_record(rec->data, context);
+                rid_batch.push_back(rid);
+            }
+
+            // 批量插入索引
+            for (size_t i = 0; i < record_batch.size(); ++i) {
+                // 为每个索引插入记录
+                for (const auto& index : tab.indexes) {
+                    auto ih = ihs_.at(ix_manager.get_index_name(tab_name, index.cols)).get();
+
+                    // 构建索引键
+                    std::vector<char> key_buffer(index.col_tot_len);
+                    char* key = key_buffer.data();
+                    int offset = 0;
+
+                    for (const auto& col : index.cols) {
+                        memcpy(key + offset, record_batch[i]->data + col.offset, col.len);
+                        offset += col.len;
+                    }
+
+                    // 插入索引项
+                    ih->insert_entry(key, rid_batch[i], context ? context->txn_ : nullptr);
+                }
+            }
+
+            // 清理批次
+            record_batch.clear();
+            rid_batch.clear();
+        }
+    }
 }

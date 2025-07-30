@@ -80,6 +80,13 @@ class SmManager {
     IxIndexHandle* get_index_handle(const std::string& index_name) const;
 
     bool contains_table(const std::string& tab_name) const;
-    
+
     void load_csv_data(const std::string& csv_file_path, const std::string& tab_name, Context* context = nullptr);
+
+   private:
+    // 优化版CSV加载的辅助函数
+    void load_csv_data_optimized(const std::string& csv_file_path, const std::string& tab_name, Context* context);
+    void load_csv_data_mmap(const std::string& csv_file_path, const std::string& tab_name, Context* context);
+    void load_data_from_buffer(char* start_pos, char* end_pos, const std::string& tab_name, Context* context);
+    void batch_insert_records(const std::string& tab_name, std::vector<std::unique_ptr<RmRecord>>& records, Context* context);
 };

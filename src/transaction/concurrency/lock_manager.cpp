@@ -175,13 +175,21 @@ bool LockManager::lock_IX_on_table(Transaction* txn, int tab_fd) {
  * @param {LockDataId} lock_data_id 要释放的锁ID
  */
 bool LockManager::unlock(Transaction* txn, LockDataId lock_data_id) {
+    if (txn == nullptr) {
+        return false;
+    }
+
     std::unique_lock<std::mutex> lock(latch_);
 
     auto lock_table_it = lock_table_.find(lock_data_id);
     if (lock_table_it == lock_table_.end()) {
         // 锁不存在，从事务锁集合中移除
-        size_t locks_removed_from_txn = txn->get_lock_set()->erase(lock_data_id);
-        return locks_removed_from_txn > 0;
+        auto lock_set = txn->get_lock_set();
+        if (lock_set) {
+            size_t locks_removed_from_txn = lock_set->erase(lock_data_id);
+            return locks_removed_from_txn > 0;
+        }
+        return false;
     }
 
     LockRequestQueue& request_queue = lock_table_it->second;
@@ -189,8 +197,10 @@ bool LockManager::unlock(Transaction* txn, LockDataId lock_data_id) {
 
     // 检查是否持有排他锁
     if (request_queue.exclusive_holder_ == txn->get_transaction_id()) {
-        // 释放排他锁
-        request_queue.request_queue_.erase(request_queue.exclusive_holder_it_);
+        // 安全地释放排他锁
+        if (request_queue.exclusive_holder_it_ != request_queue.request_queue_.end()) {
+            request_queue.request_queue_.erase(request_queue.exclusive_holder_it_);
+        }
         request_queue.exclusive_holder_ = -1;
         request_queue.exclusive_holder_it_ = request_queue.request_queue_.end();
         lock_released = true;
@@ -209,7 +219,10 @@ bool LockManager::unlock(Transaction* txn, LockDataId lock_data_id) {
 
     if (lock_released) {
         // 从事务锁集合中移除
-        txn->get_lock_set()->erase(lock_data_id);
+        auto lock_set = txn->get_lock_set();
+        if (lock_set) {
+            lock_set->erase(lock_data_id);
+        }
 
         // 通知等待的事务
         request_queue.cv_.notify_all();
