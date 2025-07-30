@@ -171,12 +171,12 @@ class MvccUpdateExecutor : public AbstractExecutor {
             txn_manager.UpdateVersionLink(fh_->GetFd(), rid, version_link, [](std::optional<VersionUndoLink>) { return true; });
 
             // 6.3 记录DELETE日志
-            if (context_ && context_->txn_ && context_->log_mgr_) {
-                DeleteLogRecord log_record(context_->txn_->get_transaction_id(), old_record, rid, tab_name_);
-                log_record.prev_lsn_ = context_->txn_->get_prev_lsn();
-                lsn_t lsn = context_->log_mgr_->add_log_to_buffer(&log_record);
-                context_->txn_->set_prev_lsn(lsn);
-            }
+            // if (context_ && context_->txn_ && context_->log_mgr_) {
+            //     DeleteLogRecord log_record(context_->txn_->get_transaction_id(), old_record, rid, tab_name_);
+            //     log_record.prev_lsn_ = context_->txn_->get_prev_lsn();
+            //     lsn_t lsn = context_->log_mgr_->add_log_to_buffer(&log_record);
+            //     context_->txn_->set_prev_lsn(lsn);
+            // }
 
             WriteRecord *write_record = new WriteRecord(WType::DELETE_TUPLE, tab_name_, rid, old_record);
             context_->txn_->append_write_record(write_record);
@@ -221,12 +221,12 @@ class MvccUpdateExecutor : public AbstractExecutor {
             txn_manager.UpdateVersionLink(fh_->GetFd(), new_rid, insert_version_link, [](std::optional<VersionUndoLink>) { return true; });
 
             // 7.6 记录INSERT日志
-            if (context_ && context_->txn_ && context_->log_mgr_) {
-                InsertLogRecord log_record(context_->txn_->get_transaction_id(), new_record, new_rid, tab_name_);
-                log_record.prev_lsn_ = context_->txn_->get_prev_lsn();
-                lsn_t lsn = context_->log_mgr_->add_log_to_buffer(&log_record);
-                context_->txn_->set_prev_lsn(lsn);
-            }
+            // if (context_ && context_->txn_ && context_->log_mgr_) {
+            //     InsertLogRecord log_record(context_->txn_->get_transaction_id(), new_record, new_rid, tab_name_);
+            //     log_record.prev_lsn_ = context_->txn_->get_prev_lsn();
+            //     lsn_t lsn = context_->log_mgr_->add_log_to_buffer(&log_record);
+            //     context_->txn_->set_prev_lsn(lsn);
+            // }
 
             WriteRecord *insert_write_record = new WriteRecord(WType::INSERT_TUPLE, tab_name_, new_rid, new_record);
             context_->txn_->append_write_record(insert_write_record);

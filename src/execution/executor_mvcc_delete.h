@@ -81,12 +81,12 @@ class MvccDeleteExecutor : public AbstractExecutor {
             txn_manager.UpdateVersionLink(fh_->GetFd(), rid, version_link, [](std::optional<VersionUndoLink>) { return true; });
 
             // WAL: 记录DELETE日志
-            if (context_ && context_->txn_ && context_->log_mgr_) {
-                DeleteLogRecord log_record(context_->txn_->get_transaction_id(), delete_record, rid, tab_name_);
-                log_record.prev_lsn_ = context_->txn_->get_prev_lsn();
-                lsn_t lsn = context_->log_mgr_->add_log_to_buffer(&log_record);
-                context_->txn_->set_prev_lsn(lsn);
-            }
+            // if (context_ && context_->txn_ && context_->log_mgr_) {
+            //     DeleteLogRecord log_record(context_->txn_->get_transaction_id(), delete_record, rid, tab_name_);
+            //     log_record.prev_lsn_ = context_->txn_->get_prev_lsn();
+            //     lsn_t lsn = context_->log_mgr_->add_log_to_buffer(&log_record);
+            //     context_->txn_->set_prev_lsn(lsn);
+            // }
 
             WriteRecord *write_record = new WriteRecord(WType::DELETE_TUPLE, tab_name_, rid, delete_record);
             context_->txn_->append_write_record(write_record);

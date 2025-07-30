@@ -29,18 +29,11 @@ See the Mulan PSL v2 for more details. */
 
 #define SOCK_PORT 8765
 #define MAX_CONN_LIMIT 8
+#define ENABLE_COUT 0
 
-static bool is_cout = false;
 static bool should_exit = false;
 
 // 构建全局所需的管理器对象
-DiskManager disk_manager;
-BufferPoolManager buffer_pool_manager(BUFFER_POOL_SIZE);
-RmManager rm_manager;
-IxManager ix_manager;
-SmManager sm_manager;
-LockManager lock_manager;
-TransactionManager txn_manager(ConcurrencyMode::MVCC);
 Planner planner;
 Optimizer optimizer;
 LogManager log_manager;
@@ -48,6 +41,13 @@ RecoveryManager recovery;
 QlManager ql_manager;
 Portal portal(&txn_manager);
 Analyze analyze(&sm_manager);
+BufferPoolManager buffer_pool_manager(BUFFER_POOL_SIZE);
+DiskManager disk_manager;
+RmManager rm_manager;
+IxManager ix_manager;
+SmManager sm_manager;
+LockManager lock_manager;
+TransactionManager txn_manager(ConcurrencyMode::MVCC);
 
 pthread_mutex_t *buffer_mutex;
 pthread_mutex_t *sockfd_mutex;
@@ -213,9 +213,11 @@ void *client_handler(void *sock_fd) {
                         outfile.close();
                     }
                 } catch (RMDBError &e) {
-                    // 遇到异常，需要打印failure到output.txt文件中，并发异常信息返回给客户端
-                    // 遇到异常，打印异常信息
-                    if (is_cout) std::cerr << "RMDBError " << e.what() << std::endl;
+// 遇到异常，需要打印failure到output.txt文件中，并发异常信息返回给客户端
+// 遇到异常，打印异常信息
+#ifdef ENABLE_COUT
+                    std::cerr << "RMDBError " << e.what() << std::endl;
+#endif
                     memcpy(data_send, e.what(), e.get_msg_len());
                     data_send[e.get_msg_len()] = '\n';
                     data_send[e.get_msg_len() + 1] = '\0';
@@ -351,7 +353,9 @@ void start_server() {
     int ret = shutdown(sockfd_server, SHUT_WR);
     // shut down the all or part of a full-duplex connection.
     if (ret == -1) {
-        if (is_cout) printf("%s\n", strerror(errno));
+#ifdef ENABLE_COUT
+        printf("%s\n", strerror(errno));
+#endif
     }
     //    assert(ret != -1);
     sm_manager.close_db();
