@@ -506,9 +506,6 @@ void SmManager::load_csv_data(const std::string& csv_file_path, const std::strin
     }
 }
 
-/**
- * @brief 优化版CSV加载 - 适用于中小文件
- */
 void SmManager::load_csv_data_optimized(const std::string& csv_file_path, const std::string& tab_name, Context* context) {
     // 一次性读取整个文件
     std::ifstream file(csv_file_path, std::ios::binary);
@@ -529,9 +526,6 @@ void SmManager::load_csv_data_optimized(const std::string& csv_file_path, const 
     load_data_from_buffer(file_buffer.data(), file_buffer.data() + file_size, tab_name, context);
 }
 
-/**
- * @brief 内存映射版CSV加载 - 适用于大文件
- */
 void SmManager::load_csv_data_mmap(const std::string& csv_file_path, const std::string& tab_name, Context* context) {
     // 打开文件获取文件描述符
     int fd = open(csv_file_path.c_str(), O_RDONLY);
@@ -568,9 +562,6 @@ void SmManager::load_csv_data_mmap(const std::string& csv_file_path, const std::
     close(fd);
 }
 
-/**
- * @brief 从内存缓冲区批量加载数据 - 模仿DB2025的高效批量处理
- */
 void SmManager::load_data_from_buffer(char* start_pos, char* end_pos, const std::string& tab_name, Context* context) {
     TabMeta& tab = db_.get_table(tab_name);
     auto fh = fhs_[tab_name].get();

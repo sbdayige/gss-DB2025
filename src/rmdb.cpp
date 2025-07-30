@@ -30,6 +30,7 @@ See the Mulan PSL v2 for more details. */
 #define SOCK_PORT 8765
 #define MAX_CONN_LIMIT 8
 
+static bool is_cout = false;
 static bool should_exit = false;
 
 // 构建全局所需的管理器对象
@@ -55,7 +56,9 @@ static jmp_buf jmpbuf;
 void sigint_handler(int signo) {
     should_exit = true;
     // log_manager->flush_log_to_disk();
+#ifdef ENABLE_COUT
     std::cout << "The Server receive Crtl+C, will been closed\n";
+#endif
     longjmp(jmpbuf, 1);
 }
 
@@ -94,8 +97,9 @@ void *client_handler(void *sock_fd) {
 
     std::string output =
         "establish client connection, sockfd: " + std::to_string(fd) + "\n";
+#ifdef ENABLE_COUT
     std::cout << output;
-
+#endif
     while (true) {
         // std::cout << "Waiting for request..." << std::endl; //暂时注释
         memset(data_recv, 0, BUFFER_LENGTH);
@@ -103,27 +107,37 @@ void *client_handler(void *sock_fd) {
         i_recvBytes = read(fd, data_recv, BUFFER_LENGTH);
 
         if (i_recvBytes == 0) {
+#ifdef ENABLE_COUT
             std::cout << "Maybe the client has closed" << std::endl;
+#endif
             break;
         }
         if (i_recvBytes == -1) {
+#ifdef ENABLE_COUT
             std::cout << "Client read error!" << std::endl;
+#endif
             break;
         }
 
         // printf("i_recvBytes: %d \n ", i_recvBytes);  //暂时注释
 
         if (strcmp(data_recv, "exit") == 0) {
+#ifdef ENABLE_COUT
             std::cout << "Client exit." << std::endl;
+#endif
             break;
         }
         if (strcmp(data_recv, "crash") == 0) {
+#ifdef ENABLE_COUT
             std::cout << "Server crash" << std::endl;
+#endif
             exit(1);
         }
         if (strncmp(data_recv, "set output_file off", 19) == 0) {
             output_file_enabled = false;
+#ifdef ENABLE_COUT
             std::cout << "Output file writing disabled by client command." << std::endl;
+#endif
             // 给客户端返回确认信息
             std::string str = "output_file off\n";
             memcpy(data_send, str.c_str(), str.length());
@@ -136,7 +150,9 @@ void *client_handler(void *sock_fd) {
         }
         if (strncmp(data_recv, "set output_file on", 18) == 0) {
             output_file_enabled = true;
+#ifdef ENABLE_COUT
             std::cout << "Output file writing enabled by client command." << std::endl;
+#endif
             // 给客户端返回确认信息
             std::string str = "output_file on\n";
             memcpy(data_send, str.c_str(), str.length());
@@ -147,9 +163,9 @@ void *client_handler(void *sock_fd) {
             }
             continue;
         }
-
-        // std::cout << "Read from client " << fd << ": " << data_recv << std::endl;  //暂时注释
-
+#ifdef ENABLE_COUT
+        std::cout << "Read from client " << fd << ": " << data_recv << std::endl;  // 暂时注释
+#endif
         memset(data_send, '\0', BUFFER_LENGTH);
         offset = 0;
 
@@ -199,7 +215,7 @@ void *client_handler(void *sock_fd) {
                 } catch (RMDBError &e) {
                     // 遇到异常，需要打印failure到output.txt文件中，并发异常信息返回给客户端
                     // 遇到异常，打印异常信息
-                    std::cerr << "RMDBError " << e.what() << std::endl;
+                    if (is_cout) std::cerr << "RMDBError " << e.what() << std::endl;
                     memcpy(data_send, e.what(), e.get_msg_len());
                     data_send[e.get_msg_len()] = '\n';
                     data_send[e.get_msg_len() + 1] = '\0';
@@ -246,7 +262,9 @@ void *client_handler(void *sock_fd) {
     }
 
     // Clear
+#ifdef ENABLE_COUT
     std::cout << "Terminating current client_connection..." << std::endl;
+#endif
     close(fd);           // close a file descriptor.
     pthread_exit(NULL);  // terminate calling thread!
 }
@@ -276,24 +294,32 @@ void start_server() {
     fd_temp =
         bind(sockfd_server, (struct sockaddr *)(&s_addr_in), sizeof(s_addr_in));
     if (fd_temp == -1) {
+#ifdef ENABLE_COUT
         std::cout << "Bind error!" << std::endl;
+#endif
         exit(1);
     }
 
     fd_temp = listen(sockfd_server, MAX_CONN_LIMIT);
     if (fd_temp == -1) {
+#ifdef ENABLE_COUT
         std::cout << "Listen error!" << std::endl;
+#endif
         exit(1);
     }
 
     while (!should_exit) {
+#ifdef ENABLE_COUT
         std::cout << "Waiting for new connection..." << std::endl;
+#endif
         pthread_t thread_id;
 
         struct sockaddr_in s_addr_client{};
         int client_length = sizeof(s_addr_client);
         if (setjmp(jmpbuf)) {
+#ifdef ENABLE_COUT
             std::cout << "Break from Server Listen Loop\n";
+#endif
             break;
         }
 
@@ -302,40 +328,51 @@ void start_server() {
         int sockfd = accept(sockfd_server, (struct sockaddr *)(&s_addr_client),
                             (socklen_t *)(&client_length));
         if (sockfd == -1) {
+#ifdef ENABLE_COUT
             std::cout << "Accept error!" << std::endl;
+#endif
             continue;  // ignore current socket ,continue while loop.
         }
 
         // 和客户端建立连接，并开启一个线程负责处理客户端请求
         if (pthread_create(&thread_id, nullptr, &client_handler,
                            (void *)(&sockfd)) != 0) {
+#ifdef ENABLE_COUT
             std::cout << "Create thread fail!" << std::endl;
+#endif
             break;  // break while loop
         }
     }
 
     // Clear
+#ifdef ENABLE_COUT
     std::cout << " Try to close all client-connection.\n";
+#endif
     int ret = shutdown(sockfd_server, SHUT_WR);
     // shut down the all or part of a full-duplex connection.
     if (ret == -1) {
-        printf("%s\n", strerror(errno));
+        if (is_cout) printf("%s\n", strerror(errno));
     }
     //    assert(ret != -1);
     sm_manager.close_db();
+#ifdef ENABLE_COUT
     std::cout << " DB has been closed.\n";
     std::cout << "Server shuts down." << std::endl;
+#endif
 }
 
 int main(int argc, char **argv) {
     if (argc != 2) {
         // 需要指定数据库名称
+#ifdef ENABLE_COUT
         std::cerr << "Usage: " << argv[0] << " <database>" << std::endl;
+#endif
         exit(1);
     }
 
     signal(SIGINT, sigint_handler);
     try {
+#ifdef ENABLE_COUT
         std::cout << "\n"
                      "  _____  __  __ _____  ____  \n"
                      " |  __ \\|  \\/  |  __ \\|  _ \\ \n"
@@ -347,6 +384,7 @@ int main(int argc, char **argv) {
                      "Welcome to RMDB!\n"
                      "Type 'help;' for help.\n"
                      "\n";
+#endif
         // Database name is passed by args
         std::string db_name = argv[1];
         if (!sm_manager.is_dir(db_name)) {
