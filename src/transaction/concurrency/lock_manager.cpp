@@ -18,46 +18,36 @@ See the Mulan PSL v2 for more details. */
  * @param {int} tab_fd
  */
 bool LockManager::lock_shared_on_record(Transaction* txn, const Rid& rid, int tab_fd) {
-    std::unique_lock<std::mutex> lock(latch_);  // 1. Acquire global latch
+    std::unique_lock<std::mutex> lock(latch_);
 
-    // 创建锁数据标识符( 行级锁
+    // 创建锁数据标识符
     LockDataId lock_data_id(tab_fd, rid, LockDataType::RECORD);
 
     auto queue_it = lock_table_.find(lock_data_id);
     if (queue_it == lock_table_.end()) {
-        // 如果锁表中没有该锁数据标识符，则创建一个新的锁请求队列
         queue_it = lock_table_
                        .emplace(std::piecewise_construct,
-                                std::forward_as_tuple(lock_data_id),  // 构造 key
-                                std::forward_as_tuple()               // 默认构造 value (LockRequestQueue)
-                                )
+                                std::forward_as_tuple(lock_data_id),
+                                std::forward_as_tuple())
                        .first;
     }
     LockRequestQueue& request_queue = queue_it->second;
 
-    // 检查是否已经获得锁
-    for (const auto& req : request_queue.request_queue_) {
-        if (req.txn_id_ == txn->get_transaction_id() && req.granted_) {
-            if (req.lock_mode_ == LockManager::LockMode::EXCLUSIVE || req.lock_mode_ == LockManager::LockMode::SHARED) {
-                return true;
-            }
-        }
+    // 检查是否已经持有锁
+    if (request_queue.shared_holders_.count(txn->get_transaction_id()) > 0 ||
+        request_queue.exclusive_holder_ == txn->get_transaction_id()) {
+        return true;
     }
 
-    // 检查是否冲突
-    bool conflict = false;
-    for (const auto& req : request_queue.request_queue_) {
-        if (req.granted_ && req.lock_mode_ == LockManager::LockMode::EXCLUSIVE) {
-            conflict = true;
-            break;
-        }
-    }
+    // 检查冲突：只有排他锁持有者存在时才冲突
+    bool conflict = (request_queue.exclusive_holder_ != -1);
 
     LockRequest current_request(txn->get_transaction_id(), LockManager::LockMode::SHARED);
 
     if (!conflict) {
         current_request.granted_ = true;
         request_queue.request_queue_.push_back(current_request);
+        request_queue.shared_holders_.insert(txn->get_transaction_id());
         txn->get_lock_set()->insert(lock_data_id);
         return true;
     } else {
@@ -74,44 +64,41 @@ bool LockManager::lock_shared_on_record(Transaction* txn, const Rid& rid, int ta
  * @param {int} tab_fd 记录所在的表的fd
  */
 bool LockManager::lock_exclusive_on_record(Transaction* txn, const Rid& rid, int tab_fd) {
-    std::unique_lock<std::mutex> lock(latch_);  // 1. Acquire global latch
+    std::unique_lock<std::mutex> lock(latch_);
 
-    // 创建锁数据标识符( 行级锁
+    // 创建锁数据标识符
     LockDataId lock_data_id(tab_fd, rid, LockDataType::RECORD);
 
     auto queue_it = lock_table_.find(lock_data_id);
     if (queue_it == lock_table_.end()) {
-        // 如果锁表中没有该锁数据标识符，则创建一个新的锁请求队列
         queue_it = lock_table_
                        .emplace(std::piecewise_construct,
-                                std::forward_as_tuple(lock_data_id),  // 构造 key
-                                std::forward_as_tuple()               // 默认构造 value (LockRequestQueue)
-                                )
+                                std::forward_as_tuple(lock_data_id),
+                                std::forward_as_tuple())
                        .first;
     }
     LockRequestQueue& request_queue = queue_it->second;
 
-    // 检查是否已经获得锁
-    for (const auto& req : request_queue.request_queue_) {
-        if (req.txn_id_ == txn->get_transaction_id() && req.granted_) {
-            if (req.lock_mode_ == LockManager::LockMode::EXCLUSIVE) {
-                return true;
-            }
-        }
+    // 检查是否已经持有排他锁
+    if (request_queue.exclusive_holder_ == txn->get_transaction_id()) {
+        return true;
     }
 
+    // 检查冲突：存在其他事务的锁或者当前事务持有共享锁需要升级
     bool conflict = false;
-    for (const auto& req : request_queue.request_queue_) {
-        if (req.granted_) {
-            if (req.txn_id_ != txn->get_transaction_id()) {
-                conflict = true;
-                break;
-            }
+    bool need_upgrade = false;
 
-            if (req.txn_id_ == txn->get_transaction_id() && req.lock_mode_ == LockMode::SHARED) {
-                conflict = true;
-                break;
-            }
+    if (request_queue.exclusive_holder_ != -1) {
+        // 已有其他事务持有排他锁
+        conflict = true;
+    } else if (!request_queue.shared_holders_.empty()) {
+        if (request_queue.shared_holders_.size() == 1 &&
+            request_queue.shared_holders_.count(txn->get_transaction_id()) > 0) {
+            // 只有当前事务持有共享锁，可以升级
+            need_upgrade = true;
+        } else {
+            // 有其他事务持有共享锁
+            conflict = true;
         }
     }
 
@@ -120,6 +107,19 @@ bool LockManager::lock_exclusive_on_record(Transaction* txn, const Rid& rid, int
     if (!conflict) {
         current_request.granted_ = true;
         request_queue.request_queue_.push_back(current_request);
+        request_queue.exclusive_holder_ = txn->get_transaction_id();
+        request_queue.exclusive_holder_it_ = std::prev(request_queue.request_queue_.end());
+
+        if (need_upgrade) {
+            // 锁升级：移除共享锁持有者记录
+            request_queue.shared_holders_.erase(txn->get_transaction_id());
+            // 移除旧的共享锁请求
+            request_queue.request_queue_.remove_if([txn](const LockRequest& req) {
+                return req.txn_id_ == txn->get_transaction_id() &&
+                       req.lock_mode_ == LockMode::SHARED && req.granted_;
+            });
+        }
+
         txn->get_lock_set()->insert(lock_data_id);
         return true;
     } else {
@@ -175,7 +175,54 @@ bool LockManager::lock_IX_on_table(Transaction* txn, int tab_fd) {
  * @param {LockDataId} lock_data_id 要释放的锁ID
  */
 bool LockManager::unlock(Transaction* txn, LockDataId lock_data_id) {
-    return true;
+    std::unique_lock<std::mutex> lock(latch_);
+
+    auto lock_table_it = lock_table_.find(lock_data_id);
+    if (lock_table_it == lock_table_.end()) {
+        // 锁不存在，从事务锁集合中移除
+        size_t locks_removed_from_txn = txn->get_lock_set()->erase(lock_data_id);
+        return locks_removed_from_txn > 0;
+    }
+
+    LockRequestQueue& request_queue = lock_table_it->second;
+    bool lock_released = false;
+
+    // 检查是否持有排他锁
+    if (request_queue.exclusive_holder_ == txn->get_transaction_id()) {
+        // 释放排他锁
+        request_queue.request_queue_.erase(request_queue.exclusive_holder_it_);
+        request_queue.exclusive_holder_ = -1;
+        request_queue.exclusive_holder_it_ = request_queue.request_queue_.end();
+        lock_released = true;
+    }
+    // 检查是否持有共享锁
+    else if (request_queue.shared_holders_.count(txn->get_transaction_id()) > 0) {
+        // 释放共享锁
+        request_queue.shared_holders_.erase(txn->get_transaction_id());
+        // 从队列中移除对应的共享锁请求
+        request_queue.request_queue_.remove_if([txn](const LockRequest& req) {
+            return req.txn_id_ == txn->get_transaction_id() &&
+                   req.lock_mode_ == LockMode::SHARED && req.granted_;
+        });
+        lock_released = true;
+    }
+
+    if (lock_released) {
+        // 从事务锁集合中移除
+        txn->get_lock_set()->erase(lock_data_id);
+
+        // 通知等待的事务
+        request_queue.cv_.notify_all();
+
+        // 如果队列为空，删除整个条目
+        if (request_queue.request_queue_.empty()) {
+            lock_table_.erase(lock_table_it);
+        }
+
+        return true;
+    }
+
+    return false;
 }
 
 /**

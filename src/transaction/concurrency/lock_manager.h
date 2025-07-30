@@ -9,8 +9,11 @@ MERCHANTABILITY OR FIT FOR A PARTICULAR PURPOSE.
 See the Mulan PSL v2 for more details. */
 
 #pragma once
+#include <algorithm>
 #include <condition_variable>
+#include <list>
 #include <mutex>
+#include <unordered_set>
 
 #include "transaction/transaction.h"
 
@@ -47,8 +50,17 @@ class LockManager {
     class LockRequestQueue {
        public:
         std::list<LockRequest> request_queue_;                     // 加锁队列
-        std::condition_variable cv_;                               // 条件变量，用于唤醒正在等待加锁的申请，在no-wait策略下无需使用
+        std::condition_variable cv_;                               // 条件变量，用于唤醒正在等待加锁的申请
         GroupLockMode group_lock_mode_ = GroupLockMode::NON_LOCK;  // 加锁队列的锁模式
+
+        // DB2025风格的锁持有者跟踪
+        txn_id_t exclusive_holder_ = -1;                        // 排他锁持有者的事务ID
+        std::list<LockRequest>::iterator exclusive_holder_it_;  // 排他锁持有者在队列中的迭代器
+        std::unordered_set<txn_id_t> shared_holders_;           // 共享锁持有者集合
+
+        LockRequestQueue() {
+            exclusive_holder_it_ = request_queue_.end();
+        }
     };
 
     class GapLockRequestQueue {
