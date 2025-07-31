@@ -488,84 +488,39 @@ void SmManager::load_csv_data(const std::string& csv_file_path, const std::strin
         throw TableNotFoundError(tab_name);
     }
 
-    // 根据文件大小选择最优加载策略
-    struct stat file_stat;
-    if (stat(csv_file_path.c_str(), &file_stat) == -1) {
-        throw FileNotFoundError(csv_file_path);
-    }
-
-    const size_t file_size = file_stat.st_size;
-    const size_t FILE_THRESHOLD = 100 * 1024 * 1024;  // 100MB阈值
-
-    if (file_size < FILE_THRESHOLD) {
-        // 小文件：使用优化的批量读取
-        load_csv_data_optimized(csv_file_path, tab_name, context);
-    } else {
-        // 大文件：使用内存映射
-        load_csv_data_mmap(csv_file_path, tab_name, context);
-    }
-}
-
-void SmManager::load_csv_data_optimized(const std::string& csv_file_path, const std::string& tab_name, Context* context) {
-    // 一次性读取整个文件
+    // 打开CSV文件并验证
     std::ifstream file(csv_file_path, std::ios::binary);
     if (!file.is_open()) {
         throw RMDBError("Cannot open CSV file: " + csv_file_path);
     }
 
+    // 获取文件大小
     file.seekg(0, std::ios::end);
     const size_t file_size = file.tellg();
     file.seekg(0, std::ios::beg);
 
+    // 预分配大缓冲区，一次性读取整个文件
     std::vector<char> file_buffer(file_size + 1);
     file.read(file_buffer.data(), file_size);
-    file_buffer[file_size] = '\0';
+    file_buffer[file_size] = '\0';  // 确保字符串结束
     file.close();
 
-    // 批量处理数据
-    load_data_from_buffer(file_buffer.data(), file_buffer.data() + file_size, tab_name, context);
+    // 使用DB2025风格的load_data函数
+    load_data(file_buffer.data(), file_buffer.data() + file_size, tab_name, context);
 }
 
-void SmManager::load_csv_data_mmap(const std::string& csv_file_path, const std::string& tab_name, Context* context) {
-    // 打开文件获取文件描述符
-    int fd = open(csv_file_path.c_str(), O_RDONLY);
-    if (fd == -1) {
-        throw RMDBError("Cannot open CSV file: " + csv_file_path);
-    }
-
-    // 获取文件大小
-    struct stat file_stat;
-    if (fstat(fd, &file_stat) == -1) {
-        close(fd);
-        throw RMDBError("Cannot get file size: " + csv_file_path);
-    }
-
-    const size_t file_size = file_stat.st_size;
-    if (file_size == 0) {
-        close(fd);
-        return;  // 空文件
-    }
-
-    // 内存映射文件
-    char* file_data = static_cast<char*>(mmap(nullptr, file_size, PROT_READ, MAP_PRIVATE, fd, 0));
-    if (file_data == MAP_FAILED) {
-        close(fd);
-        throw RMDBError("Cannot memory map file: " + csv_file_path);
-    }
-
-    // 建议内核顺序读取
-    madvise(file_data, file_size, MADV_SEQUENTIAL);
-
-    load_data_from_buffer(file_data, file_data + file_size, tab_name, context);
-
-    munmap(file_data, file_size);
-    close(fd);
-}
-
-void SmManager::load_data_from_buffer(char* start_pos, char* end_pos, const std::string& tab_name, Context* context) {
+void SmManager::load_data(char* start_pos, char* end_pos, const std::string& tab_name, Context* context) {
     TabMeta& tab = db_.get_table(tab_name);
     auto fh = fhs_[tab_name].get();
-    const size_t record_size = fh->file_hdr_.record_size;
+    const size_t record_size = fh->get_file_hdr().record_size;
+
+    int max_record_num = fh->get_file_hdr().num_records_per_page;
+    int len = max_record_num * record_size;
+    std::vector<char> record_buffer(len);
+    char* record_data = record_buffer.data();
+    int count = 0;
+    size_t offset = 0;
+    memset(record_data, 0, len);  // 初始化记录缓冲区
 
     // 跳过第一行（表头）
     char* current_pos = std::find(start_pos, end_pos, '\n');
@@ -573,18 +528,9 @@ void SmManager::load_data_from_buffer(char* start_pos, char* end_pos, const std:
         current_pos++;  // 跳过换行符
     }
 
-    // 批量处理记录 - 每次处理一批记录
-    const int BATCH_SIZE = 1000;
-    std::vector<std::unique_ptr<RmRecord>> record_batch;
-    std::vector<Rid> rid_batch;
-    record_batch.reserve(BATCH_SIZE);
-    rid_batch.reserve(BATCH_SIZE);
-
+    // 批量处理数据
     while (current_pos < end_pos) {
-        // 创建记录
-        auto record = std::make_unique<RmRecord>(record_size);
-        char* record_data = record->data;
-        memset(record_data, 0, record_size);
+        size_t start_offset = offset;
 
         // 解析一行数据
         for (size_t i = 0; i < tab.cols.size() && current_pos < end_pos; ++i) {
@@ -594,37 +540,27 @@ void SmManager::load_data_from_buffer(char* start_pos, char* end_pos, const std:
 
             switch (col.type) {
                 case ColType::TYPE_INT: {
-                    // 快速整数解析
-                    int int_val = 0;
-                    bool negative = false;
-                    char* parse_pos = current_pos;
-                    if (*parse_pos == '-') {
-                        negative = true;
-                        parse_pos++;
-                    }
-                    while (parse_pos < line_end && *parse_pos >= '0' && *parse_pos <= '9') {
-                        int_val = int_val * 10 + (*parse_pos - '0');
-                        parse_pos++;
-                    }
-                    if (negative) int_val = -int_val;
-                    memcpy(record_data + col.offset, &int_val, col.len);
+                    std::string field_value(current_pos, field_len);
+                    int int_val = std::stoi(field_value);
+                    memcpy(record_data + offset, &int_val, col.len);
                     break;
                 }
                 case ColType::TYPE_FLOAT: {
                     std::string field_value(current_pos, field_len);
                     float float_val = std::stof(field_value);
-                    memcpy(record_data + col.offset, &float_val, col.len);
+                    memcpy(record_data + offset, &float_val, col.len);
                     break;
                 }
                 case ColType::TYPE_STRING: {
+                    // 将字符串复制到记录缓冲区，剩余空间填充0
                     int copy_len = std::min(field_len, col.len);
-                    memcpy(record_data + col.offset, current_pos, copy_len);
+                    memcpy(record_data + offset, current_pos, copy_len);
                     break;
                 }
                 default:
                     throw RMDBError("Unsupported column type");
             }
-
+            offset += col.len;
             current_pos = line_end;
             if (current_pos < end_pos && (*current_pos == ',' || *current_pos == '\n')) {
                 current_pos++;
@@ -636,40 +572,33 @@ void SmManager::load_data_from_buffer(char* start_pos, char* end_pos, const std:
             current_pos++;
         }
 
-        record_batch.push_back(std::move(record));
+        // 插入记录 - 使用简单的方式
+        Rid rid = fh->insert_record(record_data + start_offset, context);
 
-        // 当批次满了或处理完所有数据时，执行批量插入
-        if (record_batch.size() >= BATCH_SIZE || current_pos >= end_pos) {
-            // 批量插入记录
-            for (auto& rec : record_batch) {
-                Rid rid = fh->insert_record(rec->data, context);
-                rid_batch.push_back(rid);
-            }
-
-            // 批量插入索引
-            for (size_t i = 0; i < record_batch.size(); ++i) {
-                // 为每个索引插入记录
-                for (const auto& index : tab.indexes) {
-                    auto ih = ihs_.at(ix_manager.get_index_name(tab_name, index.cols)).get();
-
-                    // 构建索引键
-                    std::vector<char> key_buffer(index.col_tot_len);
-                    char* key = key_buffer.data();
-                    int offset = 0;
-
-                    for (const auto& col : index.cols) {
-                        memcpy(key + offset, record_batch[i]->data + col.offset, col.len);
-                        offset += col.len;
-                    }
-
-                    // 插入索引项
-                    ih->insert_entry(key, rid_batch[i], context ? context->txn_ : nullptr);
+        // 插入索引
+        if (!tab.indexes.empty()) {
+            auto rec = std::make_unique<RmRecord>(record_size, record_data + start_offset);
+            for (const auto& index : tab.indexes) {
+                auto ih = ihs_.at(ix_manager.get_index_name(tab_name, index.cols)).get();
+                auto key = std::make_unique<char[]>(index.col_tot_len);
+                int key_offset = 0;
+                for (size_t j = 0; j < static_cast<size_t>(index.col_num); ++j) {
+                    memcpy(key.get() + key_offset, rec->data + index.cols[j].offset, index.cols[j].len);
+                    key_offset += index.cols[j].len;
                 }
+                // 插入索引项
+                ih->insert_entry(key.get(), rid, context ? context->txn_ : nullptr);
             }
+        }
 
-            // 清理批次
-            record_batch.clear();
-            rid_batch.clear();
+        count++;
+
+        // 检查是否需要重置缓冲区
+        if (count >= max_record_num || current_pos >= end_pos) {
+            // 重置缓冲区
+            memset(record_data, 0, len);
+            offset = 0;
+            count = 0;
         }
     }
 }

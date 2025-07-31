@@ -62,6 +62,9 @@ struct Value {
     }
 
     void init_raw(int len) {
+        if (raw != nullptr) {
+            std::cerr << "raw != nullptr" << std::endl;
+        }
         assert(raw == nullptr);
         raw = std::make_shared<RmRecord>(len);
         if (type == TYPE_INT) {
