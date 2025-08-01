@@ -161,7 +161,7 @@ void QlManager::select_from(std::unique_ptr<AbstractExecutor> executorTreeRoot, 
     if (output_file_enabled) {
         outfile.open("output.txt", std::ios::out | std::ios::app);
         outfile << "|";
-        for (int i = 0; i < captions.size(); ++i) {
+        for (size_t i = 0; i < captions.size(); ++i) {
             outfile << " " << captions[i] << " |";
         }
         outfile << "\n";
@@ -171,7 +171,7 @@ void QlManager::select_from(std::unique_ptr<AbstractExecutor> executorTreeRoot, 
     // 执行query_plan
     for (executorTreeRoot->beginTuple(); !executorTreeRoot->is_end(); executorTreeRoot->nextTuple()) {
         // 检查是否达到LIMIT限制
-        if (limit > 0 && num_rec >= limit) {
+        if (limit > 0 && num_rec >= static_cast<size_t>(limit)) {
             break;
         }
 
@@ -195,7 +195,7 @@ void QlManager::select_from(std::unique_ptr<AbstractExecutor> executorTreeRoot, 
         // print record into file（受 output_file_enabled 控制）
         if (output_file_enabled) {
             outfile << "|";
-            for (int i = 0; i < columns.size(); ++i) {
+            for (size_t i = 0; i < columns.size(); ++i) {
                 outfile << " " << columns[i] << " |";
             }
             outfile << "\n";

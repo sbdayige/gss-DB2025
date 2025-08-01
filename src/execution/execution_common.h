@@ -61,6 +61,8 @@ Value EvaluateExpr(const ExprTerm& expr_term, const RmRecord& record, const std:
  * @brief 评估单个WHERE条件
  * @param record 记录
  * @param cond 条件
+ */
+
 /**
  * @brief 检查记录对当前事务的可见性（MVCC规则）
  */
@@ -149,4 +151,4 @@ UndoLog CreateInsertUndoLog(const RmRecord& record, const Rid& rid, const TabMet
  * @param fh 文件句柄
  * @param context 执行上下文
  */
-void CheckGapLockConflict(const RmRecord& record, const TabMeta& tab_meta, RmFileHandle* fh, Context* context);
+// void CheckGapLockConflict(const RmRecord& record, const TabMeta& tab_meta, RmFileHandle* fh, Context* context);

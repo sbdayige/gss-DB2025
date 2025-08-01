@@ -286,13 +286,13 @@ class IndexScanExecutor : public AbstractExecutor {
                     // 确保字符串长度不超过列长度
                     size_t copy_len = std::min(static_cast<size_t>(col.len), min_val.str_val.length());
                     memcpy(lower_record.data + offset, min_val.str_val.c_str(), copy_len);
-                    if (copy_len < col.len) {
+                    if (copy_len < static_cast<size_t>(col.len)) {
                         memset(lower_record.data + offset + copy_len, 0, col.len - copy_len);
                     }
 
                     copy_len = std::min(static_cast<size_t>(col.len), max_val.str_val.length());
                     memcpy(upper_record.data + offset, max_val.str_val.c_str(), copy_len);
-                    if (copy_len < col.len) {
+                    if (copy_len < static_cast<size_t>(col.len)) {
                         memset(upper_record.data + offset + copy_len, 0, col.len - copy_len);
                     }
                     break;
@@ -371,7 +371,7 @@ class IndexScanExecutor : public AbstractExecutor {
                 std::cerr << "About to call eval_conds" << std::endl;
                 bool conds_result = eval_conds(cols_, fed_conds_, rec.get());
                 std::cerr << "eval_conds completed with result: " << conds_result << std::endl;
-                
+
                 if (conds_result) {
                     std::cerr << "Found valid record" << std::endl;
                     return;

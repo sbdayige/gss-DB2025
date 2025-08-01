@@ -516,7 +516,7 @@ std::unique_ptr<RmRecord> RestoreRecordFromUndoLog(const UndoLog& undo_log, cons
             memcpy(record->data + col.offset, value.str_val.c_str(),
                    std::min(col.len, static_cast<int>(value.str_val.length())));
             // 确保字符串以null结尾
-            if (value.str_val.length() < col.len) {
+            if (value.str_val.length() < static_cast<size_t>(col.len)) {
                 memset(record->data + col.offset + value.str_val.length(), 0,
                        col.len - value.str_val.length());
             }
@@ -600,19 +600,19 @@ UndoLog CreateInsertUndoLog(const RmRecord& record, const Rid& rid, const TabMet
 /**
  * @brief 检查间隙锁冲突（基于RmRecord）
  */
-void CheckGapLockConflict(const RmRecord& record, const TabMeta& tab_meta, RmFileHandle* fh, Context* context) {
-    // 检查插入的记录是否与现有的间隙锁冲突
-    int tab_fd = fh->GetFd();
-    auto gap_conditions = context->lock_mgr_->get_gap_condition(tab_fd, context->txn_);
+// void CheckGapLockConflict(const RmRecord& record, const TabMeta& tab_meta, RmFileHandle* fh, Context* context) {
+//     // 检查插入的记录是否与现有的间隙锁冲突
+//     int tab_fd = fh->GetFd();
+//     auto gap_conditions = context->lock_mgr_->get_gap_condition(tab_fd, context->txn_);
 
-    if (!gap_conditions.empty()) {
-        // 检查插入的记录是否满足任何间隙锁条件
-        TabMeta tab_meta_copy = tab_meta;  // 创建副本，因为EvaluateCondition需要非const引用
-        for (const auto& condition : gap_conditions) {
-            if (EvaluateCondition(record, condition, tab_meta_copy)) {
-                // 插入的记录满足其他事务的间隙锁条件，触发写冲突
-                throw TransactionAbortException(context->txn_->get_transaction_id(), AbortReason::DEADLOCK_PREVENTION);
-            }
-        }
-    }
-}
+//     if (!gap_conditions.empty()) {
+//         // 检查插入的记录是否满足任何间隙锁条件
+//         TabMeta tab_meta_copy = tab_meta;  // 创建副本，因为EvaluateCondition需要非const引用
+//         for (const auto& condition : gap_conditions) {
+//             if (EvaluateCondition(record, condition, tab_meta_copy)) {
+//                 // 插入的记录满足其他事务的间隙锁条件，触发写冲突
+//                 throw TransactionAbortException(context->txn_->get_transaction_id(), AbortReason::DEADLOCK_PREVENTION);
+//             }
+//         }
+//     }
+// }

@@ -227,6 +227,7 @@ IxIndexHandle::IxIndexHandle(DiskManager* disk_manager, BufferPoolManager* buffe
     off_t file_size = lseek(fd, 0, SEEK_END);
     lseek(fd, 0, SEEK_SET);  // 重置文件指针
     int expected_pages = file_size / PAGE_SIZE;
+    (void)expected_pages;
     // 验证num_pages_的合理性
     if (file_hdr_->num_pages_ < IX_INIT_NUM_PAGES) {
         file_hdr_->num_pages_ = IX_INIT_NUM_PAGES;
@@ -825,7 +826,7 @@ bool IxIndexHandle::coalesce_or_redistribute(IxNodeHandle* node, Transaction* tr
     }
     // 合并
     bool parent_deleted = coalesce(&sibling_node, &node, &parent, index, transaction, root_is_latched);
-
+    (void)parent_deleted;
     // 兄弟节点解锁
     sibling_page->WUnlatch();
     buffer_pool_manager_->unpin_page(parent->get_page_id(), true);

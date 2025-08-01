@@ -48,6 +48,7 @@ Thumbs.db
 # 临时文件
 *.tmp
 *~
+*.csv
 
 runS.sh
 runC.sh

@@ -45,12 +45,12 @@ class MvccUpdateExecutor : public AbstractExecutor {
 
         // 间隙锁：如果没有找到匹配的记录，需要对WHERE条件加间隙锁
         // 防止其他事务插入满足条件的记录
-        if (!conds_.empty()) {
-            int tab_fd = fh_->GetFd();
-            if (!context_->lock_mgr_->lock_gap(context_->txn_, tab_fd, conds_)) {
-                throw TransactionAbortException(context_->txn_->get_transaction_id(), AbortReason::DEADLOCK_PREVENTION);
-            }
-        }
+        // if (!conds_.empty()) {
+        //     int tab_fd = fh_->GetFd();
+        //     if (!context_->lock_mgr_->lock_gap(context_->txn_, tab_fd, conds_)) {
+        //         throw TransactionAbortException(context_->txn_->get_transaction_id(), AbortReason::DEADLOCK_PREVENTION);
+        //     }
+        // }
     }
 
     std::unique_ptr<RmRecord> Next() override {
@@ -183,7 +183,7 @@ class MvccUpdateExecutor : public AbstractExecutor {
 
             // 7. 执行INSERT操作（插入新记录和索引项）
             // 7.1 间隙锁冲突检测
-            CheckGapLockConflict(new_record, tab_, fh_, context_);
+            // CheckGapLockConflict(new_record, tab_, fh_, context_);
 
             // 7.2 插入新记录到表中
             Rid new_rid = fh_->insert_record(new_record.data, context_);

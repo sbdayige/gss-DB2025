@@ -102,38 +102,32 @@ class MvccSelectExecutor : public AbstractExecutor {
    private:
     void ScanAndFilter() {
         // MVCC Select Logic: 扫描表中的所有记录，过滤出可见且符合条件的记录
-        try {
-            // 检查文件句柄状态
-            auto file_hdr = fh_->get_file_hdr();
-            RmScan scan(fh_);
 
-            // 手动检查第一页的记录
-            if (file_hdr.num_pages > 1) {  // 至少有数据页
-                try {
-                    auto page_handle = fh_->fetch_page_handle(1);
-                    auto bitmap = page_handle.bitmap;
-                    int next_bit = Bitmap::next_bit(true, bitmap, file_hdr.num_records_per_page, 0);
-                } catch (const std::exception &e) {
-                }
-            }
+        // 检查文件句柄状态
+        auto file_hdr = fh_->get_file_hdr();
+        RmScan scan(fh_);
 
-            while (!scan.is_end()) {
-                auto rid = scan.rid();
+        // 手动检查第一页的记录
+        if (file_hdr.num_pages > 1) {  // 至少有数据页
+            auto page_handle = fh_->fetch_page_handle(1);
+            auto bitmap = page_handle.bitmap;
+            [[maybe_unused]] int next_bit = Bitmap::next_bit(true, bitmap, file_hdr.num_records_per_page, 0);
+        }
 
-                // 1. 获取对当前事务可见的记录版本
-                auto visible_record = GetVisibleRecord(rid, context_->txn_, &txn_manager, fh_, context_, tab_);
-                if (!visible_record) {
-                    scan.next();
-                    continue;
-                }
-                if (EvaluateConditions(*visible_record, conds_, tab_)) {
-                    buffer_.push_back(std::move(visible_record));
-                    rids_.push_back(rid);
-                }
+        while (!scan.is_end()) {
+            auto rid = scan.rid();
+
+            // 1. 获取对当前事务可见的记录版本
+            auto visible_record = GetVisibleRecord(rid, context_->txn_, &txn_manager, fh_, context_, tab_);
+            if (!visible_record) {
                 scan.next();
+                continue;
             }
-        } catch (const std::exception &e) {
-            throw;
+            if (EvaluateConditions(*visible_record, conds_, tab_)) {
+                buffer_.push_back(std::move(visible_record));
+                rids_.push_back(rid);
+            }
+            scan.next();
         }
     }
     std::unique_ptr<RmRecord> ProjectRecord(const RmRecord &record) {

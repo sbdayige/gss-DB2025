@@ -54,7 +54,7 @@ class MvccInsertExecutor : public AbstractExecutor {
             }
             memcpy(temp_record.data + col.offset, val.raw->data, col.len);
         }
-        CheckGapLockConflict(temp_record, tab_, fh_, context_);
+        // CheckGapLockConflict(temp_record, tab_, fh_, context_);
 
         for (size_t i = 0; i < values_.size(); ++i) {
             auto &col = tab_.cols[i];
@@ -69,7 +69,7 @@ class MvccInsertExecutor : public AbstractExecutor {
             } else if (col.type != val.type) {
                 throw IncompatibleTypeError(coltype2str(col.type), coltype2str(val.type));
             }
-            if (col.type == TYPE_STRING && val.str_val.size() > col.len) {
+            if (col.type == TYPE_STRING && val.str_val.size() > static_cast<size_t>(col.len)) {
                 throw StringOverflowError();
             }
         }

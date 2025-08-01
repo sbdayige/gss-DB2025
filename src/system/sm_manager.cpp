@@ -505,7 +505,6 @@ void SmManager::load_csv_data(const std::string& csv_file_path, const std::strin
     file_buffer[file_size] = '\0';  // 确保字符串结束
     file.close();
 
-    // 使用DB2025风格的load_data函数
     load_data(file_buffer.data(), file_buffer.data() + file_size, tab_name, context);
 }
 

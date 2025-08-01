@@ -740,15 +740,6 @@ std::shared_ptr<Query> Planner::projection_pushdown(std::shared_ptr<Query> query
         }
     }
 
-    // 3. 如果有ORDER BY，添加排序列
-    if (select_stmt->has_sort && select_stmt->order) {
-        // 需要根据具体的AST结构来获取排序列信息
-        // 这里简化处理，实际实现需要根据ast::OrderBy的结构调整
-    }
-
-    // 当前简化实现：保持原有列选择不变
-    // 完整的投影下推需要更深入的执行计划树分析
-
     return query;
 }
 
@@ -798,10 +789,6 @@ std::shared_ptr<Query> Planner::join_order_optimization(std::shared_ptr<Query> q
 size_t Planner::estimate_table_cardinality(const std::string &table_name) {
     try {
         // 获取表的文件句柄
-        if (sm_manager.fhs_.find(table_name) == sm_manager.fhs_.end()) {
-            // 表文件未打开，使用默认估计值
-            return 1000;
-        }
 
         auto &file_handle = sm_manager.fhs_[table_name];
         auto file_hdr = file_handle->get_file_hdr();

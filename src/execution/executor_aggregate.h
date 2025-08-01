@@ -161,7 +161,7 @@ class AggregateExecutor : public AbstractExecutor {
                       const std::vector<std::shared_ptr<ast::AggregateExpr>>& agg_exprs,
                       const std::vector<TabCol>& group_by_cols = {},
                       const std::vector<Condition>& having_conds = {})
-        : prev_(std::move(prev)), executed_(false), has_result_(false), has_group_by_(!group_by_cols.empty()), group_by_cols_(group_by_cols), having_conds_(having_conds), current_group_index_(0) {
+        : prev_(std::move(prev)), executed_(false), has_result_(false), has_group_by_(!group_by_cols.empty()), group_by_cols_(group_by_cols), current_group_index_(0), having_conds_(having_conds) {
         // 首先处理GROUP BY列的元数据
         if (has_group_by_) {
             auto& prev_cols = prev_->cols();
@@ -546,12 +546,7 @@ class AggregateExecutor : public AbstractExecutor {
     void updateAggValue(AggValue& agg_val, const AggInfo& agg_info, const RmRecord* record) {
         switch (agg_info.type) {
             case ast::AGG_COUNT:
-                if (agg_info.is_count_star) {
-                    agg_val.count++;
-                } else {
-                    // COUNT(column) - 检查列值是否为NULL（这里简化处理，认为所有值都非NULL）
-                    agg_val.count++;
-                }
+                agg_val.count++;
                 break;
 
             case ast::AGG_MAX:

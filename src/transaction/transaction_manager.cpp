@@ -135,11 +135,14 @@ void TransactionManager::commit(Transaction* txn, LogManager* log_manager) {
         lock_manager.unlock(txn, lock);
     }
 
+    // 间隙锁释放代码已注释掉以避免并发问题
+    /*
     auto lock_gap_set = txn->get_lock_gap_set();
     auto lock_gap_set_copy = *lock_gap_set;  // 复制间隙锁集合以避免迭代时修改
     for (const int& tab_fd : lock_gap_set_copy) {
         lock_manager.unlock_gap(txn, tab_fd);
     }
+    */
 
     // 清空事务相关的集合
     txn->clear();
@@ -232,11 +235,14 @@ void TransactionManager::abort(Context* context, LogManager* log_manager) {
         lock_manager.unlock(txn, lock);
     }
 
+    // 间隙锁释放代码已注释掉以避免并发问题
+    /*
     auto lock_gap_set = txn->get_lock_gap_set();
     auto lock_gap_set_copy = *lock_gap_set;  // 复制间隙锁集合以避免迭代时修改
     for (const int& tab_fd : lock_gap_set_copy) {
         lock_manager.unlock_gap(txn, tab_fd);
     }
+    */
 
     // 清空事务状态并设置为ABORTED
     txn->set_state(TransactionState::ABORTED);
@@ -387,7 +393,7 @@ std::optional<UndoLog> TransactionManager::GetUndoLogOptional(UndoLink link) {
     lock.unlock();
 
     // 检查撤销日志索引是否有效
-    if (link.prev_log_idx_ < 0 || link.prev_log_idx_ >= txn->GetUndoLogNum()) {
+    if (link.prev_log_idx_ < 0 || static_cast<size_t>(link.prev_log_idx_) >= txn->GetUndoLogNum()) {
         throw std::runtime_error("Invalid undo log index: " + std::to_string(link.prev_log_idx_));
     }
 
@@ -411,7 +417,7 @@ UndoLog TransactionManager::GetUndoLog(UndoLink link) {
     lock.unlock();
 
     // 检查撤销日志索引是否有效
-    if (link.prev_log_idx_ < 0 || link.prev_log_idx_ >= txn->GetUndoLogNum()) {
+    if (link.prev_log_idx_ < 0 || static_cast<size_t>(link.prev_log_idx_) >= txn->GetUndoLogNum()) {
         throw std::runtime_error("Invalid undo log index: " + std::to_string(link.prev_log_idx_));
     }
 

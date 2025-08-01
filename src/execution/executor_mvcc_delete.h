@@ -40,12 +40,12 @@ class MvccDeleteExecutor : public AbstractExecutor {
         context_ = context;
 
         // 间隙锁：如果没有找到匹配的记录，需要加间隙锁防止其他事务插入满足删除条件的记录
-        if (!conds_.empty()) {
-            // DELETE语句有WHERE条件但没找到匹配记录，加间隙锁
-            if (!context_->lock_mgr_->lock_gap(context_->txn_, fh_->GetFd(), conds_)) {
-                throw TransactionAbortException(context_->txn_->get_transaction_id(), AbortReason::DEADLOCK_PREVENTION);
-            }
-        }
+        // if (!conds_.empty()) {
+        //     // DELETE语句有WHERE条件但没找到匹配记录，加间隙锁
+        //     if (!context_->lock_mgr_->lock_gap(context_->txn_, fh_->GetFd(), conds_)) {
+        //         throw TransactionAbortException(context_->txn_->get_transaction_id(), AbortReason::DEADLOCK_PREVENTION);
+        //     }
+        // }
     }
 
     std::unique_ptr<RmRecord> Next() override {
@@ -74,6 +74,7 @@ class MvccDeleteExecutor : public AbstractExecutor {
             new_link.prev_log_idx_ = context_->txn_->GetUndoLogNum() - 1;
 
             auto old_link = txn_manager.GetUndoLink(fh_->GetFd(), rid);
+            (void)old_link;  // 如果需要检查旧链接，可以在这里添加逻辑
             VersionUndoLink version_link;
             version_link.prev_ = new_link;
             version_link.in_progress_ = true;
