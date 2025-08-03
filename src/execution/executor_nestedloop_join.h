@@ -105,18 +105,42 @@ class NestedLoopJoinExecutor : public AbstractExecutor {
     }
 
     std::unique_ptr<RmRecord> Next() override {
+        // 首先检查子执行器状态并更新自己的状态
+        if (left_->is_end() || right_->is_end()) {
+            is_end_ = true;
+        }
+
+        // 检查是否已经结束
+        if (is_end()) {
+            return nullptr;
+        }
+
         auto record = std::make_unique<RmRecord>(len_);
         auto left_record = left_->Next();
+
+        if (!left_record) {
+            is_end_ = true;
+            return nullptr;
+        }
 
         if (join_type_ == SEMI_JOIN) {
             // SEMI JOIN只返回左表记录
             memcpy(record->data, left_record->data, left_->tupleLen());
         } else {
-            // 其他JOIN类型返回左右表记录的组合
+            if (right_->is_end()) {
+                is_end_ = true;
+                return nullptr;
+            }
+
             auto right_record = right_->Next();
+
+            if (!right_record) {
+                is_end_ = true;
+                return nullptr;
+            }
+
             memcpy(record->data, left_record->data, left_->tupleLen());
-            memcpy(record->data + left_->tupleLen(), right_record->data,
-                   right_->tupleLen());
+            memcpy(record->data + left_->tupleLen(), right_record->data, right_->tupleLen());
         }
         return record;
     }

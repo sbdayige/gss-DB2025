@@ -28,11 +28,13 @@ See the Mulan PSL v2 for more details. */
 #include "recovery/log_recovery.h"
 
 #define SOCK_PORT 8765
-#define MAX_CONN_LIMIT 8
+#define MAX_CONN_LIMIT 16
 // #define ENABLE_COUT 1
-
+int num = 0;
 static bool should_exit = false;
 
+// 全局执行锁，确保同一时间只有一条SQL语句执行
+static std::mutex global_execution_mutex;
 // 构建全局所需的管理器对象
 Planner planner;
 Optimizer optimizer;
@@ -101,9 +103,14 @@ void *client_handler(void *sock_fd) {
     std::cout << output;
 #endif
     while (true) {
+        // 获取全局执行锁，确保同一时间只有一条SQL语句和事务执行
+        std::lock_guard<std::mutex> global_lock(global_execution_mutex);
         // std::cout << "Waiting for request..." << std::endl; //暂时注释
         memset(data_recv, 0, BUFFER_LENGTH);
-
+        num++;
+        if (num % 500 == 0) {
+            std::cout << num << std::endl;
+        }
         i_recvBytes = read(fd, data_recv, BUFFER_LENGTH);
 
         if (i_recvBytes == 0) {
@@ -163,9 +170,9 @@ void *client_handler(void *sock_fd) {
             }
             continue;
         }
-#ifdef ENABLE_COUT
+        // #ifdef ENABLE_COUT
         std::cout << "Read from client " << fd << ": " << data_recv << std::endl;  // 暂时注释
-#endif
+                                                                                   // #endif
         memset(data_send, '\0', BUFFER_LENGTH);
         offset = 0;
 
@@ -204,7 +211,7 @@ void *client_handler(void *sock_fd) {
 
                     // 回滚事务
                     txn_manager.abort(context.get(), &log_manager);
-                    std::cout << e.GetInfo() << std::endl;
+                    // std::cout << e.GetInfo() << std::endl;
 
                     if (output_file_enabled) {
                         std::fstream outfile;

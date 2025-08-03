@@ -176,6 +176,9 @@ void QlManager::select_from(std::unique_ptr<AbstractExecutor> executorTreeRoot, 
         }
 
         auto Tuple = executorTreeRoot->Next();
+        if (!Tuple) {
+            break;
+        }
         std::vector<std::string> columns;
         for (auto &col : executorTreeRoot->cols()) {
             std::string col_str;

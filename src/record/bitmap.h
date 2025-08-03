@@ -53,6 +53,83 @@ class Bitmap {
     // for example:
     // rid_.slot_no = Bitmap::next_bit(true, page_handle.bitmap, file_handle_->file_hdr_.num_records_per_page,
     // rid_.slot_no); int slot_no = Bitmap::first_bit(false, page_handle.bitmap, file_hdr_.num_records_per_page);
+    static char create_mask(int start_bit, int count) {
+        char mask = 0;
+        for (int i = 0; i < count && (start_bit + i) < BITMAP_WIDTH; i++) {
+            mask |= (BITMAP_HIGHEST_BIT >> (start_bit + i));
+        }
+        return mask;
+    }
+
+    static void batch_reset_fast(char *bm, int start_pos, int count) {
+        if (count <= 0) return;
+
+        int end_pos = start_pos + count - 1;
+        int start_bucket = get_bucket(start_pos);
+        int end_bucket = get_bucket(end_pos);
+
+        if (start_bucket == end_bucket) {
+            // 在同一字节内，使用位掩码
+            char mask = create_mask(start_pos % BITMAP_WIDTH, count);
+            bm[start_bucket] &= static_cast<char>(~mask);  // 使用反掩码清零
+        } else {
+            // 跨多个字节
+
+            // 1. 处理起始字节
+            int start_offset = start_pos % BITMAP_WIDTH;
+            if (start_offset != 0) {
+                int bits_in_first_byte = BITMAP_WIDTH - start_offset;
+                char mask = create_mask(start_offset, bits_in_first_byte);
+                bm[start_bucket] &= static_cast<char>(~mask);  // 使用反掩码清零
+                start_bucket++;
+            }
+
+            // 2. 批量处理完整字节（设置为0x00）
+            memset(bm + start_bucket, 0x00, end_bucket - start_bucket);
+
+            // 3. 处理结尾字节
+            int end_offset = end_pos % BITMAP_WIDTH;
+            if (end_bucket > start_bucket - 1) {
+                char mask = create_mask(0, end_offset + 1);
+                bm[end_bucket] &= static_cast<char>(~mask);  // 使用反掩码清零
+            }
+        }
+    }
+
+    static void batch_set_fast(char *bm, int start_pos, int count) {
+        if (count <= 0) return;
+
+        int end_pos = start_pos + count - 1;
+        int start_bucket = get_bucket(start_pos);
+        int end_bucket = get_bucket(end_pos);
+
+        if (start_bucket == end_bucket) {
+            // 在同一字节内，使用位掩码
+            char mask = create_mask(start_pos % BITMAP_WIDTH, count);
+            bm[start_bucket] |= mask;
+        } else {
+            // 跨多个字节
+
+            // 1. 处理起始字节
+            int start_offset = start_pos % BITMAP_WIDTH;
+            if (start_offset != 0) {
+                int bits_in_first_byte = BITMAP_WIDTH - start_offset;
+                char mask = create_mask(start_offset, bits_in_first_byte);
+                bm[start_bucket] |= mask;
+                start_bucket++;
+            }
+
+            // 2. 批量处理完整字节
+            memset(bm + start_bucket, 0xFF, end_bucket - start_bucket);
+
+            // 3. 处理结尾字节
+            int end_offset = end_pos % BITMAP_WIDTH;
+            if (end_bucket > start_bucket - 1) {
+                char mask = create_mask(0, end_offset + 1);
+                bm[end_bucket] |= mask;
+            }
+        }
+    }
 
    private:
     static int get_bucket(int pos) { return pos / BITMAP_WIDTH; }

@@ -513,19 +513,50 @@ void SmManager::load_data(char* start_pos, char* end_pos, const std::string& tab
     auto fh = fhs_[tab_name].get();
     const size_t record_size = fh->get_file_hdr().record_size;
 
-    int max_record_num = fh->get_file_hdr().num_records_per_page;
+    // 预分配记录缓冲区
+    int max_record_num = fh->file_hdr_.num_records_per_page;
     int len = max_record_num * record_size;
     std::vector<char> record_buffer(len);
     char* record_data = record_buffer.data();
+
     int count = 0;
     size_t offset = 0;
     memset(record_data, 0, len);  // 初始化记录缓冲区
 
-    // 跳过第一行（表头）
-    char* current_pos = std::find(start_pos, end_pos, '\n');
+    char* current_pos = std::find(start_pos, end_pos, '\n');  // 跳过第一行（表头）
     if (current_pos != end_pos) {
         current_pos++;  // 跳过换行符
     }
+
+    // 创建第一个页面
+    RmPageHandle current_page = fh->create_new_page_handle();
+
+    auto batch_copy = [&]() {
+        if (count > 0) {
+            // 批量设置bitmap
+            Bitmap::batch_set_fast(current_page.bitmap, 0, count);
+
+            // 复制所有记录到页面
+            char* slot = current_page.get_slot(0);
+            memcpy(slot, record_data, offset);
+
+            // 更新页面头信息
+            current_page.page_hdr->num_records = count;
+
+            // 如果页面已满，更新空闲页面链表
+            if (count == max_record_num) {
+                fh->file_hdr_.first_free_page_no = current_page.page_hdr->next_free_page_no;
+            }
+
+            // 释放当前页面
+            buffer_pool_manager.unpin_page(current_page.page->get_page_id(), true);
+
+            // 重置缓冲区
+            memset(record_data, 0, len);
+            offset = 0;
+            count = 0;
+        }
+    };
 
     // 批量处理数据
     while (current_pos < end_pos) {
@@ -571,8 +602,8 @@ void SmManager::load_data(char* start_pos, char* end_pos, const std::string& tab
             current_pos++;
         }
 
-        // 插入记录 - 使用简单的方式
-        Rid rid = fh->insert_record(record_data + start_offset, context);
+        // 为索引准备记录
+        Rid rid = {current_page.page->get_page_id().page_no, count};
 
         // 插入索引
         if (!tab.indexes.empty()) {
@@ -592,12 +623,14 @@ void SmManager::load_data(char* start_pos, char* end_pos, const std::string& tab
 
         count++;
 
-        // 检查是否需要重置缓冲区
-        if (count >= max_record_num || current_pos >= end_pos) {
-            // 重置缓冲区
-            memset(record_data, 0, len);
-            offset = 0;
-            count = 0;
+        // 检查是否需要创建新页
+        if (count == max_record_num) {
+            batch_copy();
+            // 创建新页面
+            current_page = fh->create_new_page_handle();
         }
     }
+
+    // 确保最后一页被写入
+    batch_copy();
 }
