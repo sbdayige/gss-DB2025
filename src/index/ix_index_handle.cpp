@@ -769,29 +769,24 @@ bool IxIndexHandle::coalesce_or_redistribute(IxNodeHandle* node, Transaction* tr
     if (!node) {
         throw std::invalid_argument("Node cannot be null.");
     }
-
     // 根节点特殊处理
     if (node->is_root_page()) {
         return adjust_root(node);
     }
-
     // 检查是否满足最小大小要求
     if (node->get_size() >= node->get_min_size()) {
         maintain_parent(node);
         return false;
     }
-
     // 获取父节点和兄弟节点
     auto parent = fetch_node(node->get_parent_page_no());
     int index = parent->find_child(node);
-
     // 检查index的有效性
     if (index < 0 || index >= parent->get_size()) {
         buffer_pool_manager_->unpin_page(parent->get_page_id(), true);
         delete parent;
         return false;
     }
-
     // 优先选择左兄弟，如果没有则选择右兄弟
     int sibling_index;
     if (index > 0) {
@@ -804,13 +799,11 @@ bool IxIndexHandle::coalesce_or_redistribute(IxNodeHandle* node, Transaction* tr
         delete parent;
         return false;
     }
-
     auto sibling_node = fetch_node(parent->value_at(sibling_index));
 
     // 对兄弟节点加锁，防止迭代时被并发访问
     Page* sibling_page = buffer_pool_manager_->fetch_page(sibling_node->get_page_id());
     sibling_page->WLatch();
-
     // 判断重分配还是合并
     if (node->get_size() + sibling_node->get_size() >= node->get_min_size() * 2) {
         // 重分配
@@ -825,13 +818,18 @@ bool IxIndexHandle::coalesce_or_redistribute(IxNodeHandle* node, Transaction* tr
         return false;
     }
     // 合并
+    // 保存页面ID用于后续解锁，因为coalesce可能会修改指针
+    PageId parent_page_id = parent->get_page_id();
+    PageId sibling_page_id = sibling_node->get_page_id();
+
     bool parent_deleted = coalesce(&sibling_node, &node, &parent, index, transaction, root_is_latched);
-    (void)parent_deleted;
-    // 兄弟节点解锁
     sibling_page->WUnlatch();
-    buffer_pool_manager_->unpin_page(parent->get_page_id(), true);
-    buffer_pool_manager_->unpin_page(sibling_node->get_page_id(), true);
-    delete parent;        // 释放fetch_node创建的对象
+    buffer_pool_manager_->unpin_page(parent_page_id, true);
+    buffer_pool_manager_->unpin_page(sibling_page_id, true);
+    // 只有当对象还有效时才删除
+    if (parent && !parent_deleted) {
+        delete parent;  // 释放fetch_node创建的对象
+    }
     delete sibling_node;  // 释放fetch_node创建的对象
     return true;
 }
@@ -1012,34 +1010,38 @@ bool IxIndexHandle::coalesce(IxNodeHandle** neighbor_node, IxNodeHandle** node, 
         std::swap(*neighbor_node, *node);
         index++;
     }
+    // 将要删除的节点
+    IxNodeHandle* node_to_delete = *node;
+    IxNodeHandle* surviving_node = *neighbor_node;
 
     // 更新last_leaf（如果删除的是最右叶子节点）
-    if ((*node)->is_leaf_page() && (*node)->get_page_no() == file_hdr_->last_leaf_) {
-        file_hdr_->last_leaf_ = (*neighbor_node)->get_page_no();
+    if (node_to_delete->is_leaf_page() && node_to_delete->get_page_no() == file_hdr_->last_leaf_) {
+        file_hdr_->last_leaf_ = surviving_node->get_page_no();
     }
 
     // 将node的所有键值对移动到neighbor_node
-    int insert_pos = (*neighbor_node)->get_size();
-    (*neighbor_node)->insert_pairs(insert_pos, (*node)->get_key(0), (*node)->get_rid(0), (*node)->get_size());
+    int insert_pos = surviving_node->get_size();
+    surviving_node->insert_pairs(insert_pos, node_to_delete->get_key(0), node_to_delete->get_rid(0), node_to_delete->get_size());
 
     // 更新子节点的父指针
-    for (int i = 0; i < (*node)->get_size(); i++) {
-        maintain_child(*neighbor_node, insert_pos + i);
+    for (int i = 0; i < node_to_delete->get_size(); i++) {
+        maintain_child(surviving_node, insert_pos + i);
     }
 
     // 如果是叶子节点，更新叶子链表
-    if ((*node)->is_leaf_page()) {
-        erase_leaf(*node);
+    if (node_to_delete->is_leaf_page()) {
+        erase_leaf(node_to_delete);
     }
 
     // 释放被删除的节点
-    release_node_handle(**node);
+    release_node_handle(*node_to_delete);
 
     // 从父节点中删除对node的引用
     (*parent)->erase_pair(index);
 
     // 递归处理父节点
-    return coalesce_or_redistribute(*parent, transaction, root_is_latched);
+    bool result = coalesce_or_redistribute(*parent, transaction, root_is_latched);
+    return result;
 }
 
 /**

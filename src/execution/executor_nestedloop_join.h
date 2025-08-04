@@ -78,29 +78,33 @@ class NestedLoopJoinExecutor : public AbstractExecutor {
             return;
         }
 
-        if (join_type_ == SEMI_JOIN) {
-            find_semi_join_record();
-        } else {
-            find_record();
-        }
+        is_end_ = false;
     }
 
     void nextTuple() override {
-        if (is_end())
+        if (is_end()) {
             return;
+        }
 
         if (join_type_ == SEMI_JOIN) {
             // SEMI JOIN：先移动到下一个左表记录，然后查找匹配
             left_->nextTuple();
             find_semi_join_record();
         } else {
-            // 传统JOIN：使用原有逻辑
+            // 传统JOIN：移动到下一个组合
             right_->nextTuple();
             if (right_->is_end()) {
                 left_->nextTuple();
+                if (left_->is_end()) {
+                    is_end_ = true;
+                    return;
+                }
                 right_->beginTuple();
+                if (right_->is_end()) {
+                    is_end_ = true;
+                    return;
+                }
             }
-            find_record();
         }
     }
 
