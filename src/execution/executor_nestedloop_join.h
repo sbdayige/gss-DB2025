@@ -92,7 +92,7 @@ class NestedLoopJoinExecutor : public AbstractExecutor {
             left_->nextTuple();
             find_semi_join_record();
         } else {
-            // 传统JOIN：移动到下一个组合
+            // 传统JOIN：移动到下一个组合，然后查找满足条件的记录
             right_->nextTuple();
             if (right_->is_end()) {
                 left_->nextTuple();
@@ -106,48 +106,44 @@ class NestedLoopJoinExecutor : public AbstractExecutor {
                     return;
                 }
             }
+            // 查找下一个满足条件的记录
+            find_regular_join_record();
         }
     }
 
     std::unique_ptr<RmRecord> Next() override {
-        // 首先检查子执行器状态并更新自己的状态
-        if (left_->is_end() || right_->is_end()) {
-            is_end_ = true;
-        }
-
         // 检查是否已经结束
         if (is_end()) {
             return nullptr;
         }
 
-        auto record = std::make_unique<RmRecord>(len_);
-        auto left_record = left_->Next();
-
-        if (!left_record) {
-            is_end_ = true;
-            return nullptr;
-        }
-
         if (join_type_ == SEMI_JOIN) {
             // SEMI JOIN只返回左表记录
-            memcpy(record->data, left_record->data, left_->tupleLen());
-        } else {
-            if (right_->is_end()) {
+            auto left_record = left_->Next();
+            if (!left_record) {
                 is_end_ = true;
                 return nullptr;
             }
 
+            auto record = std::make_unique<RmRecord>(len_);
+            memcpy(record->data, left_record->data, left_->tupleLen());
+            return record;
+        } else {
+            // 对于常规JOIN，需要返回当前位置的组合记录
+            // 这个记录应该已经通过find_record()验证过条件了
+            auto left_record = left_->Next();
             auto right_record = right_->Next();
 
-            if (!right_record) {
+            if (!left_record || !right_record) {
                 is_end_ = true;
                 return nullptr;
             }
 
+            auto record = std::make_unique<RmRecord>(len_);
             memcpy(record->data, left_record->data, left_->tupleLen());
             memcpy(record->data + left_->tupleLen(), right_record->data, right_->tupleLen());
+            return record;
         }
-        return record;
     }
 
     bool is_end() const override { return is_end_; }
