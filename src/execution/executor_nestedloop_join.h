@@ -32,6 +32,9 @@ class NestedLoopJoinExecutor : public AbstractExecutor {
     // 用于SEMI JOIN的去重逻辑
     std::set<std::string> matched_left_keys_;  // 已匹配的左表记录键值（用于去重）
 
+    // 存储当前匹配的记录
+    std::unique_ptr<RmRecord> current_record_;
+
    public:
     NestedLoopJoinExecutor(std::unique_ptr<AbstractExecutor> left,
                            std::unique_ptr<AbstractExecutor> right,
@@ -60,6 +63,7 @@ class NestedLoopJoinExecutor : public AbstractExecutor {
         }
 
         is_end_ = false;
+        current_record_ = nullptr;
     }
 
     const std::vector<ColMeta>& cols() const override { return cols_; }
@@ -79,6 +83,7 @@ class NestedLoopJoinExecutor : public AbstractExecutor {
         }
 
         is_end_ = false;
+        current_record_ = nullptr;
         find_record();
     }
 
@@ -98,15 +103,17 @@ class NestedLoopJoinExecutor : public AbstractExecutor {
                 left_->nextTuple();
                 if (left_->is_end()) {
                     is_end_ = true;
+                    current_record_ = nullptr;
                     return;
                 }
                 right_->beginTuple();
                 if (right_->is_end()) {
                     is_end_ = true;
+                    current_record_ = nullptr;
                     return;
                 }
             }
-            // 查找下一个满足条件的记录
+            // 查找下一个满足条件的记录并存储
             find_regular_join_record();
         }
     }
@@ -129,20 +136,17 @@ class NestedLoopJoinExecutor : public AbstractExecutor {
             memcpy(record->data, left_record->data, left_->tupleLen());
             return record;
         } else {
-            // 对于常规JOIN，需要返回当前位置的组合记录
-            // 这个记录应该已经通过find_record()验证过条件了
-            auto left_record = left_->Next();
-            auto right_record = right_->Next();
-
-            if (!left_record || !right_record) {
+            // 对于常规JOIN，返回存储的匹配记录
+            if (!current_record_) {
                 is_end_ = true;
                 return nullptr;
             }
+            // 返回当前记录并清空，准备查找下一个
+            auto result = std::make_unique<RmRecord>(len_);
+            memcpy(result->data, current_record_->data, len_);
+            current_record_ = nullptr;
 
-            auto record = std::make_unique<RmRecord>(len_);
-            memcpy(record->data, left_record->data, left_->tupleLen());
-            memcpy(record->data + left_->tupleLen(), right_record->data, right_->tupleLen());
-            return record;
+            return result;
         }
     }
 
@@ -162,16 +166,40 @@ class NestedLoopJoinExecutor : public AbstractExecutor {
 
    private:
     void find_regular_join_record() {
+        int left_count = 0, right_count = 0, combination_count = 0, match_count = 0;
+
         while (!left_->is_end()) {
+            left_count++;
+            right_count = 0;
             while (!right_->is_end()) {
+                right_count++;
+                combination_count++;
+                // 创建组合记录用于条件评估
                 auto record = std::make_unique<RmRecord>(len_);
                 auto left_record = left_->Next();
                 auto right_record = right_->Next();
+
+                if (!left_record) {
+                    break;
+                }
+                if (!right_record) {
+                    break;
+                }
+
                 memcpy(record->data, left_record->data, left_->tupleLen());
-                memcpy(record->data + left_->tupleLen(), right_record->data,
-                       right_->tupleLen());
-                if (fed_conds_.empty() ||
-                    eval_conds(cols_, fed_conds_, record.get())) {
+                memcpy(record->data + left_->tupleLen(), right_record->data, right_->tupleLen());
+
+                bool cond_result = false;
+                if (fed_conds_.empty()) {
+                    cond_result = true;
+                } else {
+                    cond_result = eval_conds(cols_, fed_conds_, record.get());
+                }
+
+                if (cond_result) {
+                    match_count++;
+                    // 存储匹配的记录
+                    current_record_ = std::move(record);
                     return;
                 }
                 right_->nextTuple();
@@ -181,7 +209,6 @@ class NestedLoopJoinExecutor : public AbstractExecutor {
         }
         is_end_ = true;
     }
-
     void find_semi_join_record() {
         // SEMI JOIN逻辑：对每个左表记录，检查是否在右表中有匹配
         // 如果有匹配，停在该记录；如果没有，继续下一个
