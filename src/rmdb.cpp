@@ -108,9 +108,9 @@ void *client_handler(void *sock_fd) {
         // std::cout << "Waiting for request..." << std::endl; //暂时注释
         memset(data_recv, 0, BUFFER_LENGTH);
         num++;
-        if (num % 500 == 0) {
-            std::cout << num << std::endl;
-        }
+        // if (num % 500 == 0) {
+        //     std::cout << num << std::endl;
+        // }
         i_recvBytes = read(fd, data_recv, BUFFER_LENGTH);
 
         if (i_recvBytes == 0) {
@@ -170,9 +170,9 @@ void *client_handler(void *sock_fd) {
             }
             continue;
         }
-        // #ifdef ENABLE_COUT
+#ifdef ENABLE_COUT
         std::cout << "Read from client " << fd << ": " << data_recv << std::endl;  // 暂时注释
-                                                                                   // #endif
+#endif
         memset(data_send, '\0', BUFFER_LENGTH);
         offset = 0;
 
