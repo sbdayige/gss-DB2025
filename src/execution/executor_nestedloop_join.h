@@ -79,6 +79,7 @@ class NestedLoopJoinExecutor : public AbstractExecutor {
         }
 
         is_end_ = false;
+        find_record();
     }
 
     void nextTuple() override {

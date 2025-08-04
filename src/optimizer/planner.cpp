@@ -164,8 +164,6 @@ std::shared_ptr<Plan> Planner::make_one_rel(std::shared_ptr<Query> query) {
         for (const auto &join_expr : x->jointree) {
             std::string left_table = join_expr->left;
             std::string right_table = join_expr->right_ref->tab_name;
-            std::cout << "[DEBUG] Found JOIN: " << left_table << " -> " << right_table
-                      << ", type=" << join_expr->type << std::endl;
             join_type_map[{left_table, right_table}] = join_expr->type;
         }
     }

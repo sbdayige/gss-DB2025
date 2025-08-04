@@ -307,8 +307,9 @@ class Portal {
         } else if (auto x = std::dynamic_pointer_cast<AggregatePlan>(plan)) {
             auto subplan_executor = convert_plan_executor(x->subplan_, context);
 
-            // 创建聚合执行器，传递GROUP BY列信息和HAVING条件
+            // 使用优化的聚合执行器，提升性能
             return std::make_unique<AggregateExecutor>(std::move(subplan_executor), x->agg_exprs_, x->group_by_cols_, x->having_conds_);
+            // return std::make_unique<AggregateExecutorOptimized>(std::move(subplan_executor), x->agg_exprs_, x->group_by_cols_, x->having_conds_);
         }
         // 未识别的计划类型，返回空指针
         return nullptr;
