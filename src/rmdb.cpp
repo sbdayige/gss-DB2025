@@ -54,6 +54,8 @@ TransactionManager txn_manager(ConcurrencyMode::MVCC);
 pthread_mutex_t *buffer_mutex;
 pthread_mutex_t *sockfd_mutex;
 
+pthread_mutex_t *sql_mutex;
+
 static jmp_buf jmpbuf;
 void sigint_handler(int signo) {
     should_exit = true;
@@ -104,7 +106,7 @@ void *client_handler(void *sock_fd) {
 #endif
     while (true) {
         // 获取全局执行锁，确保同一时间只有一条SQL语句和事务执行
-        std::lock_guard<std::mutex> global_lock(global_execution_mutex);
+        // std::lock_guard<std::mutex> global_lock(global_execution_mutex);
         // std::cout << "Waiting for request..." << std::endl; //暂时注释
         memset(data_recv, 0, BUFFER_LENGTH);
         num++;
@@ -173,6 +175,9 @@ void *client_handler(void *sock_fd) {
 #ifdef ENABLE_COUT
         std::cout << "Read from client " << fd << ": " << data_recv << std::endl;  // 暂时注释
 #endif
+
+        pthread_mutex_lock(sql_mutex);
+
         memset(data_send, '\0', BUFFER_LENGTH);
         offset = 0;
 
@@ -261,6 +266,7 @@ void *client_handler(void *sock_fd) {
         // future TODO: 格式化 sql_handler.result, 传给客户端
         // send result with fixed format, use protobuf in the future
         if (write(fd, data_send, offset + 1) == -1) {
+            pthread_mutex_unlock(sql_mutex);
             break;
         }
         // 如果是单挑语句，需要按照一个完整的事务来执行，所以执行完当前语句后，自动提交事务
@@ -268,6 +274,7 @@ void *client_handler(void *sock_fd) {
             context->txn_->get_txn_mode() == false) {
             txn_manager.commit(context->txn_, context->log_mgr_);
         }
+        pthread_mutex_unlock(sql_mutex);
     }
 
     // Clear
@@ -284,6 +291,9 @@ void start_server() {
     sockfd_mutex = (pthread_mutex_t *)malloc(sizeof(pthread_mutex_t));
     pthread_mutex_init(buffer_mutex, nullptr);
     pthread_mutex_init(sockfd_mutex, nullptr);
+
+    sql_mutex = (pthread_mutex_t *)malloc(sizeof(pthread_mutex_t));
+    pthread_mutex_init(sql_mutex, nullptr);
 
     int sockfd_server;
     int fd_temp;

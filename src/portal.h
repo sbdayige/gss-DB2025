@@ -192,17 +192,12 @@ class Portal {
                     std::unique_ptr<AbstractExecutor> scan = convert_plan_executor(x->subplan_, context);
 
                     std::vector<Rid> rids;
-                    int rid_count = 0;
-                    const int MAX_RID_COUNT = 1000;  // 防止无限循环
 
-                    for (scan->beginTuple(); !scan->is_end(); scan->nextTuple()) {
+                    scan->beginTuple();
+                    while (!scan->is_end()) {
                         auto rid = scan->rid();
                         rids.push_back(rid);
-                        rid_count++;
-
-                        if (rid_count > MAX_RID_COUNT) {
-                            break;
-                        }
+                        scan->nextTuple();
                     }
 
                     std::unique_ptr<AbstractExecutor> root = std::make_unique<MvccUpdateExecutor>(
@@ -215,10 +210,11 @@ class Portal {
                     std::vector<Rid> rids;
 
                     // 执行扫描计划收集匹配的记录ID
-                    int scan_count = 0;
-                    for (scan->beginTuple(); !scan->is_end(); scan->nextTuple()) {
+                    scan->beginTuple();
+                    while (!scan->is_end()) {
                         auto rid = scan->rid();
                         rids.push_back(rid);
+                        scan->nextTuple();
                     }
                     std::unique_ptr<AbstractExecutor> root =
                         std::make_unique<MvccDeleteExecutor>(x->tab_name_, x->conds_, rids, context);

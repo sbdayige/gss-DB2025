@@ -71,10 +71,9 @@ class MvccIndexScanExecutor : public AbstractExecutor {
             return nullptr;
         }
 
-        // 返回投影后的记录，并推进索引
+        // 返回投影后的记录，不推进索引（由nextTuple负责）
         auto &record = buffer_[tuple_idx_];
         auto projected = ProjectRecord(*record);
-        tuple_idx_++;  // Next()方法负责推进索引
         return projected;
     }
 
@@ -103,8 +102,10 @@ class MvccIndexScanExecutor : public AbstractExecutor {
     }
 
     void nextTuple() override {
-        // nextTuple()方法不再推进索引，因为Next()方法已经负责推进
-        // 这个方法保留是为了兼容性，但实际上索引推进由Next()完成
+        // 推进索引位置
+        if (tuple_idx_ < buffer_.size()) {
+            tuple_idx_++;
+        }
     }
 
     bool is_end() const override {
