@@ -27,6 +27,7 @@ See the Mulan PSL v2 for more details. */
 
 #include <cerrno>
 #include <cstring>
+#include <iostream>
 #include <string>
 
 #include "common/common.h"
@@ -187,13 +188,38 @@ class Portal {
                 }
 
                 case T_Update: {
-                    auto rids = CollectMatchedRids(x->tab_name_, x->conds_, context);
+                    // 使用 convert_plan_executor 来优化性能，避免全表扫描
+                    std::unique_ptr<AbstractExecutor> scan = convert_plan_executor(x->subplan_, context);
+
+                    std::vector<Rid> rids;
+                    int rid_count = 0;
+                    const int MAX_RID_COUNT = 1000;  // 防止无限循环
+
+                    for (scan->beginTuple(); !scan->is_end(); scan->nextTuple()) {
+                        auto rid = scan->rid();
+                        rids.push_back(rid);
+                        rid_count++;
+
+                        if (rid_count > MAX_RID_COUNT) {
+                            break;
+                        }
+                    }
+
                     std::unique_ptr<AbstractExecutor> root = std::make_unique<MvccUpdateExecutor>(
                         x->tab_name_, x->set_clauses_, x->conds_, rids, context);
                     return std::make_shared<PortalStmt>(PORTAL_DML_WITHOUT_SELECT, std::vector<TabCol>(), std::move(root), plan);
                 }
                 case T_Delete: {
-                    auto rids = CollectMatchedRids(x->tab_name_, x->conds_, context);
+                    // 使用 convert_plan_executor 来优化性能，避免全表扫描
+                    std::unique_ptr<AbstractExecutor> scan = convert_plan_executor(x->subplan_, context);
+                    std::vector<Rid> rids;
+
+                    // 执行扫描计划收集匹配的记录ID
+                    int scan_count = 0;
+                    for (scan->beginTuple(); !scan->is_end(); scan->nextTuple()) {
+                        auto rid = scan->rid();
+                        rids.push_back(rid);
+                    }
                     std::unique_ptr<AbstractExecutor> root =
                         std::make_unique<MvccDeleteExecutor>(x->tab_name_, x->conds_, rids, context);
                     return std::make_shared<PortalStmt>(PORTAL_DML_WITHOUT_SELECT, std::vector<TabCol>(), std::move(root), plan);

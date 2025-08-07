@@ -29,6 +29,7 @@ class MvccIndexScanExecutor : public AbstractExecutor {
     std::vector<ColMeta> cols_;                      // 需要读取的字段
     size_t tuple_idx_;                               // 当前遍历到的tuple位置
     std::vector<std::unique_ptr<RmRecord>> buffer_;  // 符合条件的记录缓冲区
+    std::vector<Rid> rids_;                          // 对应记录的RID
 
     // 索引相关
     std::string index_name_;           // 使用的索引名称
@@ -70,9 +71,11 @@ class MvccIndexScanExecutor : public AbstractExecutor {
             return nullptr;
         }
 
-        // 返回投影后的记录
-        auto &record = buffer_[tuple_idx_++];
-        return ProjectRecord(*record);
+        // 返回投影后的记录，并推进索引
+        auto &record = buffer_[tuple_idx_];
+        auto projected = ProjectRecord(*record);
+        tuple_idx_++;  // Next()方法负责推进索引
+        return projected;
     }
 
     size_t tupleLen() const {
@@ -88,11 +91,23 @@ class MvccIndexScanExecutor : public AbstractExecutor {
     }
 
     Rid &rid() override {
+        if (tuple_idx_ < rids_.size()) {
+            return rids_[tuple_idx_];
+        }
         static Rid dummy_rid;
         return dummy_rid;
     }
 
-    bool is_end() const {
+    void beginTuple() override {
+        tuple_idx_ = 0;
+    }
+
+    void nextTuple() override {
+        // nextTuple()方法不再推进索引，因为Next()方法已经负责推进
+        // 这个方法保留是为了兼容性，但实际上索引推进由Next()完成
+    }
+
+    bool is_end() const override {
         return tuple_idx_ >= buffer_.size();
     }
 
@@ -173,6 +188,7 @@ class MvccIndexScanExecutor : public AbstractExecutor {
 
             if (EvaluateConditions(*record, conds_, tab_)) {
                 buffer_.push_back(std::make_unique<RmRecord>(*record));
+                rids_.push_back(rid);  // 存储对应的RID
                 ++cond_pass_cnt;
             }
         }

@@ -10,6 +10,8 @@ See the Mulan PSL v2 for more details. */
 
 #pragma once
 
+#include <iostream>
+
 #include "execution_common.h"
 #include "execution_defs.h"
 #include "execution_manager.h"
@@ -69,7 +71,6 @@ class MvccUpdateExecutor : public AbstractExecutor {
             auto record = fh_->get_record(rid, context_);
             auto old_record = *record;
             records_.push_back(std::make_unique<RmRecord>(old_record));
-
             // 4. 构造新记录（根据SET子句修改相应字段）
             RmRecord new_record = old_record;
             for (const auto &set_clause : set_clauses_) {
@@ -99,19 +100,25 @@ class MvccUpdateExecutor : public AbstractExecutor {
                 }
 
                 // 类型转换
+                bool type_converted = false;
                 if (lhs_col->type != value.type) {
                     if (lhs_col->type == ColType::TYPE_INT && value.type == ColType::TYPE_FLOAT) {
                         value.set_int(static_cast<int>(value.float_val));
+                        type_converted = true;
                     } else if (lhs_col->type == ColType::TYPE_FLOAT && value.type == ColType::TYPE_INT) {
                         value.set_float(static_cast<float>(value.int_val));
+                        type_converted = true;
                     } else if (lhs_col->type != value.type) {
                         throw IncompatibleTypeError(coltype2str(lhs_col->type), coltype2str(value.type));
                     }
                 }
 
                 // 确保value有效且可以初始化raw数据
-                if (!value.raw) {
-                    value.raw.reset();
+                // 如果进行了类型转换或者raw数据不存在，都需要重新初始化
+                if (!value.raw || type_converted) {
+                    if (value.raw) {
+                        value.raw.reset();  // 清除旧的raw数据
+                    }
                     value.init_raw(lhs_col->len);
                 }
 
