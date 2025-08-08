@@ -24,42 +24,35 @@ extern TransactionManager txn_manager;
 
 class MvccSelectExecutor : public AbstractExecutor {
    private:
-    TabMeta tab_;                                    // 表的元数据
-    std::vector<Condition> conds_;                   // select的where条件
-    RmFileHandle *fh_;                               // 表的数据文件句柄
-    std::string tab_name_;                           // 表名称
-    std::vector<ColMeta> cols_;                      // 需要select的字段
-    size_t tuple_idx_;                               // 当前遍历到的tuple位置
-    std::vector<std::unique_ptr<RmRecord>> buffer_;  // 符合条件的记录缓冲区
-    std::vector<Rid> rids_;                          // 对应记录的rid
-    bool fed_to_upper_;                              // 是否已经被上层执行器消费
+    TabMeta tab_;                               // 表的元数据
+    std::vector<Condition> conds_;              // select的where条件
+    RmFileHandle *fh_;                          // 表的数据文件句柄
+    std::string tab_name_;                      // 表名称
+    std::vector<ColMeta> cols_;                 // 需要select的字段
+    std::unique_ptr<RmScan> scan_;              // 表扫描迭代器（流式模式）
+    std::unique_ptr<RmRecord> current_record_;  // 当前记录
+    Rid current_rid_;                           // 当前记录的RID
+    bool fed_to_upper_;                         // 是否已经被上层执行器消费
 
    public:
     MvccSelectExecutor(const std::string &tab_name, std::vector<Condition> conds,
                        std::vector<ColMeta> cols, Context *context) {
         tab_name_ = tab_name;
-
         tab_ = sm_manager.db_.get_table(tab_name);
-
         fh_ = sm_manager.get_file_handle(tab_name);
-
         conds_ = conds;
         cols_ = cols;
         context_ = context;
-        tuple_idx_ = 0;
         fed_to_upper_ = false;
-
-        ScanAndFilter();
     }
 
     std::unique_ptr<RmRecord> Next() override {
-        if (tuple_idx_ >= buffer_.size()) {
+        if (!current_record_) {
             return nullptr;
         }
 
-        // 返回投影后的记录，但不推进游标（游标由nextTuple推进）
-        auto &record = buffer_[tuple_idx_];
-        return ProjectRecord(*record);
+        // 返回投影后的当前记录
+        return ProjectRecord(*current_record_);
     }
 
     size_t tupleLen() const {
@@ -75,59 +68,58 @@ class MvccSelectExecutor : public AbstractExecutor {
     }
 
     Rid &rid() override {
-        if (tuple_idx_ < rids_.size()) {
-            return rids_[tuple_idx_];
-        }
-        static Rid dummy_rid;
-        return dummy_rid;
+        return current_rid_;
     }
 
     void beginTuple() override {
-        tuple_idx_ = 0;
+        // 创建扫描迭代器
+        scan_ = std::make_unique<RmScan>(fh_);
+
+        // 查找第一个满足条件的记录
+        FindNextValidRecord();
     }
 
     void nextTuple() override {
-        if (tuple_idx_ < buffer_.size()) {
-            tuple_idx_++;
+        if (!scan_) {
+            return;
         }
+
+        // 移动到下一个记录位置
+        if (!scan_->is_end()) {
+            scan_->next();
+        }
+        FindNextValidRecord();
     }
 
     bool is_end() const override {
-        bool end = tuple_idx_ >= buffer_.size();
+        bool end = !scan_ || scan_->is_end() || !current_record_;
         return end;
     }
 
     std::string getType() { return "MvccSelectExecutor"; }
 
    private:
-    void ScanAndFilter() {
-        // MVCC Select Logic: 扫描表中的所有记录，过滤出可见且符合条件的记录
+    void FindNextValidRecord() {
+        // 清空当前记录
+        current_record_.reset();
 
-        // 检查文件句柄状态
-        auto file_hdr = fh_->get_file_hdr();
-        RmScan scan(fh_);
-
-        // 手动检查第一页的记录
-        if (file_hdr.num_pages > 1) {  // 至少有数据页
-            auto page_handle = fh_->fetch_page_handle(1);
-            auto bitmap = page_handle.bitmap;
-            [[maybe_unused]] int next_bit = Bitmap::next_bit(true, bitmap, file_hdr.num_records_per_page, 0);
-        }
-
-        while (!scan.is_end()) {
-            auto rid = scan.rid();
-
-            // 1. 获取对当前事务可见的记录版本
-            auto visible_record = GetVisibleRecord(rid, context_->txn_, &txn_manager, fh_, context_, tab_);
+        // 扫描直到找到符合条件的记录
+        int scanned_count = 0;
+        while (!scan_->is_end()) {
+            current_rid_ = scan_->rid();
+            scanned_count++;
+            // 1. 获取对当前事务可见的记录版本（保留原有的可见性分析）
+            auto visible_record = GetVisibleRecord(current_rid_, context_->txn_, &txn_manager, fh_, context_, tab_);
             if (!visible_record) {
-                scan.next();
+                scan_->next();
                 continue;
             }
             if (EvaluateConditions(*visible_record, conds_, tab_)) {
-                buffer_.push_back(std::move(visible_record));
-                rids_.push_back(rid);
+                current_record_ = std::move(visible_record);
+                return;  // 找到符合条件的记录，立即返回
             }
-            scan.next();
+
+            scan_->next();
         }
     }
     std::unique_ptr<RmRecord> ProjectRecord(const RmRecord &record) {

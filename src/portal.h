@@ -112,29 +112,6 @@ struct PortalStmt {
 class Portal {
    private:
     TransactionManager* txn_mgr_;  ///< 事务管理器指针，用于MVCC执行器
-
-   public:
-    std::vector<Rid> CollectMatchedRids(const std::string& tab_name, const std::vector<Condition>& conds, Context* context) {
-        std::vector<Rid> rids;
-        auto tab = sm_manager.db_.get_table(tab_name);
-        auto fh = sm_manager.fhs_.at(tab_name).get();
-        for (RmScan scan(fh); !scan.is_end(); scan.next()) {
-            auto rid = scan.rid();
-            auto record = fh->get_record(rid, context);
-            bool matches = true;
-            for (const auto& cond : conds) {
-                if (!EvaluateCondition(*record, cond, tab)) {
-                    matches = false;
-                    break;
-                }
-            }
-            if (matches) {
-                rids.push_back(rid);
-            }
-        }
-        return rids;
-    }
-
    public:
     /**
      * @brief 构造函数
@@ -238,15 +215,8 @@ class Portal {
         return nullptr;
     }
     void run(std::shared_ptr<PortalStmt> portal, QlManager* ql, txn_id_t* txn_id, Context* context) {
-        // ===========================================
-        // 门户类型分发执行
-        // ===========================================
-
         switch (portal->tag) {
             case PORTAL_ONE_SELECT: {
-                // SELECT查询执行：遍历执行器树，输出结果集
-                // 使用投影列信息格式化输出
-                // 获取DML计划中的limit值
                 int limit = 0;
                 if (auto dml_plan = std::dynamic_pointer_cast<DMLPlan>(portal->plan)) {
                     limit = dml_plan->limit_;
@@ -256,20 +226,14 @@ class Portal {
             }
 
             case PORTAL_DML_WITHOUT_SELECT: {
-                // DML操作执行：INSERT/UPDATE/DELETE
-                // 执行数据修改操作，返回影响的行数
                 ql->run_dml(std::move(portal->root));
                 break;
             }
             case PORTAL_MULTI_QUERY: {
-                // DDL操作执行：CREATE/DROP TABLE/INDEX
-                // 直接使用原始计划，因为DDL不需要复杂的执行器树
                 ql->run_mutli_query(portal->plan, context);
                 break;
             }
             case PORTAL_CMD_UTILITY: {
-                // 工具命令执行：SHOW、DESC、SET等
-                // 传入事务ID用于某些需要事务上下文的命令
                 ql->run_cmd_utility(portal->plan, txn_id, context);
                 break;
             }
@@ -279,17 +243,12 @@ class Portal {
         }
     }
     void drop() {
-        // 当前使用智能指针自动管理内存，无需手动清理
-        // 未来可能需要添加特定资源的清理逻辑
     }
     std::unique_ptr<AbstractExecutor> convert_plan_executor(std::shared_ptr<Plan> plan, Context* context) {
         if (auto x = std::dynamic_pointer_cast<ProjectionPlan>(plan)) {
             return std::make_unique<ProjectionExecutor>(convert_plan_executor(x->subplan_, context),
                                                         x->sel_cols_);
         } else if (auto x = std::dynamic_pointer_cast<ScanPlan>(plan)) {
-            // ===============================
-            // 扫描计划转换 - MVCC版本
-            // ===============================
             if (x->tag == T_SeqScan) {
                 auto executor = std::make_unique<MvccSelectExecutor>(x->tab_name_, x->conds_, x->cols_, context);
                 return executor;
@@ -328,12 +287,8 @@ class Portal {
             }
         } else if (auto x = std::dynamic_pointer_cast<AggregatePlan>(plan)) {
             auto subplan_executor = convert_plan_executor(x->subplan_, context);
-
-            // 使用优化的聚合执行器，提升性能
             return std::make_unique<AggregateExecutor>(std::move(subplan_executor), x->agg_exprs_, x->group_by_cols_, x->having_conds_);
-            // return std::make_unique<AggregateExecutorOptimized>(std::move(subplan_executor), x->agg_exprs_, x->group_by_cols_, x->having_conds_);
         }
-        // 未识别的计划类型，返回空指针
         return nullptr;
     }
 };

@@ -68,11 +68,11 @@ Transaction* TransactionManager::begin(Transaction* txn, LogManager* log_manager
     }
 
     // 记录BEGIN日志
-    if (log_manager != nullptr) {
-        BeginLogRecord log_record(txn->get_transaction_id());
-        lsn_t lsn = log_manager->add_log_to_buffer(&log_record);
-        txn->set_prev_lsn(lsn);
-    }
+    // if (log_manager != nullptr) {
+    //     BeginLogRecord log_record(txn->get_transaction_id());
+    //     lsn_t lsn = log_manager->add_log_to_buffer(&log_record);
+    //     txn->set_prev_lsn(lsn);
+    // }
 
     return txn;
 }
@@ -104,14 +104,8 @@ void TransactionManager::commit(Transaction* txn, LogManager* log_manager) {
         auto write_set = txn->get_write_set();
         for (auto write_record : *write_set) {
             // 通过表名获取fd - 需要使用sm_manager_来查找
-            int fd = -1;
-            try {
-                auto& fh = sm_manager.fhs_.at(write_record->GetTableName());
-                fd = fh->GetFd();
-            } catch (const std::exception& e) {
-                // 表文件未找到，跳过
-                continue;
-            }
+            auto& fh = sm_manager.fhs_.at(write_record->GetTableName());
+            int fd = fh->GetFd();
 
             auto version_link_opt = GetVersionLink(fd, write_record->GetRid());
             if (version_link_opt.has_value() &&
@@ -148,12 +142,12 @@ void TransactionManager::commit(Transaction* txn, LogManager* log_manager) {
     txn->clear();
 
     // 记录COMMIT日志
-    if (log_manager != nullptr) {
-        CommitLogRecord log_record(txn->get_transaction_id());
-        log_record.prev_lsn_ = txn->get_prev_lsn();
-        log_manager->add_log_to_buffer(&log_record);
-        log_manager->flush_log_to_disk();  // 提交时强制刷盘
-    }
+    // if (log_manager != nullptr) {
+    //     CommitLogRecord log_record(txn->get_transaction_id());
+    //     log_record.prev_lsn_ = txn->get_prev_lsn();
+    //     log_manager->add_log_to_buffer(&log_record);
+    //     log_manager->flush_log_to_disk();  // 提交时强制刷盘
+    // }
 
     // MVCC相关清理
     running_txns_.UpdateCommitTs(commit_ts);      // 更新水位线的提交时间戳
@@ -248,12 +242,12 @@ void TransactionManager::abort(Context* context, LogManager* log_manager) {
     txn->set_state(TransactionState::ABORTED);
 
     // 记录ABORT日志
-    if (log_manager != nullptr) {
-        AbortLogRecord log_record(txn->get_transaction_id());
-        log_record.prev_lsn_ = txn->get_prev_lsn();
-        log_manager->add_log_to_buffer(&log_record);
-        log_manager->flush_log_to_disk();  // 中止时强制刷盘
-    }
+    // if (log_manager != nullptr) {
+    //     AbortLogRecord log_record(txn->get_transaction_id());
+    //     log_record.prev_lsn_ = txn->get_prev_lsn();
+    //     log_manager->add_log_to_buffer(&log_record);
+    //     log_manager->flush_log_to_disk();  // 中止时强制刷盘
+    // }
 
     // MVCC相关清理
     if (concurrency_mode_ == ConcurrencyMode::MVCC) {
@@ -264,14 +258,8 @@ void TransactionManager::abort(Context* context, LogManager* log_manager) {
         for (auto iter = write_set->rbegin(); iter != write_set->rend(); iter++) {
             const auto table_name = (*iter)->GetTableName();
             const auto rid = (*iter)->GetRid();
-            int fd = -1;
-            try {
-                auto& fh = sm_manager.fhs_.at(table_name);
-                fd = fh->GetFd();
-            } catch (const std::exception& e) {
-                // 表文件未找到，跳过
-                continue;
-            }
+            auto& fh = sm_manager.fhs_.at(table_name);
+            int fd = fh->GetFd();
 
             // 获取当前版本链
             auto current_version_link = GetVersionLink(fd, rid);

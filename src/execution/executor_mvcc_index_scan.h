@@ -22,20 +22,28 @@ extern TransactionManager txn_manager;
 
 class MvccIndexScanExecutor : public AbstractExecutor {
    private:
-    std::string tab_name_;                           // 表名称
-    TabMeta tab_;                                    // 表的元数据
-    std::vector<Condition> conds_;                   // scan的条件
-    RmFileHandle *fh_;                               // 表的数据文件句柄
-    std::vector<ColMeta> cols_;                      // 需要读取的字段
-    size_t tuple_idx_;                               // 当前遍历到的tuple位置
-    std::vector<std::unique_ptr<RmRecord>> buffer_;  // 符合条件的记录缓冲区
-    std::vector<Rid> rids_;                          // 对应记录的RID
+    std::string tab_name_;          // 表名称
+    TabMeta tab_;                   // 表的元数据
+    std::vector<Condition> conds_;  // scan的条件
+    RmFileHandle *fh_;              // 表的数据文件句柄
+    std::vector<ColMeta> cols_;     // 需要读取的字段
+
+    // 流式处理相关（替代批量缓冲区）
+    std::unique_ptr<IxScan> index_scan_;        // 索引扫描迭代器
+    std::unique_ptr<RmRecord> current_record_;  // 当前记录
+    Rid current_rid_;                           // 当前记录的RID
 
     // 索引相关
     std::string index_name_;           // 使用的索引名称
     IxIndexHandle *ih_;                // 索引句柄
     std::vector<ColMeta> index_cols_;  // 索引列
     bool fed_to_upper_;                // 是否已经被上层执行器消费
+
+    // 索引扫描范围
+    char *lower_key_;  // 下界键值
+    char *upper_key_;  // 上界键值
+    bool has_lower_;   // 是否有下界
+    bool has_upper_;   // 是否有上界
 
    public:
     MvccIndexScanExecutor(const std::string &tab_name, std::vector<Condition> conds,
@@ -46,9 +54,12 @@ class MvccIndexScanExecutor : public AbstractExecutor {
         conds_ = conds;
         cols_ = cols;
         context_ = context;
-        tuple_idx_ = 0;
         fed_to_upper_ = false;
         index_name_ = index_name;
+        lower_key_ = nullptr;
+        upper_key_ = nullptr;
+        has_lower_ = false;
+        has_upper_ = false;
 
         // 获取索引句柄
         ih_ = sm_manager.ihs_.at(index_name).get();
@@ -62,19 +73,23 @@ class MvccIndexScanExecutor : public AbstractExecutor {
                 break;
             }
         }
-        // 使用索引扫描并过滤符合条件且可见的记录
-        IndexScanAndFilter();
+
+        // 构造索引扫描范围（保留原有逻辑）
+        ConstructScanRange(lower_key_, upper_key_, has_lower_, has_upper_);
+    }
+
+    ~MvccIndexScanExecutor() {
+        if (lower_key_) delete[] lower_key_;
+        if (upper_key_) delete[] upper_key_;
     }
 
     std::unique_ptr<RmRecord> Next() override {
-        if (tuple_idx_ >= buffer_.size()) {
+        if (!current_record_) {
             return nullptr;
         }
 
-        // 返回投影后的记录，不推进索引（由nextTuple负责）
-        auto &record = buffer_[tuple_idx_];
-        auto projected = ProjectRecord(*record);
-        return projected;
+        // 返回投影后的当前记录
+        return ProjectRecord(*current_record_);
     }
 
     size_t tupleLen() const {
@@ -90,114 +105,53 @@ class MvccIndexScanExecutor : public AbstractExecutor {
     }
 
     Rid &rid() override {
-        if (tuple_idx_ < rids_.size()) {
-            return rids_[tuple_idx_];
-        }
-        static Rid dummy_rid;
-        return dummy_rid;
+        return current_rid_;
     }
 
     void beginTuple() override {
-        tuple_idx_ = 0;
+        // 创建索引扫描器
+        if (has_lower_ && has_upper_) {
+            auto lower_iid = ih_->lower_bound(lower_key_);
+            auto upper_iid = ih_->upper_bound(upper_key_);
+            index_scan_ = std::make_unique<IxScan>(ih_, lower_iid, upper_iid, sm_manager.get_bpm());
+        } else if (has_lower_) {
+            auto lower_iid = ih_->lower_bound(lower_key_);
+            auto upper_iid = ih_->leaf_end();
+            index_scan_ = std::make_unique<IxScan>(ih_, lower_iid, upper_iid, sm_manager.get_bpm());
+        } else if (has_upper_) {
+            auto lower_iid = ih_->leaf_begin();
+            auto upper_iid = ih_->upper_bound(upper_key_);
+            index_scan_ = std::make_unique<IxScan>(ih_, lower_iid, upper_iid, sm_manager.get_bpm());
+        } else {
+            // 全表扫描
+            index_scan_ = std::make_unique<IxScan>(ih_, ih_->leaf_begin(), ih_->leaf_end(), sm_manager.get_bpm());
+        }
+
+        // 查找第一个有效记录
+        FindNextValidRecord();
     }
 
     void nextTuple() override {
-        // 推进索引位置
-        if (tuple_idx_ < buffer_.size()) {
-            tuple_idx_++;
+        if (!index_scan_) {
+            return;
         }
+
+        // 移动索引扫描器到下一个位置
+        if (!index_scan_->is_end()) {
+            index_scan_->next();
+        }
+
+        // 查找下一个有效记录
+        FindNextValidRecord();
     }
 
     bool is_end() const override {
-        return tuple_idx_ >= buffer_.size();
+        return !index_scan_ || index_scan_->is_end() || !current_record_;
     }
 
     std::string getType() { return "MvccIndexScanExecutor"; }
 
    private:
-    void IndexScanAndFilter() {
-        // 1. 分析查询条件，构造索引扫描范围
-        char *lower_key = nullptr;
-        char *upper_key = nullptr;
-        bool has_lower = false;
-        bool has_upper = false;
-        ConstructScanRange(lower_key, upper_key, has_lower, has_upper);
-        // 2. 执行索引扫描
-        std::vector<Rid> candidate_rids;
-        int scan_cnt = 0;
-
-        if (has_lower && has_upper) {
-            // 计算键的总长度
-            size_t key_total_len = 0;
-            for (auto &col : index_cols_) {
-                key_total_len += col.len;
-            }
-
-            // 对于等值查询，使用get_value方法更精确
-            if (memcmp(lower_key, upper_key, key_total_len) == 0) {
-                // 等值查询，直接使用get_value
-                std::vector<Rid> exact_rids;
-                if (ih_->get_value(lower_key, &exact_rids, context_->txn_)) {
-                    for (auto &rid : exact_rids) {
-                        candidate_rids.push_back(rid);
-                        ++scan_cnt;
-                    }
-                }
-            } else {
-                // 范围查询，使用扫描
-                auto lower_iid = ih_->lower_bound(lower_key);
-                auto upper_iid = ih_->upper_bound(upper_key);
-                for (IxScan scan(ih_, lower_iid, upper_iid, sm_manager.get_bpm()); !scan.is_end(); scan.next()) {
-                    candidate_rids.push_back(scan.rid());
-                    ++scan_cnt;
-                }
-            }
-        } else if (has_lower) {
-            auto lower_iid = ih_->lower_bound(lower_key);
-            auto upper_iid = ih_->leaf_end();
-            for (IxScan scan(ih_, lower_iid, upper_iid, sm_manager.get_bpm()); !scan.is_end(); scan.next()) {
-                candidate_rids.push_back(scan.rid());
-                ++scan_cnt;
-            }
-        } else if (has_upper) {
-            auto lower_iid = ih_->leaf_begin();
-            auto upper_iid = ih_->upper_bound(upper_key);
-            for (IxScan scan(ih_, lower_iid, upper_iid, sm_manager.get_bpm()); !scan.is_end(); scan.next()) {
-                candidate_rids.push_back(scan.rid());
-                ++scan_cnt;
-            }
-        } else {
-            // 全表扫描
-            for (IxScan scan(ih_, ih_->leaf_begin(), ih_->leaf_end(), sm_manager.get_bpm()); !scan.is_end(); scan.next()) {
-                candidate_rids.push_back(scan.rid());
-                ++scan_cnt;
-            }
-        }
-
-        // 3. 对每个候选RID进行可见性检查和条件过滤
-        int visible_cnt = 0, cond_pass_cnt = 0;
-        for (auto &rid : candidate_rids) {
-            if (!IsRecordVisible(rid, fh_, &txn_manager, context_)) {
-                continue;
-            }
-            ++visible_cnt;
-
-            auto record = GetVisibleRecord(rid, context_->txn_, &txn_manager, fh_, context_, tab_);
-            if (!record) {
-                continue;
-            }
-
-            if (EvaluateConditions(*record, conds_, tab_)) {
-                buffer_.push_back(std::make_unique<RmRecord>(*record));
-                rids_.push_back(rid);  // 存储对应的RID
-                ++cond_pass_cnt;
-            }
-        }
-
-        if (lower_key) delete[] lower_key;
-        if (upper_key) delete[] upper_key;
-    }
-
     void ConstructScanRange(char *&lower_key, char *&upper_key, bool &has_lower, bool &has_upper) {
         // 根据查询条件构造索引扫描范围
         size_t key_size = 0;
@@ -320,5 +274,26 @@ class MvccIndexScanExecutor : public AbstractExecutor {
         }
 
         return projected_record;
+    }
+
+    void FindNextValidRecord() {
+        current_record_.reset();
+
+        while (index_scan_ && !index_scan_->is_end()) {
+            current_rid_ = index_scan_->rid();
+
+            // 获取可见记录
+            auto record = GetVisibleRecord(current_rid_, context_->txn_, &txn_manager, fh_, context_, tab_);
+            if (record) {
+                // 评估条件
+                if (EvaluateConditions(*record, conds_, tab_)) {
+                    current_record_ = std::move(record);
+                    return;
+                }
+            }
+
+            // 记录不满足条件，移动到下一个
+            index_scan_->next();
+        }
     }
 };

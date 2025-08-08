@@ -425,10 +425,8 @@ std::unique_ptr<RmRecord> GetVisibleRecord(const Rid& rid, Transaction* txn, Tra
                                            RmFileHandle* fh, Context* context, const TabMeta& tab_meta) {
     auto version_link = txn_mgr->GetVersionLink(fh->GetFd(), rid);
     if (!version_link.has_value()) {
-        // 没有版本链，返回基础版本
         return fh->get_record(rid, context);
     }
-
     UndoLink link = version_link->prev_;
     while (true) {
         if (link.prev_txn_ == INVALID_TXN_ID) {
