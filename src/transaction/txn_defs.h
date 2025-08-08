@@ -34,17 +34,6 @@ enum class WType { INSERT_TUPLE = 0,
                    DELETE_TUPLE,
                    UPDATE_TUPLE };
 
-/**
- * @brief 事务的写操作记录，用于事务的回滚
- * INSERT
- * --------------------------------
- * | wtype | tab_name | tuple_rid |
- * --------------------------------
- * DELETE / UPDATE
- * ----------------------------------------------
- * | wtype | tab_name | tuple_rid | tuple_value |
- * ----------------------------------------------
- */
 class WriteRecord {
    public:
     WriteRecord() = default;

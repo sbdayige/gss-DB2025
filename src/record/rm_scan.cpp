@@ -29,32 +29,23 @@ RmScan::RmScan(const RmFileHandle *file_handle) : file_handle_(file_handle) {
 void RmScan::next() {
     // Todo:
     // 找到文件中下一个存放了记录的非空闲位置，用rid_来指向这个位置
-
-    // 如果已经到达文件末尾，直接返回
     if (rid_.page_no == RM_NO_PAGE) {
         return;
     }
-
-    // 从当前位置的下一个slot开始搜索
     int search_from_slot = rid_.slot_no + 1;
-
     while (rid_.page_no < file_handle_->file_hdr_.num_pages) {
         RmPageHandle page_handle = file_handle_->fetch_page_handle(rid_.page_no);
         int next_slot = Bitmap::next_bit(true, page_handle.bitmap, file_handle_->file_hdr_.num_records_per_page, search_from_slot - 1);
         file_handle_->buffer_pool_manager_->unpin_page({file_handle_->fd_, rid_.page_no}, false);
 
         if (next_slot < file_handle_->file_hdr_.num_records_per_page) {
-            // 找到了下一个有效记录
             rid_.slot_no = next_slot;
             return;
         }
-
         // 当前页没有更多记录，移动到下一页
         rid_.page_no++;
         search_from_slot = -1;  // 新页面从第一个slot开始搜索
     }
-
-    // 如果没有找到有效的记录，设置为文件结束
     rid_.page_no = RM_NO_PAGE;
     rid_.slot_no = RM_NO_PAGE;
 }

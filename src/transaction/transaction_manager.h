@@ -127,8 +127,6 @@ class TransactionManager {
 
     static std::unordered_map<txn_id_t, Transaction *> txn_map;  // 全局事务表，存放事务ID与事务对象的映射关系
     std::shared_mutex txn_map_mutex_;
-    /** ------------------------以下函数仅可能在MVCC当中使用------------------------------------------*/
-
     /**
      * @brief 更新一个撤销链接，该链接将表堆元组与第一个撤销日志连接起来。
      * 在更新之前，将调用 `check` 函数以确保有效性。

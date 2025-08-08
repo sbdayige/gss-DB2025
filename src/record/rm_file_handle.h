@@ -22,7 +22,6 @@ See the Mulan PSL v2 for more details. */
 
 class RmManager;
 
-/* 对表数据文件中的页面进行封装 */
 struct RmPageHandle {
     const RmFileHdr *file_hdr;  // 当前页面所在文件的文件头指针
     Page *page;                 // 页面的实际数据，包括页面存储的数据、元信息等
@@ -60,7 +59,6 @@ struct RmPageHandle {
     }
 };
 
-/* 每个RmFileHandle对应一个表的数据文件，里面有多个page，每个page的数据封装在RmPageHandle中 */
 class RmFileHandle {
     friend class RmScan;
     friend class RmManager;
@@ -75,11 +73,7 @@ class RmFileHandle {
    public:
     RmFileHandle(DiskManager *disk_manager, BufferPoolManager *buffer_pool_manager, int fd)
         : disk_manager_(disk_manager), buffer_pool_manager_(buffer_pool_manager), fd_(fd) {
-        // 注意：这里从磁盘中读出文件描述符为fd的文件的file_hdr，读到内存中
-        // 这里实际就是初始化file_hdr，只不过是从磁盘中读出进行初始化
-        // init file_hdr_
         disk_manager_->read_page(fd, RM_FILE_HDR_PAGE, (char *)&file_hdr_, sizeof(file_hdr_));
-        // disk_manager管理的fd对应的文件中，设置从file_hdr_.num_pages开始分配page_no
         disk_manager_->set_fd2pageno(fd, file_hdr_.num_pages);
     }
 

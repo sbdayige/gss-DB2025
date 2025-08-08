@@ -35,19 +35,13 @@ class RmManager {
         }
         disk_manager.create_file(filename);
         int fd = disk_manager.open_file(filename);
-
-        // 初始化file header
         RmFileHdr file_hdr{};
         file_hdr.record_size = record_size;
         file_hdr.num_pages = 1;
         file_hdr.first_free_page_no = RM_NO_PAGE;
-        // We have: sizeof(hdr) + (n + 7) / 8 + n * record_size <= PAGE_SIZE
         file_hdr.num_records_per_page =
             (BITMAP_WIDTH * (PAGE_SIZE - 1 - (int)sizeof(RmFileHdr)) + 1) / (1 + record_size * BITMAP_WIDTH);
         file_hdr.bitmap_size = (file_hdr.num_records_per_page + BITMAP_WIDTH - 1) / BITMAP_WIDTH;
-
-        // 将file header写入磁盘文件（名为file name，文件描述符为fd）中的第0页
-        // head page直接写入磁盘，没有经过缓冲区的NewPage，那么也就不需要FlushPage
         disk_manager.write_page(fd, RM_FILE_HDR_PAGE, (char *)&file_hdr, sizeof(file_hdr));
         disk_manager.close_file(fd);
     }
@@ -58,7 +52,6 @@ class RmManager {
      */
     void destroy_file(const std::string &filename) { disk_manager.destroy_file(filename); }
 
-    // 注意这里打开文件，创建并返回了record file handle的指针
     /**
      * @description: 打开表的数据文件，并返回文件句柄
      * @param {string&} filename 要打开的文件名称
@@ -75,7 +68,6 @@ class RmManager {
     void close_file(const RmFileHandle *file_handle) {
         disk_manager.write_page(file_handle->fd_, RM_FILE_HDR_PAGE, (char *)&file_handle->file_hdr_,
                                 sizeof(file_handle->file_hdr_));
-        // 缓冲区的所有页刷到磁盘，注意这句话必须写在close_file前面
         buffer_pool_manager.flush_all_pages(file_handle->fd_);
         disk_manager.close_file(file_handle->fd_);
     }
@@ -87,9 +79,7 @@ class RmManager {
      */
     void close_file_and_delete_pages(const RmFileHandle *file_handle) {
         disk_manager.write_page(file_handle->fd_, RM_FILE_HDR_PAGE, (char *)&file_handle->file_hdr_, sizeof(file_handle->file_hdr_));
-        // 缓冲区的所有页刷到磁盘，注意这句话必须写在close_file前面
         buffer_pool_manager.flush_all_pages(file_handle->fd_);
-        // 删除缓冲池中该文件的所有页面
         buffer_pool_manager.delete_all_pages(file_handle->fd_);
         disk_manager.close_file(file_handle->fd_);
     }
@@ -97,9 +87,7 @@ class RmManager {
     void close_file_and_clear_buffer(const RmFileHandle *file_handle) {
         disk_manager.write_page(file_handle->fd_, RM_FILE_HDR_PAGE, (char *)&file_handle->file_hdr_,
                                 sizeof(file_handle->file_hdr_));
-        // 缓冲区的所有页刷到磁盘，注意这句话必须写在close_file前面
         buffer_pool_manager.flush_all_pages(file_handle->fd_);
-        // 删除缓冲池中该文件的所有页面
         buffer_pool_manager.delete_all_pages(file_handle->fd_);
         disk_manager.close_file(file_handle->fd_);
     }

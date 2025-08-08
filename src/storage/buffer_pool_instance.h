@@ -39,17 +39,13 @@ class BufferPoolInstance {
     std::mutex latch_;                                   // 并发控制锁
 
    public:
-   public:
     BufferPoolInstance(size_t pool_size) : pool_size_(pool_size) {
-        // 为buffer pool分配一块连续的内存空间
         pages_ = new Page[pool_size_];
-        // 可以被Replacer改变
-        replacer_ = new LRUReplacer(pool_size_);  // 使用LRU替换策略
-        // 初始化时，所有的page都在free_list_中
+        replacer_ = new LRUReplacer(pool_size_);
         for (size_t i = 0; i < pool_size_; ++i) {
-            free_list_.emplace_back(static_cast<frame_id_t>(i));  // static_cast转换数据类型
+            free_list_.emplace_back(static_cast<frame_id_t>(i));
         }
-        page_table_.reserve(pool_size_);  // 预留空间，避免频繁扩容
+        page_table_.reserve(pool_size_);
     }
 
     ~BufferPoolInstance() {

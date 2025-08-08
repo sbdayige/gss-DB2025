@@ -106,16 +106,9 @@ struct PortalStmt {
  * 3. drop() - 清理资源
  */
 class Portal {
-   private:
-    TransactionManager* txn_mgr_;  ///< 事务管理器指针，用于MVCC执行器
    public:
-    /**
-     * @brief 构造函数
-     * @param sm_manager 系统管理器指针
-     * @param txn_mgr 事务管理器指针
-     */
-    Portal(TransactionManager* txn_mgr) : txn_mgr_(txn_mgr) {}
-    ~Portal() {}
+    Portal() = default;
+    ~Portal() = default;
 
     std::shared_ptr<PortalStmt> start(std::shared_ptr<Plan> plan, Context* context) {
         // ===========================================

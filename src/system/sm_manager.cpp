@@ -30,20 +30,11 @@ extern BufferPoolManager buffer_pool_manager;
 extern RmManager rm_manager;
 extern IxManager ix_manager;
 
-/**
- * @description: 判断是否为一个文件夹
- * @return {bool} 返回是否为一个文件夹
- * @param {string&} db_name 数据库文件名称，与文件夹同名
- */
 bool SmManager::is_dir(const std::string& db_name) {
     struct stat st;
     return stat(db_name.c_str(), &st) == 0 && S_ISDIR(st.st_mode);
 }
 
-/**
- * @description: 创建数据库，所有的数据库相关文件都放在数据库同名文件夹下
- * @param {string&} db_name 数据库名称
- */
 void SmManager::create_db(const std::string& db_name) {
     if (is_dir(db_name)) {
         throw DatabaseExistsError(db_name);
@@ -59,11 +50,7 @@ void SmManager::create_db(const std::string& db_name) {
     // 创建系统目录
     DbMeta* new_db = new DbMeta();
     new_db->name_ = db_name;
-
-    // 注意，此处ofstream会在当前目录创建(如果没有此文件先创建)和打开一个名为DB_META_NAME的文件
     std::ofstream ofs(DB_META_NAME);
-
-    // 将new_db中的信息，按照定义好的operator<<操作符，写入到ofs打开的DB_META_NAME文件中
     ofs << *new_db;  // 注意：此处重载了操作符<<
 
     delete new_db;
@@ -77,10 +64,6 @@ void SmManager::create_db(const std::string& db_name) {
     }
 }
 
-/**
- * @description: 删除数据库，同时需要清空相关文件以及数据库同名文件夹
- * @param {string&} db_name 数据库名称，与文件夹同名
- */
 void SmManager::drop_db(const std::string& db_name) {
     if (!is_dir(db_name)) {
         throw DatabaseNotFoundError(db_name);
@@ -91,10 +74,6 @@ void SmManager::drop_db(const std::string& db_name) {
     }
 }
 
-/**
- * @description: 打开数据库，找到数据库对应的文件夹，并加载数据库元数据和相关文件
- * @param {string&} db_name 数据库名称，与文件夹同名
- */
 void SmManager::open_db(const std::string& db_name) {
     if (!is_dir(db_name)) {
         throw DatabaseNotFoundError(db_name);
@@ -126,18 +105,12 @@ void SmManager::open_db(const std::string& db_name) {
     }
 }
 
-/**
- * @description: 把数据库相关的元数据刷入磁盘中
- */
 void SmManager::flush_meta() {
     // 默认清空文件
     std::ofstream ofs(DB_META_NAME);
     ofs << db_;
 }
 
-/**
- * @description: 关闭数据库并把数据落盘
- */
 void SmManager::close_db() {
     if (db_.name_.empty()) {
         throw DatabaseNotFoundError(db_.name_);
@@ -165,10 +138,6 @@ void SmManager::close_db() {
     }
 }
 
-/**
- * @description: 显示所有的表,通过测试需要将其结果写入到output.txt,详情看题目文档
- * @param {Context*} context
- */
 void SmManager::show_tables(Context* context) {
     std::fstream outfile;
     extern bool output_file_enabled;
@@ -372,26 +341,19 @@ void SmManager::create_index(const std::string& tab_name, const std::vector<std:
     std::vector<char> key_buffer(tot_col_len);
     char* const key = key_buffer.data();
 
-    try {
-        for (RmScan scan(fh); !scan.is_end(); scan.next()) {
-            const auto record = fh->get_record(scan.rid(), context);
-            const char* const record_data = record->data;
+    for (RmScan scan(fh); !scan.is_end(); scan.next()) {
+        const auto record = fh->get_record(scan.rid(), context);
+        const char* const record_data = record->data;
 
-            // 减少循环开销
-            for (size_t i = 0; i < col_count; ++i) {
-                const auto& [record_offset, key_offset] = col_info[i];
-                std::memcpy(key + key_offset, record_data + record_offset, cols[i].len);
-            }
-
-            if (ih->insert_entry(key, scan.rid(), context ? context->txn_ : nullptr) == INVALID_PAGE_ID) {
-                throw std::runtime_error("Index insertion failed");
-            }
+        // 减少循环开销
+        for (size_t i = 0; i < col_count; ++i) {
+            const auto& [record_offset, key_offset] = col_info[i];
+            std::memcpy(key + key_offset, record_data + record_offset, cols[i].len);
         }
-    } catch (...) {
-        // 清理失败的索引
-        ix_manager.drop_index(ih.get());
-        disk_manager.destroy_file(ix_manager.get_index_name(tab_name, col_names));
-        throw;
+
+        if (ih->insert_entry(key, scan.rid(), context ? context->txn_ : nullptr) == INVALID_PAGE_ID) {
+            throw std::runtime_error("Index insertion failed");
+        }
     }
 
     // 提交更改
