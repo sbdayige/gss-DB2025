@@ -41,7 +41,7 @@ Optimizer optimizer;
 LogManager log_manager;
 RecoveryManager recovery;
 QlManager ql_manager;
-Portal portal(&txn_manager);
+Portal portal;
 Analyze analyze(&sm_manager);
 BufferPoolManager buffer_pool_manager(BUFFER_POOL_SIZE);
 DiskManager disk_manager;
