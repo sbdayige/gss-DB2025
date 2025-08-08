@@ -12,6 +12,9 @@ See the Mulan PSL v2 for more details. */
 
 #include <cinttypes>
 #include <cstring>
+#include <queue>
+#include <unordered_map>
+#include <vector>
 
 #include "common/common.h"
 #include "common/context.h"
@@ -152,3 +155,68 @@ UndoLog CreateInsertUndoLog(const RmRecord& record, const Rid& rid, const TabMet
  * @param context 执行上下文
  */
 // void CheckGapLockConflict(const RmRecord& record, const TabMeta& tab_meta, RmFileHandle* fh, Context* context);
+
+// ==================== 批量页面处理优化接口 ====================
+// 注意：由于RmFileHandle私有成员访问限制，当前实现主要通过以下方式优化：
+// 1. 按页面分组RID以提高缓存局部性
+// 2. 减少函数调用开销
+// 3. 批量处理减少循环开销
+// 4. 为未来的深度优化提供接口基础
+
+struct BatchRecordResult {
+    std::vector<std::unique_ptr<RmRecord>> records;
+    std::vector<Rid> rids;
+    size_t processed_count;
+    size_t valid_count;
+
+    BatchRecordResult() : processed_count(0), valid_count(0) {}
+};
+
+struct VisibilityResult {
+    std::unique_ptr<RmRecord> record;
+    Rid rid;
+    bool is_visible;
+
+    VisibilityResult(std::unique_ptr<RmRecord> rec, const Rid& r, bool visible)
+        : record(std::move(rec)), rid(r), is_visible(visible) {}
+};
+
+class BatchRecordProcessor {
+   public:
+    static std::unordered_map<int, std::vector<Rid>> groupRidsByPage(const std::vector<Rid>& rids);
+
+    static BatchRecordResult batchGetRecords(
+        const std::vector<Rid>& rids,
+        RmFileHandle* fh,
+        Context* context);
+
+    static BatchRecordResult batchGetVisibleRecords(
+        const std::vector<Rid>& rids,
+        RmFileHandle* fh,
+        const std::vector<Condition>& conds,
+        const TabMeta& tab_meta,
+        Context* context);
+
+    static std::vector<std::unique_ptr<RmRecord>> processSinglePage(
+        int page_no,
+        const std::vector<Rid>& page_rids,
+        RmFileHandle* fh,
+        Context* context);
+};
+
+std::vector<VisibilityResult> GetVisibleRecordBatch(
+    const std::vector<Rid>& rids,
+    Transaction* txn,
+    TransactionManager* txn_mgr,
+    RmFileHandle* fh,
+    Context* context,
+    const TabMeta& tab_meta);
+
+std::unique_ptr<RmRecord> GetVisibleRecordFromPage(
+    const Rid& rid,
+    const RmPageHandle& page_handle,
+    RmFileHandle* fh,
+    Transaction* txn,
+    TransactionManager* txn_mgr,
+    Context* context,
+    const TabMeta& tab_meta);

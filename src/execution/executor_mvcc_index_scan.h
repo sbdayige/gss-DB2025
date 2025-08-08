@@ -10,6 +10,10 @@ See the Mulan PSL v2 for more details. */
 
 #pragma once
 
+#include <iostream>
+#include <queue>
+#include <unordered_set>
+
 #include "execution_common.h"
 #include "execution_defs.h"
 #include "execution_manager.h"
@@ -45,6 +49,9 @@ class MvccIndexScanExecutor : public AbstractExecutor {
     bool has_lower_;   // 是否有下界
     bool has_upper_;   // 是否有上界
 
+    // 简化的流式处理 - 移除不必要的缓冲
+    bool use_simple_streaming_;  // 使用简单流式处理
+
    public:
     MvccIndexScanExecutor(const std::string &tab_name, std::vector<Condition> conds,
                           std::vector<ColMeta> cols, const std::string &index_name, Context *context) {
@@ -60,8 +67,8 @@ class MvccIndexScanExecutor : public AbstractExecutor {
         upper_key_ = nullptr;
         has_lower_ = false;
         has_upper_ = false;
+        use_simple_streaming_ = true;  // 使用简单流式处理
 
-        // 获取索引句柄
         ih_ = sm_manager.ihs_.at(index_name).get();
 
         // 获取索引列信息
@@ -73,7 +80,6 @@ class MvccIndexScanExecutor : public AbstractExecutor {
                 break;
             }
         }
-
         // 构造索引扫描范围（保留原有逻辑）
         ConstructScanRange(lower_key_, upper_key_, has_lower_, has_upper_);
     }
@@ -89,7 +95,8 @@ class MvccIndexScanExecutor : public AbstractExecutor {
         }
 
         // 返回投影后的当前记录
-        return ProjectRecord(*current_record_);
+        auto result = ProjectRecord(*current_record_);
+        return result;
     }
 
     size_t tupleLen() const {
@@ -109,7 +116,6 @@ class MvccIndexScanExecutor : public AbstractExecutor {
     }
 
     void beginTuple() override {
-        // 创建索引扫描器
         if (has_lower_ && has_upper_) {
             auto lower_iid = ih_->lower_bound(lower_key_);
             auto upper_iid = ih_->upper_bound(upper_key_);
@@ -123,11 +129,8 @@ class MvccIndexScanExecutor : public AbstractExecutor {
             auto upper_iid = ih_->upper_bound(upper_key_);
             index_scan_ = std::make_unique<IxScan>(ih_, lower_iid, upper_iid, sm_manager.get_bpm());
         } else {
-            // 全表扫描
             index_scan_ = std::make_unique<IxScan>(ih_, ih_->leaf_begin(), ih_->leaf_end(), sm_manager.get_bpm());
         }
-
-        // 查找第一个有效记录
         FindNextValidRecord();
     }
 
@@ -136,17 +139,15 @@ class MvccIndexScanExecutor : public AbstractExecutor {
             return;
         }
 
-        // 移动索引扫描器到下一个位置
-        if (!index_scan_->is_end()) {
-            index_scan_->next();
-        }
-
-        // 查找下一个有效记录
+        // 先移动到下一个索引位置，然后查找下一个有效记录
+        index_scan_->next();
         FindNextValidRecord();
     }
 
     bool is_end() const override {
-        return !index_scan_ || index_scan_->is_end() || !current_record_;
+        // 简化结束条件判断
+        return current_record_ == nullptr &&
+               (!index_scan_ || index_scan_->is_end());
     }
 
     std::string getType() { return "MvccIndexScanExecutor"; }
@@ -279,20 +280,19 @@ class MvccIndexScanExecutor : public AbstractExecutor {
     void FindNextValidRecord() {
         current_record_.reset();
 
+        if (!index_scan_) {
+            return;
+        }
+
         while (index_scan_ && !index_scan_->is_end()) {
             current_rid_ = index_scan_->rid();
-
-            // 获取可见记录
+            // 直接流式处理，避免任何不必要的优化开销
             auto record = GetVisibleRecord(current_rid_, context_->txn_, &txn_manager, fh_, context_, tab_);
-            if (record) {
-                // 评估条件
-                if (EvaluateConditions(*record, conds_, tab_)) {
-                    current_record_ = std::move(record);
-                    return;
-                }
+            if (record && EvaluateConditions(*record, conds_, tab_)) {
+                current_record_ = std::move(record);
+                return;
             }
 
-            // 记录不满足条件，移动到下一个
             index_scan_->next();
         }
     }

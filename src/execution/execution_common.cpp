@@ -13,6 +13,8 @@ See the Mulan PSL v2 for more details. */
 #include "../errors.h"
 #include "index/ix_index_handle.h"
 
+extern TransactionManager txn_manager;
+
 Value GetColumnValue(const RmRecord& record, const ColMeta& col_meta) {
     Value value;
     char* data_ptr = record.data + col_meta.offset;
@@ -614,3 +616,130 @@ UndoLog CreateInsertUndoLog(const RmRecord& record, const Rid& rid, const TabMet
 //         }
 //     }
 // }
+
+std::unordered_map<int, std::vector<Rid>> BatchRecordProcessor::groupRidsByPage(const std::vector<Rid>& rids) {
+    std::unordered_map<int, std::vector<Rid>> rids_by_page;
+
+    for (const auto& rid : rids) {
+        rids_by_page[rid.page_no].push_back(rid);
+    }
+
+    return rids_by_page;
+}
+std::vector<std::unique_ptr<RmRecord>> BatchRecordProcessor::processSinglePage(
+    int page_no,
+    const std::vector<Rid>& page_rids,
+    RmFileHandle* fh,
+    Context* context) {
+    std::vector<std::unique_ptr<RmRecord>> results;
+    results.reserve(page_rids.size());
+
+    if (page_rids.empty()) {
+        return results;
+    }
+
+    for (const auto& rid : page_rids) {
+        if (!fh->is_record(rid)) {
+            continue;
+        }
+        auto record = fh->get_record(rid, context);
+        if (record) {
+            results.push_back(std::move(record));
+        }
+    }
+
+    return results;
+}
+
+BatchRecordResult BatchRecordProcessor::batchGetRecords(
+    const std::vector<Rid>& rids,
+    RmFileHandle* fh,
+    Context* context) {
+    BatchRecordResult result;
+
+    if (rids.empty()) {
+        return result;
+    }
+    auto rids_by_page = groupRidsByPage(rids);
+    for (const auto& [page_no, page_rids] : rids_by_page) {
+        for (const auto& rid : page_rids) {
+            result.processed_count++;
+            if (!fh->is_record(rid)) {
+                continue;
+            }
+            auto record = fh->get_record(rid, context);
+            if (record) {
+                result.records.push_back(std::move(record));
+                result.rids.push_back(rid);
+                result.valid_count++;
+            }
+        }
+    }
+
+    return result;
+}
+
+BatchRecordResult BatchRecordProcessor::batchGetVisibleRecords(
+    const std::vector<Rid>& rids,
+    RmFileHandle* fh,
+    const std::vector<Condition>& conds,
+    const TabMeta& tab_meta,
+    Context* context) {
+    BatchRecordResult result;
+
+    if (rids.empty()) {
+        return result;
+    }
+
+    // 暂时使用逐个处理的方式，确保功能正确性
+    for (const auto& rid : rids) {
+        result.processed_count++;
+        auto record = GetVisibleRecord(rid, context->txn_, &txn_manager, fh, context, tab_meta);
+        if (record) {
+            if (conds.empty() || EvaluateConditions(*record, conds, const_cast<TabMeta&>(tab_meta))) {
+                result.records.push_back(std::move(record));
+                result.rids.push_back(rid);
+                result.valid_count++;
+            }
+        }
+    }
+
+    return result;
+}
+
+std::unique_ptr<RmRecord> GetVisibleRecordFromPage(
+    const Rid& rid,
+    const RmPageHandle& page_handle,
+    RmFileHandle* fh,
+    Transaction* txn,
+    TransactionManager* txn_mgr,
+    Context* context,
+    const TabMeta& tab_meta) {
+    return GetVisibleRecord(rid, txn, txn_mgr, fh, context, tab_meta);
+}
+
+std::vector<VisibilityResult> GetVisibleRecordBatch(
+    const std::vector<Rid>& rids,
+    Transaction* txn,
+    TransactionManager* txn_mgr,
+    RmFileHandle* fh,
+    Context* context,
+    const TabMeta& tab_meta) {
+    std::vector<VisibilityResult> results;
+    results.reserve(rids.size());
+
+    if (rids.empty()) {
+        return results;
+    }
+    auto rids_by_page = BatchRecordProcessor::groupRidsByPage(rids);
+
+    for (const auto& [page_no, page_rids] : rids_by_page) {
+        for (const auto& rid : page_rids) {
+            auto record = GetVisibleRecord(rid, txn, txn_mgr, fh, context, tab_meta);
+            bool is_visible = (record != nullptr);
+            results.emplace_back(std::move(record), rid, is_visible);
+        }
+    }
+
+    return results;
+}
