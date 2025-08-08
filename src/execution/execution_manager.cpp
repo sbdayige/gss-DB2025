@@ -13,14 +13,9 @@ See the Mulan PSL v2 for more details. */
 #include <fstream>
 #include <iostream>
 
-#include "executor_delete.h"
 #include "executor_explain.h"
-#include "executor_index_scan.h"
-#include "executor_insert.h"
 #include "executor_nestedloop_join.h"
 #include "executor_projection.h"
-#include "executor_seq_scan.h"
-#include "executor_update.h"
 #include "index/ix.h"
 #include "record_printer.h"
 

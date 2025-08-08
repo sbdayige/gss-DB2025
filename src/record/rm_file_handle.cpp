@@ -17,25 +17,128 @@ See the Mulan PSL v2 for more details. */
  * @return {unique_ptr<RmRecord>} rid对应的记录对象指针
  */
 std::unique_ptr<RmRecord> RmFileHandle::get_record(const Rid &rid, Context *context) const {
-    // Todo:
-    // 1. 获取指定记录所在的page handle
-    // 2. 初始化一个指向RmRecord的指针（赋值其内部的data和size）
+    // 按页读取优化 - 使用新的分离式访问模式
     if (context != nullptr) {
         context->lock_mgr_->lock_shared_on_record(context->txn_, rid, fd_);
     }
-    // 1. 获取指定记录所在的page handle
-    auto page_handle = fetch_page_handle(rid.page_no);
 
-    // 2. 初始化一个指向RmRecord的指针（赋值其内部的data和size）
-    char *record_data = page_handle.get_slot(rid.slot_no);
+    // 获取页面锁
+    Page *page = AcquirePageReadLock(rid);
 
-    // 创建RmRecord对象（会复制数据）
-    auto record = std::make_unique<RmRecord>(file_hdr_.record_size, record_data);
+    // 从已锁定的页面获取记录
+    auto record = GetRecordWithLockAcquired(rid, page->get_data());
 
-    // 3. 释放页面（unpin），因为RmRecord已经复制了数据
-    buffer_pool_manager_->unpin_page(page_handle.page->get_page_id(), false);
+    // 释放页面
+    buffer_pool_manager_->unpin_page(page->get_page_id(), false);
 
     return record;
+}
+
+/**
+ * @description: 按页读取优化 - 获取页面读锁
+ * @param {Rid&} rid 记录标识符
+ * @return {Page*} 页面指针
+ */
+Page *RmFileHandle::AcquirePageReadLock(const Rid &rid) const {
+    // 早期错误检查 - 在进行昂贵的缓冲池操作前先检查页面有效性
+    if (rid.page_no >= file_hdr_.num_pages) {
+        throw PageNotExistError("RmFileHandle::AcquirePageReadLock", rid.page_no);
+    }
+
+    PageId page_id = {fd_, rid.page_no};
+    Page *page = buffer_pool_manager_->fetch_page(page_id);
+    if (page == nullptr) {
+        throw RecordNotFoundError(rid.page_no, rid.slot_no);
+    }
+
+    return page;
+}
+
+/**
+ * @description: 按页读取优化 - 获取页面写锁
+ * @param {Rid&} rid 记录标识符
+ * @return {Page*} 页面指针
+ */
+Page *RmFileHandle::AcquirePageWriteLock(const Rid &rid) const {
+    // 早期错误检查
+    if (rid.page_no >= file_hdr_.num_pages) {
+        throw PageNotExistError("RmFileHandle::AcquirePageWriteLock", rid.page_no);
+    }
+
+    PageId page_id = {fd_, rid.page_no};
+    Page *page = buffer_pool_manager_->fetch_page(page_id);
+    if (page == nullptr) {
+        throw RecordNotFoundError(rid.page_no, rid.slot_no);
+    }
+
+    return page;
+}
+
+/**
+ * @description: 按页读取优化 - 从已锁定的页面获取记录
+ * @param {Rid&} rid 记录标识符
+ * @param {char*} page_data 页面数据指针
+ * @return {unique_ptr<RmRecord>} 记录指针
+ */
+std::unique_ptr<RmRecord> RmFileHandle::GetRecordWithLockAcquired(const Rid &rid, const char *page_data) const {
+    RmPageHandle page_handle(&file_hdr_, const_cast<char *>(page_data));
+
+    // 快速位图检查
+    if (!Bitmap::is_set(page_handle.bitmap, rid.slot_no)) {
+        throw RecordNotFoundError(rid.page_no, rid.slot_no);
+    }
+
+    // 直接数据访问 - O(1)时间复杂度
+    char *record_data = page_handle.get_slot(rid.slot_no);
+
+    // 创建记录对象（批量数据传输，一次性拷贝）
+    return std::make_unique<RmRecord>(file_hdr_.record_size, record_data);
+}
+
+/**
+ * @description: 按页读取优化 - 批量获取页面中的多个记录
+ * @param {vector<Rid>&} rids 记录标识符列表
+ * @param {Context*} context 上下文
+ * @return {vector<unique_ptr<RmRecord>>} 记录列表
+ */
+std::vector<std::unique_ptr<RmRecord>> RmFileHandle::GetRecordsBatch(const std::vector<Rid> &rids, Context *context) const {
+    std::vector<std::unique_ptr<RmRecord>> records;
+    records.reserve(rids.size());
+
+    // 按页面分组处理，提高缓存局部性
+    std::map<int, std::vector<std::pair<size_t, Rid>>> page_groups;
+    for (size_t i = 0; i < rids.size(); ++i) {
+        page_groups[rids[i].page_no].emplace_back(i, rids[i]);
+    }
+
+    records.resize(rids.size());
+
+    // 逐页处理，减少页面切换开销
+    for (const auto &[page_no, page_rids] : page_groups) {
+        if (page_rids.empty()) continue;
+
+        // 获取页面锁（一次锁定，多次访问）
+        Page *page = AcquirePageReadLock(page_rids[0].second);
+
+        // 批量处理该页面的所有记录
+        for (const auto &[index, rid] : page_rids) {
+            if (context != nullptr) {
+                context->lock_mgr_->lock_shared_on_record(context->txn_, rid, fd_);
+            }
+
+            try {
+                // 使用已缓存的页面数据
+                records[index] = GetRecordWithLockAcquired(rid, page->get_data());
+            } catch (const RecordNotFoundError &) {
+                records[index] = nullptr;  // 记录不存在
+            }
+        }
+
+        // 释放页面
+        buffer_pool_manager_->unpin_page(page->get_page_id(), false);
+    }
+
+    return records;
 }
 
 /**

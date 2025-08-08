@@ -421,13 +421,17 @@ bool IsRecordVisible(const Rid& rid, Transaction* txn, TransactionManager* txn_m
 }
 
 /**
- * @brief 获取记录对事务可见的版本（MVCC）
+ * @brief 获取记录对事务可见的版本（MVCC）- 按页读取优化版本
  */
 std::unique_ptr<RmRecord> GetVisibleRecord(const Rid& rid, Transaction* txn, TransactionManager* txn_mgr,
                                            RmFileHandle* fh, Context* context, const TabMeta& tab_meta) {
     auto version_link = txn_mgr->GetVersionLink(fh->GetFd(), rid);
     if (!version_link.has_value()) {
-        return fh->get_record(rid, context);
+        // 使用按页读取优化的新接口
+        auto page = fh->AcquirePageReadLock(rid);
+        auto record = fh->GetRecordWithLockAcquired(rid, page->get_data());
+        fh->buffer_pool_manager_->unpin_page(page->get_page_id(), false);
+        return record;
     }
     UndoLink link = version_link->prev_;
     while (true) {
@@ -441,7 +445,11 @@ std::unique_ptr<RmRecord> GetVisibleRecord(const Rid& rid, Transaction* txn, Tra
                     Transaction* insert_txn = txn_mgr->find_transaction(insert_link.prev_txn_);
                     if (insert_txn && insert_txn->get_state() == TransactionState::COMMITTED &&
                         insert_txn->get_commit_ts() < txn->get_start_ts()) {
-                        return fh->get_record(rid, context);
+                        // 使用按页读取优化的新接口
+                        auto page = fh->AcquirePageReadLock(rid);
+                        auto record = fh->GetRecordWithLockAcquired(rid, page->get_data());
+                        fh->buffer_pool_manager_->unpin_page(page->get_page_id(), false);
+                        return record;
                     }
                 }
             }
@@ -460,7 +468,89 @@ std::unique_ptr<RmRecord> GetVisibleRecord(const Rid& rid, Transaction* txn, Tra
             if (undo_log->is_deleted_) {
                 return nullptr;  // 本事务的DELETE操作，记录不可见
             } else {
-                return fh->get_record(rid, context);  // 返回物理记录
+                // 使用按页读取优化的新接口
+                auto page = fh->AcquirePageReadLock(rid);
+                auto record = fh->GetRecordWithLockAcquired(rid, page->get_data());
+                fh->buffer_pool_manager_->unpin_page(page->get_page_id(), false);
+                return record;  // 返回物理记录
+            }
+        }
+
+        // 2. 其他事务产生的未提交版本：对本事务不可见
+        if (link.prev_txn_ != txn->get_transaction_id() && log_txn &&
+            log_txn->get_state() != TransactionState::COMMITTED) {
+            link = undo_log->prev_version_;
+            continue;
+        }
+
+        // 3. 已提交版本：只有提交时间早于当前事务start_ts才可见
+        if (log_txn && log_txn->get_state() == TransactionState::COMMITTED) {
+            if (log_txn->get_commit_ts() < txn->get_start_ts()) {
+                if (undo_log->is_deleted_) {
+                    return nullptr;  // 记录被删除
+                }
+                return RestoreRecordFromUndoLog(*undo_log, tab_meta);  // 从UndoLog恢复
+            } else {
+                link = undo_log->prev_version_;
+                continue;
+            }
+        }
+
+        // 4. 其他情况，继续回溯
+        link = undo_log->prev_version_;
+    }
+
+    return nullptr;  // 没有可见版本
+}
+
+/**
+ * @brief 按页读取优化 - 从已锁定页面获取可见记录
+ */
+std::unique_ptr<RmRecord> GetVisibleRecordFromPage(
+    const Rid& rid,
+    const char* page_data,
+    Transaction* txn,
+    TransactionManager* txn_mgr,
+    RmFileHandle* fh,
+    Context* context,
+    const TabMeta& tab_meta) {
+        auto version_link = txn_mgr->GetVersionLink(fh->GetFd(), rid);
+    if (!version_link.has_value()) {
+        // 直接从页面数据获取记录
+        return fh->GetRecordWithLockAcquired(rid, page_data);
+    }
+    UndoLink link = version_link->prev_;
+    while (true) {
+        if (link.prev_txn_ == INVALID_TXN_ID) {
+            // 回溯到链尾，检查INSERT操作的可见性
+            auto insert_version_link = txn_mgr->GetVersionLink(fh->GetFd(), rid);
+            if (insert_version_link.has_value()) {
+                UndoLink insert_link = insert_version_link->prev_;
+                auto insert_undo_log = GetUndoLog(txn_mgr, insert_link);
+                if (insert_undo_log) {
+                    Transaction* insert_txn = txn_mgr->find_transaction(insert_link.prev_txn_);
+                    if (insert_txn && insert_txn->get_state() == TransactionState::COMMITTED &&
+                        insert_txn->get_commit_ts() < txn->get_start_ts()) {
+                        return fh->GetRecordWithLockAcquired(rid, page_data);
+                    }
+                }
+            }
+            return nullptr;  // 记录不可见
+        }
+
+        auto undo_log = GetUndoLog(txn_mgr, link);
+        if (!undo_log) {
+            break;
+        }
+
+        Transaction* log_txn = txn_mgr->find_transaction(link.prev_txn_);
+
+        // 1. 本事务产生的版本：只对本事务可见
+        if (link.prev_txn_ == txn->get_transaction_id()) {
+            if (undo_log->is_deleted_) {
+                return nullptr;  // 本事务的DELETE操作，记录不可见
+            } else {
+                return fh->GetRecordWithLockAcquired(rid, page_data);  // 返回物理记录
             }
         }
 

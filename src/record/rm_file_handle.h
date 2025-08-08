@@ -12,7 +12,9 @@ See the Mulan PSL v2 for more details. */
 
 #include <assert.h>
 
+#include <map>
 #include <memory>
+#include <vector>
 
 #include "bitmap.h"
 #include "common/context.h"
@@ -34,9 +36,27 @@ struct RmPageHandle {
         slots = bitmap + file_hdr->bitmap_size;
     }
 
+    // 按页读取优化 - 从页面数据构造
+    RmPageHandle(const RmFileHdr *fhdr_, char *page_data_) : file_hdr(fhdr_), page(nullptr) {
+        page_hdr = reinterpret_cast<RmPageHdr *>(page_data_ + Page::OFFSET_PAGE_HDR);
+        bitmap = page_data_ + sizeof(RmPageHdr) + Page::OFFSET_PAGE_HDR;
+        slots = bitmap + file_hdr->bitmap_size;
+    }
+
     // 返回指定slot_no的slot存储收地址
     char *get_slot(int slot_no) const {
         return slots + slot_no * file_hdr->record_size;  // slots的首地址 + slot个数 * 每个slot的大小(每个record的大小)
+    }
+
+    // 按页读取优化 - 直接从页面数据获取记录
+    std::unique_ptr<RmRecord> get_record_from_page(int slot_no) const {
+        char *record_data = get_slot(slot_no);
+        return std::make_unique<RmRecord>(file_hdr->record_size, record_data);
+    }
+
+    // 按页读取优化 - 检查slot是否被使用
+    bool is_slot_used(int slot_no) const {
+        return Bitmap::is_set(bitmap, slot_no);
     }
 };
 
@@ -46,7 +66,7 @@ class RmFileHandle {
     friend class RmManager;
     friend class SmManager;
 
-   private:
+   public:
     DiskManager *disk_manager_;
     BufferPoolManager *buffer_pool_manager_;
     int fd_;              // 打开文件后产生的文件句柄
@@ -73,6 +93,18 @@ class RmFileHandle {
     }
 
     std::unique_ptr<RmRecord> get_record(const Rid &rid, Context *context) const;
+
+    // 按页读取优化 - 获取页面读锁
+    Page *AcquirePageReadLock(const Rid &rid) const;
+
+    // 按页读取优化 - 获取页面写锁
+    Page *AcquirePageWriteLock(const Rid &rid) const;
+
+    // 按页读取优化 - 从已锁定的页面获取记录
+    std::unique_ptr<RmRecord> GetRecordWithLockAcquired(const Rid &rid, const char *page_data) const;
+
+    // 按页读取优化 - 批量获取页面中的多个记录
+    std::vector<std::unique_ptr<RmRecord>> GetRecordsBatch(const std::vector<Rid> &rids, Context *context) const;
 
     Rid insert_record(char *buf, Context *context);
 

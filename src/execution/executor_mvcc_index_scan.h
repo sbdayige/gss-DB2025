@@ -286,11 +286,22 @@ class MvccIndexScanExecutor : public AbstractExecutor {
 
         while (index_scan_ && !index_scan_->is_end()) {
             current_rid_ = index_scan_->rid();
-            // 直接流式处理，避免任何不必要的优化开销
-            auto record = GetVisibleRecord(current_rid_, context_->txn_, &txn_manager, fh_, context_, tab_);
-            if (record && EvaluateConditions(*record, conds_, tab_)) {
-                current_record_ = std::move(record);
-                return;
+
+            // 使用按页读取优化 - 避免重复的页面锁获取
+            try {
+                auto page = fh_->AcquirePageReadLock(current_rid_);
+                auto record = GetVisibleRecordFromPage(current_rid_, page->get_data(),
+                                                       context_->txn_, &txn_manager, fh_, context_, tab_);
+                fh_->buffer_pool_manager_->unpin_page(page->get_page_id(), false);
+
+                if (record && EvaluateConditions(*record, conds_, tab_)) {
+                    current_record_ = std::move(record);
+                    return;
+                }
+            } catch (const RecordNotFoundError &) {
+                // 记录不存在，继续查找下一个
+            } catch (const PageNotExistError &) {
+                // 页面不存在，继续查找下一个
             }
 
             index_scan_->next();

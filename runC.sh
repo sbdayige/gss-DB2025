@@ -26,3 +26,7 @@ rm -f test_commands.sql
 # python3 TPCC-Tester/db/load.py -w 1 -o src/test/performance_test/table_data
 
 #python3 TPCC-Tester/runner.py --prepare --thread 8 --rw 120 --analyze --w 1
+
+#python3 TPCC-Tester/runner.py --prepare --analyze --w 1
+
+#python main.py -w 1 -p zucc20252025 -t /home/ac/Desktop/workspace/database/TPCC-Tester -f /home/ac/Desktop/workspace/database/DB2025/FlameGraph -m normal

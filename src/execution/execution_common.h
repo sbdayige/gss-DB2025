@@ -115,6 +115,26 @@ std::unique_ptr<RmRecord> GetVisibleRecord(const Rid& rid, Transaction* txn, Tra
                                            RmFileHandle* fh, Context* context, const TabMeta& tab_meta);
 
 /**
+ * @brief 按页读取优化 - 从已锁定页面获取可见记录
+ * @param rid 记录ID
+ * @param page_data 页面数据指针
+ * @param txn 当前事务
+ * @param txn_mgr 事务管理器
+ * @param fh 文件句柄
+ * @param context 执行上下文
+ * @param tab_meta 表元数据
+ * @return 可见的记录版本，如果不可见则返回nullptr
+ */
+std::unique_ptr<RmRecord> GetVisibleRecordFromPage(
+    const Rid& rid,
+    const char* page_data,
+    Transaction* txn,
+    TransactionManager* txn_mgr,
+    RmFileHandle* fh,
+    Context* context,
+    const TabMeta& tab_meta);
+
+/**
  * @brief 从UndoLog恢复记录
  * @param undo_log 撤销日志
  * @param tab_meta 表元数据
