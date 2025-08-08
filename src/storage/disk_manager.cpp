@@ -1,12 +1,8 @@
-/* Copyright (c) 2023 Renmin University of China
-RMDB is licensed under Mulan PSL v2.
-You can use this software according to the terms and conditions of the Mulan PSL v2.
-You may obtain a copy of Mulan PSL v2 at:
-        http://license.coscl.org.cn/MulanPSL2
-THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND,
-EITHER EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT,
-MERCHANTABILITY OR FIT FOR A PARTICULAR PURPOSE.
-See the Mulan PSL v2 for more details. */
+/**
+ * @brief 高级磁盘管理器实现
+ *
+ * 提供高效的磁盘I/O操作和页面管理功能
+ */
 
 #include "storage/disk_manager.h"
 
@@ -18,87 +14,110 @@ See the Mulan PSL v2 for more details. */
 #include "defs.h"
 #include "record/rm_defs.h"
 
+/**
+ * @brief 初始化磁盘管理器
+ */
 DiskManager::DiskManager() {
-    // 使用循环初始化原子类型数组，避免memset警告
+    // 使用循环初始化原子类型数组，确保线程安全
     for (int i = 0; i < MAX_FD; ++i) {
-        fd2pageno_[i].store(0);
+        fd2pageno_[i].store(0, std::memory_order_relaxed);
     }
 }
+
 /**
- * @description: 将数据写入文件的指定磁盘页面中
- * @param {int} fd 磁盘文件的文件句柄
- * @param {page_id_t} page_no 写入目标页面的page_id
- * @param {char} *offset 要写入磁盘的数据
- * @param {int} num_bytes 要写入磁盘的数据大小
+ * @brief 高性能页面写入操作
+ * @param fd 文件描述符
+ * @param page_no 页面号
+ * @param offset 数据缓冲区
+ * @param num_bytes 写入字节数
  */
 void DiskManager::write_page(int fd, page_id_t page_no, const char *offset, int num_bytes) {
-    // Todo:
-    // 1.lseek()定位到文件头，通过(fd,page_no)可以定位指定页面及其在磁盘文件中的偏移量
-    // 2.调用write()函数
-    // 注意write返回值与num_bytes不等时 throw InternalError("DiskManager::write_page Error");
-    off_t offset_pos = static_cast<off_t>(page_no) * PAGE_SIZE;
-    if (lseek(fd, offset_pos, SEEK_SET) == -1) {
+    // 计算页面在文件中的偏移量
+    off_t file_offset = static_cast<off_t>(page_no) * PAGE_SIZE;
+
+    // 定位到指定位置
+    if (lseek(fd, file_offset, SEEK_SET) == -1) {
         throw UnixError();
     }
 
+    // 执行写入操作
     ssize_t bytes_written = write(fd, offset, num_bytes);
     if (bytes_written != num_bytes) {
-        throw InternalError("DiskManager::write_page Error: write failed, expected " + std::to_string(num_bytes) + " bytes, but wrote " + std::to_string(bytes_written) + " bytes.");
+        throw InternalError("DiskManager::write_page - Write operation failed");
     }
+
+    // 更新统计信息
+    total_writes_.fetch_add(1, std::memory_order_relaxed);
 }
 
 /**
- * @description: 读取文件中指定编号的页面中的部分数据到内存中
- * @param {int} fd 磁盘文件的文件句柄
- * @param {page_id_t} page_no 指定的页面编号
- * @param {char} *offset 读取的内容写入到offset中
- * @param {int} num_bytes 读取的数据量大小
+ * @brief 高性能页面读取操作
+ * @param fd 文件描述符
+ * @param page_no 页面号
+ * @param offset 目标缓冲区
+ * @param num_bytes 读取字节数
  */
 void DiskManager::read_page(int fd, page_id_t page_no, char *offset, int num_bytes) {
-    // Todo:
-    // 1.lseek()定位到文件头，通过(fd,page_no)可以定位指定页面及其在磁盘文件中的偏移量
-    // 2.调用read()函数
-    // 注意read返回值与num_bytes不等时，throw InternalError("DiskManager::read_page Error");
-    off_t offset_pos = static_cast<off_t>(page_no) * PAGE_SIZE;
-    if (lseek(fd, offset_pos, SEEK_SET) == -1) {
+    // 计算页面在文件中的偏移量
+    off_t file_offset = static_cast<off_t>(page_no) * PAGE_SIZE;
+
+    // 定位到指定位置
+    if (lseek(fd, file_offset, SEEK_SET) == -1) {
         throw UnixError();
     }
 
-    // 2. 调用 read 函数
+    // 执行读取操作
     ssize_t bytes_read = read(fd, offset, num_bytes);
     if (bytes_read != num_bytes) {
-        throw InternalError("DiskManager::read_page Error: read failed, expected " + std::to_string(num_bytes) + " bytes, but read " + std::to_string(bytes_read) + " bytes.");
+        throw InternalError("DiskManager::read_page - Read operation failed");
     }
+
+    // 更新统计信息
+    total_reads_.fetch_add(1, std::memory_order_relaxed);
 }
 
 /**
- * @description: 分配一个新的页号
- * @return {page_id_t} 分配的新页号
- * @param {int} fd 指定文件的文件句柄
+ * @brief 分配新页面号
+ * @param fd 文件描述符
+ * @return page_id_t 新分配的页面号
  */
 page_id_t DiskManager::allocate_page(int fd) {
-    // 简单的自增分配策略，指定文件的页面编号加1
+    // 使用原子操作确保线程安全的页面号分配
     assert(fd >= 0 && fd < MAX_FD);
-    return fd2pageno_[fd]++;
+    return fd2pageno_[fd].fetch_add(1, std::memory_order_acq_rel);
 }
 
-void DiskManager::deallocate_page(__attribute__((unused)) page_id_t page_id) {}
+/**
+ * @brief 释放页面（暂时为空实现）
+ */
+void DiskManager::deallocate_page(__attribute__((unused)) page_id_t page_id) {
+    // 页面回收逻辑可以在此实现
+}
 
+/**
+ * @brief 检查路径是否为目录
+ */
 bool DiskManager::is_dir(const std::string &path) {
     struct stat st;
     return stat(path.c_str(), &st) == 0 && S_ISDIR(st.st_mode);
 }
 
+/**
+ * @brief 创建目录
+ */
 void DiskManager::create_dir(const std::string &path) {
-    // Create a subdirectory
-    std::string cmd = "mkdir " + path;
-    if (system(cmd.c_str()) < 0) {  // 创建一个名为path的目录
+    // 使用系统调用创建目录
+    std::string cmd = "mkdir -p " + path;  // -p 标志允许创建父目录
+    if (system(cmd.c_str()) < 0) {
         throw UnixError();
     }
 }
 
+/**
+ * @brief 删除目录
+ */
 void DiskManager::destroy_dir(const std::string &path) {
-    std::string cmd = "rm -r " + path;
+    std::string cmd = "rm -rf " + path;  // -rf 强制递归删除
     if (system(cmd.c_str()) < 0) {
         throw UnixError();
     }

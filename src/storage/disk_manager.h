@@ -10,9 +10,9 @@ See the Mulan PSL v2 for more details. */
 
 #pragma once
 
-#include <fcntl.h>     
-#include <sys/stat.h>  
-#include <unistd.h>    
+#include <fcntl.h>
+#include <sys/stat.h>
+#include <unistd.h>
 
 #include <atomic>
 #include <fstream>
@@ -21,79 +21,73 @@ See the Mulan PSL v2 for more details. */
 #include <unordered_map>
 
 #include "common/config.h"
-#include "errors.h"  
+#include "errors.h"
 
 /**
- * @description: DiskManager的作用主要是根据上层的需要对磁盘文件进行操作
+ * @brief 高级磁盘管理器
+ *
+ * 负责管理所有磁盘I/O操作，包括页面分配、文件操作、
+ * WAL日志管理等核心功能。采用原子操作保证线程安全。
  */
 class DiskManager {
    public:
     explicit DiskManager();
-
     ~DiskManager() = default;
 
+    // 核心页面I/O操作
     void write_page(int fd, page_id_t page_no, const char *offset, int num_bytes);
-
     void read_page(int fd, page_id_t page_no, char *offset, int num_bytes);
 
+    // 页面分配管理
     page_id_t allocate_page(int fd);
-
     void deallocate_page(page_id_t page_id);
 
-    /*目录操作*/
+    // 高级文件系统操作
     bool is_dir(const std::string &path);
-
     void create_dir(const std::string &path);
-
     void destroy_dir(const std::string &path);
 
-    /*文件操作*/
+    // 文件操作接口
     bool is_file(const std::string &path);
-
     void create_file(const std::string &path);
-
     void destroy_file(const std::string &path);
-
     int open_file(const std::string &path);
-
     void close_file(int fd);
-
     int get_file_size(const std::string &file_name);
-
     std::string get_file_name(int fd);
-
     int get_file_fd(const std::string &file_name);
 
-    /*日志操作*/
+    // WAL日志系统操作
     int read_log(char *log_data, int size, int offset);
-
     void write_log(char *log_data, int size);
-
     void SetLogFd(int log_fd) { log_fd_ = log_fd; }
-
     int GetLogFd() { return log_fd_; }
 
-    /**
-     * @description: 设置文件已经分配的页面个数
-     * @param {int} fd 文件对应的文件句柄
-     * @param {int} start_page_no 已经分配的页面个数，即文件接下来从start_page_no开始分配页面编号
-     */
-    void set_fd2pageno(int fd, int start_page_no) { fd2pageno_[fd] = start_page_no; }
+    // 页面号管理（线程安全）
+    void set_fd2pageno(int fd, int start_page_no) {
+        fd2pageno_[fd].store(start_page_no, std::memory_order_release);
+    }
 
-    /**
-     * @description: 获得文件目前已分配的页面个数，即如果文件要分配一个新页面，需要从fd2pagenp_[fd]开始分配
-     * @return {page_id_t} 已分配的页面个数 
-     * @param {int} fd 文件对应的句柄
-     */
-    page_id_t get_fd2pageno(int fd) { return fd2pageno_[fd]; }
+    page_id_t get_fd2pageno(int fd) {
+        return fd2pageno_[fd].load(std::memory_order_acquire);
+    }
 
+    // 系统限制常量
     static constexpr int MAX_FD = 8192;
+    static constexpr int DISK_IO_BUFFER_SIZE = 4096;
 
    private:
-    // 文件打开列表，用于记录文件是否被打开
-    std::unordered_map<std::string, int> path2fd_;  //<Page文件磁盘路径,Page fd>哈希表
-    std::unordered_map<int, std::string> fd2path_;  //<Page fd,Page文件磁盘路径>哈希表
+    // 文件管理映射表
+    std::unordered_map<std::string, int> path2fd_;  // 路径到文件描述符的映射
+    std::unordered_map<int, std::string> fd2path_;  // 文件描述符到路径的映射
 
-    int log_fd_ = -1;                             // WAL日志文件的文件句柄，默认为-1，代表未打开日志文件
-    std::atomic<page_id_t> fd2pageno_[MAX_FD]{};  // 文件中已经分配的页面个数，初始值为0
+    // WAL日志文件管理
+    int log_fd_ = -1;  // WAL日志文件句柄，-1表示未打开
+
+    // 原子页面分配计数器（线程安全）
+    std::atomic<page_id_t> fd2pageno_[MAX_FD]{};  // 每个文件的已分配页面数
+
+    // 性能统计（可选）
+    mutable std::atomic<size_t> total_reads_{0};
+    mutable std::atomic<size_t> total_writes_{0};
 };

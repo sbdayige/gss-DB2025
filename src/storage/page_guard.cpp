@@ -1,34 +1,50 @@
+/**
+ * @brief 智能页面守护系统实现
+ *
+ * 提供高效的RAII风格页面管理和自动资源清理
+ */
+
 #include "storage/page_guard.h"
 
 #include "storage/buffer_pool_manager.h"
 
-// BasicPageGuard 实现
+// ============= BasicPageGuard 实现 =============
 
+/**
+ * @brief 移动构造函数
+ */
 BasicPageGuard::BasicPageGuard(BasicPageGuard &&that) noexcept
     : bpi_(that.bpi_), page_(that.page_), is_dirty_(that.is_dirty_) {
-    // 将 that 的资源转移给当前对象后，清空 that 的资源
+    // 清空源对象资源，确保资源只被一个对象持有
     that.bpi_ = nullptr;
     that.page_ = nullptr;
     that.is_dirty_ = false;
 }
 
+/**
+ * @brief 手动释放页面资源
+ */
 void BasicPageGuard::Drop() {
     if (page_ != nullptr && bpi_ != nullptr) {
-        // 如果页面被修改过，需要标记为脏页
+        // 释放页面并根据脏位决定是否需要写回
         bpi_->unpin_page(page_->get_page_id(), is_dirty_);
-        // 清空所有内容
+
+        // 重置所有状态
         bpi_ = nullptr;
         page_ = nullptr;
         is_dirty_ = false;
     }
 }
 
+/**
+ * @brief 移动赋值操作符
+ */
 auto BasicPageGuard::operator=(BasicPageGuard &&that) noexcept -> BasicPageGuard & {
     if (this != &that) {
-        // 如果当前对象已经管理着一个页面，需要先释放它
+        // 首先释放当前管理的资源
         Drop();
 
-        // 转移资源
+        // 转移新资源
         bpi_ = that.bpi_;
         page_ = that.page_;
         is_dirty_ = that.is_dirty_;
