@@ -28,14 +28,14 @@ extern std::chrono::duration<int64_t> log_timeout;
 
 constexpr int IX_NO_SLOT = -1;
 static constexpr int INVALID_FILE_ID = -1;
-static constexpr int INVALID_FRAME_ID = -1;               // invalid frame id
-static constexpr int INVALID_PAGE_ID = -1;                // invalid page id
-static constexpr int INVALID_TXN_ID = -1;                 // invalid transaction id
-static constexpr int INVALID_TIMESTAMP = -1;              // invalid transaction timestamp
-static constexpr int INVALID_LSN = -1;                    // invalid log sequence number
-static constexpr int HEADER_PAGE_ID = 0;                  // the header page id
-static constexpr int PAGE_SIZE = 4096;                    // size of a data page in byte  4KB
-static constexpr int BUFFER_POOL_SIZE = 1024 * 1024 / 4;  // 恢复到原来的大小
+static constexpr int INVALID_FRAME_ID = -1;              // invalid frame id
+static constexpr int INVALID_PAGE_ID = -1;               // invalid page id
+static constexpr int INVALID_TXN_ID = -1;                // invalid transaction id
+static constexpr int INVALID_TIMESTAMP = -1;             // invalid transaction timestamp
+static constexpr int INVALID_LSN = -1;                   // invalid log sequence number
+static constexpr int HEADER_PAGE_ID = 0;                 // the header page id
+static constexpr int PAGE_SIZE = 4096;                   // size of a data page in byte  4KB
+static constexpr int BUFFER_POOL_SIZE = 1024 * 256 / 4;  // 恢复到原来的大小
 static constexpr int BUFFER_POOL_INSTANCE_SIZE = 8;
 
 static constexpr int LOG_BUFFER_SIZE = (1024 * PAGE_SIZE);  // size of a log buffer in byte
