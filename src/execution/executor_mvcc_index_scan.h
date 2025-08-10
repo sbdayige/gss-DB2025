@@ -175,16 +175,32 @@ class MvccIndexScanExecutor : public AbstractExecutor {
             return false;
         }
 
-        // 假设表的第一列是int类型的key（根据调试输出中的id字段）
-        char key_data[sizeof(int)];
-        memcpy(key_data, record->data, sizeof(int));
+        // 构造完整的复合索引键
+        size_t key_size = 0;
+        for (const auto &col : index_cols_) {
+            key_size += col.len;
+        }
+        char *key_data = new char[key_size];
+        memset(key_data, 0, key_size);
+
+        size_t offset = 0;
+        for (size_t i = 0; i < index_cols_.size(); ++i) {
+            size_t col_offset = 0;
+            for (const auto &col : tab_.cols) {
+                if (col.name == index_cols_[i].name) {
+                    memcpy(key_data + offset, record->data + col_offset, index_cols_[i].len);
+                    break;
+                }
+                col_offset += col.len;
+            }
+            offset += index_cols_[i].len;
+        }
 
         // 使用get_value获取该key的所有RID（包括溢出页中的）
         ih_->get_value(key_data, &all_rids, context_->txn_);
-
+        delete[] key_data;
         // 使用批量读取优化：按页面分组RID，减少页面读取次数
         auto results = GetVisibleRecordBatch(all_rids, context_->txn_, &txn_manager, fh_, context_, tab_);
-
         // 遍历结果，找到第一个可见且满足条件的记录
         for (const auto &result : results) {
             if (result.is_visible && result.record) {
@@ -195,7 +211,6 @@ class MvccIndexScanExecutor : public AbstractExecutor {
                 }
             }
         }
-
         return false;  // 没有找到可见的记录
     }
 
@@ -256,7 +271,6 @@ class MvccIndexScanExecutor : public AbstractExecutor {
                 break;
             }
         }
-
         if (eq_prefix_len > 0) {
             lower_key = new char[key_size];
             upper_key = new char[key_size];
