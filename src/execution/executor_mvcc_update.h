@@ -69,11 +69,6 @@ class MvccUpdateExecutor : public AbstractExecutor {
             auto record = fh_->get_record(rid, context_);
             auto old_record = *record;
             records_.push_back(std::make_unique<RmRecord>(old_record));
-            // Debug: 打印旧记录内容
-            if (old_record.size >= 8) {
-                int old_id = *(int *)(old_record.data);
-                int old_score = *(int *)(old_record.data + 4);
-            }
             // 4. 构造新记录（根据SET子句修改相应字段）
             RmRecord new_record = old_record;
             for (const auto &set_clause : set_clauses_) {
@@ -127,13 +122,6 @@ class MvccUpdateExecutor : public AbstractExecutor {
 
                 memcpy(new_record.data + lhs_col->offset, value.raw->data, lhs_col->len);
             }
-
-            // Debug: 打印新记录内容
-            if (new_record.size >= 8) {
-                int new_id = *(int *)(new_record.data);
-                int new_score = *(int *)(new_record.data + 4);
-            }
-            // 5. 检查唯一索引约束（在删除前检查）
             for (const auto &index : tab_.indexes) {
                 auto key = std::make_unique<char[]>(index.col_tot_len);
                 int offset = 0;

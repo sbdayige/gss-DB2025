@@ -117,13 +117,6 @@ class MvccIndexScanExecutor : public AbstractExecutor {
     }
 
     void beginTuple() override {
-        if (has_lower_ && lower_key_ && index_cols_[0].len >= 4) {
-            int lower_val = *(int *)(lower_key_);
-        }
-        if (has_upper_ && upper_key_ && index_cols_[0].len >= 4) {
-            int upper_val = *(int *)(upper_key_);
-        }
-
         if (has_lower_ && has_upper_) {
             auto lower_iid = ih_->lower_bound(lower_key_);
             auto upper_iid = ih_->upper_bound(upper_key_);
@@ -137,9 +130,6 @@ class MvccIndexScanExecutor : public AbstractExecutor {
             auto upper_iid = ih_->upper_bound(upper_key_);
             index_scan_ = std::make_unique<IxScan>(ih_, lower_iid, upper_iid, fh_->buffer_pool_manager_);
         } else {
-            auto initial_lower = ih_->leaf_begin();
-            auto initial_upper = ih_->leaf_end();
-            // 强制重新获取索引边界以确保包含最新更新
             auto fresh_lower = ih_->leaf_begin();
             auto fresh_upper = ih_->leaf_end();
             index_scan_ = std::make_unique<IxScan>(ih_, fresh_lower, fresh_upper, fh_->buffer_pool_manager_);
@@ -363,7 +353,6 @@ class MvccIndexScanExecutor : public AbstractExecutor {
         if (!ix_scan) {
             return false;
         }
-        Iid current_iid = ix_scan->iid();
         Rid resolved_rid = index_scan_->rid();
         auto page = fh_->AcquirePageReadLock(resolved_rid);
         auto record = fh_->get_record(resolved_rid, context_);
