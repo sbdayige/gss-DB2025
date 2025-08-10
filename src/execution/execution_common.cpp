@@ -436,24 +436,13 @@ std::unique_ptr<RmRecord> GetVisibleRecord(const Rid& rid, Transaction* txn, Tra
     UndoLink link = version_link->prev_;
     while (true) {
         if (link.prev_txn_ == INVALID_TXN_ID) {
-            // 回溯到链尾，检查INSERT操作的可见性
-            auto insert_version_link = txn_mgr->GetVersionLink(fh->GetFd(), rid);
-            if (insert_version_link.has_value()) {
-                UndoLink insert_link = insert_version_link->prev_;
-                auto insert_undo_log = GetUndoLog(txn_mgr, insert_link);
-                if (insert_undo_log) {
-                    Transaction* insert_txn = txn_mgr->find_transaction(insert_link.prev_txn_);
-                    if (insert_txn && insert_txn->get_state() == TransactionState::COMMITTED &&
-                        insert_txn->get_commit_ts() < txn->get_start_ts()) {
-                        // 使用按页读取优化的新接口
-                        auto page = fh->AcquirePageReadLock(rid);
-                        auto record = fh->GetRecordWithLockAcquired(rid, page->get_data());
-                        fh->buffer_pool_manager_->unpin_page(page->get_page_id(), false);
-                        return record;
-                    }
-                }
+            // 使用按页读取优化的新接口获取原始记录
+            auto page = fh->AcquirePageReadLock(rid);
+            auto record = fh->GetRecordWithLockAcquired(rid, page->get_data());
+            fh->buffer_pool_manager_->unpin_page(page->get_page_id(), false);
+            if (record) {
+                return record;
             }
-            return nullptr;  // 记录不可见
         }
 
         auto undo_log = GetUndoLog(txn_mgr, link);
