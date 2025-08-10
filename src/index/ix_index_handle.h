@@ -234,6 +234,16 @@ class IxIndexHandle {
 
     Iid leaf_begin() const;
 
+    /**
+     * @brief 公共接口：获取溢出页中的所有RID
+     * @param page_no 溢出页页号
+     * @param result 存储结果的向量
+     * @note 这是get_all_rids_from_page的公共包装器
+     */
+    void get_overflow_page_rids(page_id_t page_no, std::vector<Rid> *result) const {
+        get_all_rids_from_page(page_no, result);
+    }
+
    private:
     // 辅助函数
     void update_root_page_no(page_id_t root) { file_hdr_->root_page_ = root; }

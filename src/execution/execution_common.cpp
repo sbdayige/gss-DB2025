@@ -425,17 +425,24 @@ bool IsRecordVisible(const Rid& rid, Transaction* txn, TransactionManager* txn_m
  */
 std::unique_ptr<RmRecord> GetVisibleRecord(const Rid& rid, Transaction* txn, TransactionManager* txn_mgr,
                                            RmFileHandle* fh, Context* context, const TabMeta& tab_meta) {
+    std::cout << "[DEBUG Visibility] Checking visibility for rid(" << rid.page_no << "," << rid.slot_no
+              << ") by txn_id=" << txn->get_transaction_id() << " start_ts=" << txn->get_start_ts() << std::endl;
+
     auto version_link = txn_mgr->GetVersionLink(fh->GetFd(), rid);
     if (!version_link.has_value()) {
+        std::cout << "[DEBUG Visibility] No version link found, record is directly visible" << std::endl;
         // 使用按页读取优化的新接口
         auto page = fh->AcquirePageReadLock(rid);
         auto record = fh->GetRecordWithLockAcquired(rid, page->get_data());
         fh->buffer_pool_manager_->unpin_page(page->get_page_id(), false);
         return record;
     }
+
+    std::cout << "[DEBUG Visibility] Found version link, starting version traversal" << std::endl;
     UndoLink link = version_link->prev_;
     while (true) {
         if (link.prev_txn_ == INVALID_TXN_ID) {
+            std::cout << "[DEBUG Visibility] Reached end of version chain, checking INSERT visibility" << std::endl;
             // 回溯到链尾，检查INSERT操作的可见性
             auto insert_version_link = txn_mgr->GetVersionLink(fh->GetFd(), rid);
             if (insert_version_link.has_value()) {
@@ -443,16 +450,29 @@ std::unique_ptr<RmRecord> GetVisibleRecord(const Rid& rid, Transaction* txn, Tra
                 auto insert_undo_log = GetUndoLog(txn_mgr, insert_link);
                 if (insert_undo_log) {
                     Transaction* insert_txn = txn_mgr->find_transaction(insert_link.prev_txn_);
+                    std::cout << "[DEBUG Visibility] INSERT txn_id=" << insert_link.prev_txn_;
+                    if (insert_txn) {
+                        std::cout << " state=" << (int)insert_txn->get_state()
+                                  << " commit_ts=" << insert_txn->get_commit_ts();
+                    } else {
+                        std::cout << " (transaction not found)";
+                    }
+                    std::cout << std::endl;
+
                     if (insert_txn && insert_txn->get_state() == TransactionState::COMMITTED &&
                         insert_txn->get_commit_ts() < txn->get_start_ts()) {
+                        std::cout << "[DEBUG Visibility] INSERT is visible (committed before current txn start)" << std::endl;
                         // 使用按页读取优化的新接口
                         auto page = fh->AcquirePageReadLock(rid);
                         auto record = fh->GetRecordWithLockAcquired(rid, page->get_data());
                         fh->buffer_pool_manager_->unpin_page(page->get_page_id(), false);
                         return record;
+                    } else {
+                        std::cout << "[DEBUG Visibility] INSERT not visible (not committed or committed after current txn start)" << std::endl;
                     }
                 }
             }
+            std::cout << "[DEBUG Visibility] Record not visible" << std::endl;
             return nullptr;  // 记录不可见
         }
 
@@ -514,7 +534,7 @@ std::unique_ptr<RmRecord> GetVisibleRecordFromPage(
     RmFileHandle* fh,
     Context* context,
     const TabMeta& tab_meta) {
-        auto version_link = txn_mgr->GetVersionLink(fh->GetFd(), rid);
+    auto version_link = txn_mgr->GetVersionLink(fh->GetFd(), rid);
     if (!version_link.has_value()) {
         // 直接从页面数据获取记录
         return fh->GetRecordWithLockAcquired(rid, page_data);
