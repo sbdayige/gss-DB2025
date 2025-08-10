@@ -370,6 +370,25 @@ bool IxIndexHandle::get_value(const char* key, std::vector<Rid>* result, Transac
 }
 
 /**
+ * @brief 获取指定索引位置的原始RID（未解析溢出页）
+ * @param iid 索引位置
+ * @return 原始RID，可能是溢出页引用
+ */
+Rid IxIndexHandle::get_raw_rid_at_position(const Iid& iid) {
+    IxNodeHandle* node = fetch_node(iid.page_no);
+    if (!node || iid.slot_no >= node->get_size()) {
+        buffer_pool_manager_->unpin_page(node->get_page_id(), false);
+        delete node;
+        throw std::out_of_range("Invalid index position");
+    }
+
+    Rid raw_rid = *node->get_rid(iid.slot_no);
+    buffer_pool_manager_->unpin_page(node->get_page_id(), false);
+    delete node;
+    return raw_rid;
+}
+
+/**
  * @brief  将传入的一个node拆分(Split)成两个结点，在node的右边生成一个新结点new node
  * @param node 需要拆分的结点
  * @return 拆分得到的new_node

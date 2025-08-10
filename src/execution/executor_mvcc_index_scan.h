@@ -157,7 +157,7 @@ class MvccIndexScanExecutor : public AbstractExecutor {
 
    private:
     /**
-     * @brief 处理溢出页索引项，获取所有相关RID并检查可见性
+     * @brief 处理溢出页索引项，获取所有相关RID并检查可见性（优化版本）
      * @return 是否找到了可见的记录
      */
     bool ProcessOverflowPageEntry() {
@@ -182,17 +182,15 @@ class MvccIndexScanExecutor : public AbstractExecutor {
         // 使用get_value获取该key的所有RID（包括溢出页中的）
         ih_->get_value(key_data, &all_rids, context_->txn_);
 
-        // 遍历所有RID，找到第一个可见且满足条件的记录
-        for (const auto &rid : all_rids) {
-            auto page = fh_->AcquirePageReadLock(rid);
-            auto record = GetVisibleRecordFromPage(rid, page->get_data(),
-                                                   context_->txn_, &txn_manager, fh_, context_, tab_);
-            fh_->buffer_pool_manager_->unpin_page(page->get_page_id(), false);
+        // 使用批量读取优化：按页面分组RID，减少页面读取次数
+        auto results = GetVisibleRecordBatch(all_rids, context_->txn_, &txn_manager, fh_, context_, tab_);
 
-            if (record) {
-                if (EvaluateConditions(*record, conds_, tab_)) {
-                    current_record_ = std::move(record);
-                    current_rid_ = rid;
+        // 遍历结果，找到第一个可见且满足条件的记录
+        for (const auto &result : results) {
+            if (result.is_visible && result.record) {
+                if (EvaluateConditions(*result.record, conds_, tab_)) {
+                    current_record_ = std::unique_ptr<RmRecord>(new RmRecord(*result.record));
+                    current_rid_ = result.rid;
                     return true;
                 }
             }
@@ -345,7 +343,7 @@ class MvccIndexScanExecutor : public AbstractExecutor {
     }
 
     /**
-     * @brief 检查当前索引位置是否指向溢出页
+     * @brief 检查当前索引位置是否指向溢出页（高效版本）
      * @return true如果当前位置是溢出页引用
      */
     bool IsCurrentIndexPositionOverflowPage() {
@@ -353,6 +351,14 @@ class MvccIndexScanExecutor : public AbstractExecutor {
         if (!ix_scan) {
             return false;
         }
+
+        // 获取当前索引位置的ID
+        Iid current_iid = ix_scan->iid();
+
+        Rid raw_rid = ih_->get_raw_rid_at_position(current_iid);
+        bool is_overflow = (raw_rid.slot_no == IX_NO_SLOT && raw_rid.page_no != IX_NO_PAGE);
+        return is_overflow;
+        // 如果获取失败，回退到原来的方法
         Rid resolved_rid = index_scan_->rid();
         auto page = fh_->AcquirePageReadLock(resolved_rid);
         auto record = fh_->get_record(resolved_rid, context_);
@@ -365,7 +371,6 @@ class MvccIndexScanExecutor : public AbstractExecutor {
         memcpy(key_data, record->data, sizeof(int));
         std::vector<Rid> all_rids;
         ih_->get_value(key_data, &all_rids, context_->txn_);
-        bool is_overflow = all_rids.size() > 1;
-        return is_overflow;
+        return all_rids.size() > 1;
     };
 };

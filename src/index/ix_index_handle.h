@@ -189,6 +189,13 @@ class IxIndexHandle {
     // for search
     bool get_value(const char *key, std::vector<Rid> *result, Transaction *transaction);
 
+    /**
+     * @brief 获取指定索引位置的原始RID（未解析溢出页）
+     * @param iid 索引位置
+     * @return 原始RID，可能是溢出页引用
+     */
+    Rid get_raw_rid_at_position(const Iid &iid);
+
     std::pair<IxNodeHandle *, bool> find_leaf_page(const char *key, Operation operation, Transaction *transaction,
                                                    bool find_first = false);
     void create_new_root(const char *key, const Rid &value);
