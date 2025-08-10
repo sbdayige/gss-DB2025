@@ -56,34 +56,23 @@ class MvccUpdateExecutor : public AbstractExecutor {
     }
 
     std::unique_ptr<RmRecord> Next() override {
-        std::cout << "[DEBUG UPDATE] Starting UPDATE operation for " << rids_.size() << " records" << std::endl;
-
         for (auto &rid : rids_) {
-            std::cout << "[DEBUG UPDATE] Processing record at rid(" << rid.page_no << "," << rid.slot_no
-                      << ") by txn_id=" << context_->txn_->get_transaction_id() << std::endl;
-
             // 1. 可见性检查：跳过对当前事务不可见的记录
             if (!IsRecordVisible(rid, fh_, &txn_manager, context_)) {
-                std::cout << "[DEBUG UPDATE] Record not visible, skipping" << std::endl;
                 continue;
             }
-            std::cout << "[DEBUG UPDATE] Record is visible, proceeding with update" << std::endl;
-
             // 2. 写锁冲突检测：如果有写锁冲突则抛出异常
             if (!CheckWriteConflict(rid, fh_, &txn_manager, context_)) {
                 throw TransactionAbortException(context_->txn_->get_transaction_id(), AbortReason::DEADLOCK_PREVENTION);
             }
-
             // 3. 获取当前记录用于生成新记录
             auto record = fh_->get_record(rid, context_);
             auto old_record = *record;
             records_.push_back(std::make_unique<RmRecord>(old_record));
-
             // Debug: 打印旧记录内容
             if (old_record.size >= 8) {
                 int old_id = *(int *)(old_record.data);
                 int old_score = *(int *)(old_record.data + 4);
-                std::cout << "[DEBUG UPDATE] Old record content: id=" << old_id << " score=" << old_score << std::endl;
             }
             // 4. 构造新记录（根据SET子句修改相应字段）
             RmRecord new_record = old_record;
@@ -143,9 +132,7 @@ class MvccUpdateExecutor : public AbstractExecutor {
             if (new_record.size >= 8) {
                 int new_id = *(int *)(new_record.data);
                 int new_score = *(int *)(new_record.data + 4);
-                std::cout << "[DEBUG UPDATE] New record content: id=" << new_id << " score=" << new_score << std::endl;
             }
-
             // 5. 检查唯一索引约束（在删除前检查）
             for (const auto &index : tab_.indexes) {
                 auto key = std::make_unique<char[]>(index.col_tot_len);
@@ -154,24 +141,26 @@ class MvccUpdateExecutor : public AbstractExecutor {
                     memcpy(key.get() + offset, new_record.data + index.cols[j].offset, index.cols[j].len);
                     offset += index.cols[j].len;
                 }
-
-                // 检查索引是否已存在
                 std::vector<Rid> result;
                 auto ih = sm_manager.ihs_.at(sm_manager.get_ix_manager()->get_index_name(tab_name_, index.cols)).get();
                 bool is_exist = ih->get_value(key.get(), &result, context_->txn_);
-
                 if (is_exist) {
-                    // 检查是否存在除当前记录外的其他记录
+                    bool has_conflict = false;
                     for (const auto &r : result) {
                         if (r.page_no != rid.page_no || r.slot_no != rid.slot_no) {
-                            throw RMDBError("Failed to insert into index, rolled back record insertion at AbstractExecutor");
+                            bool is_visible = IsRecordVisible(r, fh_, &txn_manager, context_);
+                            if (is_visible) {
+                                has_conflict = true;
+                            }
                         }
+                    }
+                    if (has_conflict) {
+                        throw RMDBError("Failed to insert into index, rolled back record insertion at AbstractExecutor");
                     }
                 }
             }
 
             // 6.2 创建删除的undo log
-            std::cout << "[DEBUG UPDATE] Creating DELETE undo log for rid(" << rid.page_no << "," << rid.slot_no << ")" << std::endl;
             UndoLog undo_log = CreateDeleteUndoLog(old_record, rid, tab_, fh_, &txn_manager, context_);
             context_->txn_->AppendUndoLog(undo_log);
 
@@ -184,7 +173,6 @@ class MvccUpdateExecutor : public AbstractExecutor {
             version_link.in_progress_ = true;
 
             txn_manager.UpdateVersionLink(fh_->GetFd(), rid, version_link, [](std::optional<VersionUndoLink>) { return true; });
-            std::cout << "[DEBUG UPDATE] Updated version link for DELETE operation" << std::endl;
 
             // 6.3 记录DELETE日志
             // if (context_ && context_->txn_ && context_->log_mgr_) {
@@ -203,10 +191,7 @@ class MvccUpdateExecutor : public AbstractExecutor {
 
             // 7.2 插入新记录到表中
             Rid new_rid = fh_->insert_record(new_record.data, context_);
-            std::cout << "[DEBUG UPDATE] Inserted new record at rid(" << new_rid.page_no << "," << new_rid.slot_no << ")" << std::endl;
-
             // 7.3 插入索引项
-            std::cout << "[DEBUG UPDATE] Inserting index entries for " << tab_.indexes.size() << " indexes" << std::endl;
             for (const auto &index : tab_.indexes) {
                 auto key = std::make_unique<char[]>(index.col_tot_len);
                 int offset = 0;
@@ -214,22 +199,11 @@ class MvccUpdateExecutor : public AbstractExecutor {
                     memcpy(key.get() + offset, new_record.data + index.cols[j].offset, index.cols[j].len);
                     offset += index.cols[j].len;
                 }
-
-                // Debug: 打印索引键值
-                if (index.col_tot_len >= 4) {
-                    int key_value = *(int *)(key.get());
-                    std::cout << "[DEBUG UPDATE] Inserting index entry: key=" << key_value
-                              << " -> rid(" << new_rid.page_no << "," << new_rid.slot_no << ")" << std::endl;
-                }
-
                 auto ih = sm_manager.ihs_.at(sm_manager.get_ix_manager()->get_index_name(tab_name_, index.cols)).get();
                 page_id_t res = ih->insert_entry(key.get(), new_rid, context_->txn_);
 
                 if (res == INVALID_PAGE_ID) {
-                    std::cout << "[DEBUG UPDATE] Failed to insert index entry!" << std::endl;
                     throw RMDBError("Failed to insert into index, rolled back record insertion at AbstractExecutor");
-                } else {
-                    std::cout << "[DEBUG UPDATE] Successfully inserted index entry" << std::endl;
                 }
             }
 
@@ -238,7 +212,6 @@ class MvccUpdateExecutor : public AbstractExecutor {
             context_->txn_->AppendUndoLog(insert_undo_log);
 
             // 7.5 创建INSERT的版本链
-            std::cout << "[DEBUG UPDATE] Creating INSERT undo log for new rid(" << new_rid.page_no << "," << new_rid.slot_no << ")" << std::endl;
             UndoLink insert_link;
             insert_link.prev_txn_ = context_->txn_->get_transaction_id();
             insert_link.prev_log_idx_ = context_->txn_->GetUndoLogNum() - 1;
@@ -248,7 +221,6 @@ class MvccUpdateExecutor : public AbstractExecutor {
             insert_version_link.in_progress_ = true;
 
             txn_manager.UpdateVersionLink(fh_->GetFd(), new_rid, insert_version_link, [](std::optional<VersionUndoLink>) { return true; });
-            std::cout << "[DEBUG UPDATE] Updated version link for INSERT operation" << std::endl;
 
             // 7.6 记录INSERT日志
             // if (context_ && context_->txn_ && context_->log_mgr_) {
@@ -260,11 +232,7 @@ class MvccUpdateExecutor : public AbstractExecutor {
 
             WriteRecord *insert_write_record = new WriteRecord(WType::INSERT_TUPLE, tab_name_, new_rid, new_record);
             context_->txn_->append_write_record(insert_write_record);
-
-            std::cout << "[DEBUG UPDATE] UPDATE operation completed: old_rid(" << rid.page_no << "," << rid.slot_no
-                      << ") -> new_rid(" << new_rid.page_no << "," << new_rid.slot_no << ")" << std::endl;
         }
-        std::cout << "[DEBUG UPDATE] All UPDATE operations completed" << std::endl;
         return nullptr;
     }
 

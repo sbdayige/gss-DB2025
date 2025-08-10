@@ -214,12 +214,11 @@ void TransactionManager::abort(Context* context, LogManager* log_manager) {
             auto rec = (*iter)->GetRecord();
             handle->delete_record(rid, context);
             sm_manager.delete_index_with_rid(table_name, rec, rid, context->txn_);
+            DeleteUpdateVersionLink(handle->GetFd(), rid, context->txn_);
         } else if (write_type == WType::DELETE_TUPLE) {
             auto rec = (*iter)->GetRecord();
             RestoreIndexForRecord(table_name, rec, rid, context);
         }
-        // 删除版本链记录
-        DeleteUpdateVersionLink(handle->GetFd(), rid, context->txn_);
     }
 
     // 释放所有锁

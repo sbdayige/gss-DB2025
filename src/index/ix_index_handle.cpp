@@ -851,56 +851,34 @@ void IxIndexHandle::create_new_root(const char* key, const Rid& value) {
 }
 
 bool IxIndexHandle::insert_into_leaf(const char* key, const Rid& value, IxNodeHandle* leaf_node) {
-    std::cout << "[DEBUG INSERT] Inserting key with RID(" << value.page_no << "," << value.slot_no
-              << ") into leaf page " << leaf_node->get_page_no() << std::endl;
-
     int pos = leaf_node->lower_bound(key);
-    std::cout << "[DEBUG INSERT] Insert position: " << pos << " in leaf with "
-              << leaf_node->page_hdr->num_key << " keys" << std::endl;
-
     // 检查是否存在完全相同的键值对（键和RID都相同）
     if (pos < leaf_node->page_hdr->num_key &&
         ix_compare(leaf_node->get_key(pos), key, file_hdr_->col_types_, file_hdr_->col_lens_) == 0) {
-        // 键相同，检查RID是否也相同
         auto existing_rid = leaf_node->get_rid(pos);
         if (existing_rid->page_no == value.page_no && existing_rid->slot_no == value.slot_no) {
-            // 完全相同的键值对，不需要重复插入
             return true;  // 返回true表示操作成功
         }
-
-        // 键相同但RID不同，需要处理重复键
-        std::cout << "[DEBUG INSERT] Found duplicate key, handling overflow page" << std::endl;
-        // 检查是否已经是溢出页引用
         if (existing_rid->slot_no == IX_NO_SLOT && existing_rid->page_no != IX_NO_PAGE) {
             // 已经是溢出页，直接插入到溢出页
-            std::cout << "[DEBUG INSERT] Adding to existing overflow page " << existing_rid->page_no << std::endl;
             insert_into_page(value, existing_rid->page_no);
         } else {
             // 创建新的溢出页
             page_id_t overflow_page_no = create_page();
-            std::cout << "[DEBUG INSERT] Created new overflow page " << overflow_page_no << std::endl;
             // 将原记录和新记录都插入溢出页
             insert_into_page(*existing_rid, overflow_page_no);
             insert_into_page(value, overflow_page_no);
             // 更新原RID为溢出页引用
             leaf_node->set_rid(pos, Rid{overflow_page_no, IX_NO_SLOT});
-            std::cout << "[DEBUG INSERT] Updated index pos " << pos << " to point to overflow page" << std::endl;
         }
         return true;
     }
-
     // 插入键值对
-    std::cout << "[DEBUG INSERT] Inserting new key-value pair at position " << pos << std::endl;
     leaf_node->insert_pair(pos, key, value);
-    std::cout << "[DEBUG INSERT] After insertion, leaf has " << leaf_node->get_size() << " keys" << std::endl;
-
     // 如果叶子节点已满，则需要分裂
     if (leaf_node->get_size() >= leaf_node->get_max_size()) {
-        std::cout << "[DEBUG INSERT] Leaf node is full, splitting..." << std::endl;
         IxNodeHandle* new_node = split(leaf_node);
         insert_into_parent(leaf_node, new_node->get_key(0), new_node);
-        std::cout << "[DEBUG INSERT] Split completed, created new leaf page " << new_node->get_page_no() << std::endl;
-        // 更新file_hdr_.last_leaf_，在split中处理了
         buffer_pool_manager_->unpin_page(new_node->get_page_id(), true);
         delete new_node;  // 释放new_node内存
     }
