@@ -126,7 +126,7 @@ void QlManager::run_cmd_utility(std::shared_ptr<Plan> plan, txn_id_t *txn_id, Co
                 break;
             }
             case T_LoadData: {
-                sm_manager.load_csv_data(x->file_name_, x->tab_name_, context);
+                sm_manager.load_csv_data_auto(x->file_name_, x->tab_name_, context);
                 break;
             }
             default:

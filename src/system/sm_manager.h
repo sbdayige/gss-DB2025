@@ -83,6 +83,10 @@ class SmManager {
 
     void load_csv_data(const std::string& csv_file_path, const std::string& tab_name, Context* context = nullptr);
 
+    void load_csv_data_mmap(const std::string& csv_file_path, const std::string& tab_name, Context* context = nullptr);
+
+    void load_csv_data_auto(const std::string& csv_file_path, const std::string& tab_name, Context* context = nullptr);
+
    private:
     void load_data(char* start_pos, char* end_pos, const std::string& tab_name, Context* context);
 };

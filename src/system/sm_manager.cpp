@@ -470,29 +470,46 @@ void SmManager::load_csv_data(const std::string& csv_file_path, const std::strin
     load_data(file_buffer.data(), file_buffer.data() + file_size, tab_name, context);
 }
 
+//! 使用内存映射文件的高性能版本（适用于大文件）
+void SmManager::load_csv_data_mmap(const std::string& csv_file_path, const std::string& tab_name, Context* context) {
+    int fd = open(csv_file_path.c_str(), O_RDONLY);
+    struct stat file_stat;
+    const size_t file_size = file_stat.st_size;
+    char* file_data = static_cast<char*>(mmap(nullptr, file_size, PROT_READ, MAP_PRIVATE, fd, 0));
+    madvise(file_data, file_size, MADV_SEQUENTIAL);
+    load_data(file_data, file_data + file_size, tab_name, context);
+    munmap(file_data, file_size);
+    close(fd);
+}
+
+void SmManager::load_csv_data_auto(const std::string& csv_file_path, const std::string& tab_name, Context* context) {
+    struct stat file_stat;
+    const size_t file_size = file_stat.st_size;
+    const size_t FILE_THRESHOLD = 100 * 1024 * 1024;
+    if (file_size < FILE_THRESHOLD) {
+        load_csv_data(csv_file_path, tab_name, context);
+    } else {
+        load_csv_data_mmap(csv_file_path, tab_name, context);
+    }
+}
+
 void SmManager::load_data(char* start_pos, char* end_pos, const std::string& tab_name, Context* context) {
     TabMeta& tab = db_.get_table(tab_name);
     auto fh = fhs_[tab_name].get();
     const size_t record_size = fh->get_file_hdr().record_size;
-
-    // 预分配记录缓冲区
     int max_record_num = fh->file_hdr_.num_records_per_page;
     int len = max_record_num * record_size;
     std::vector<char> record_buffer(len);
     char* record_data = record_buffer.data();
-
     int count = 0;
     size_t offset = 0;
-    memset(record_data, 0, len);  // 初始化记录缓冲区
-
+    memset(record_data, 0, len);                              // 初始化记录缓冲区
     char* current_pos = std::find(start_pos, end_pos, '\n');  // 跳过第一行（表头）
     if (current_pos != end_pos) {
         current_pos++;  // 跳过换行符
     }
-
     // 创建第一个页面
     RmPageHandle current_page = fh->create_new_page_handle();
-
     auto batch_copy = [&]() {
         if (count > 0) {
             // 批量设置bitmap
@@ -519,7 +536,6 @@ void SmManager::load_data(char* start_pos, char* end_pos, const std::string& tab
             count = 0;
         }
     };
-
     // 批量处理数据
     while (current_pos < end_pos) {
         size_t start_offset = offset;
