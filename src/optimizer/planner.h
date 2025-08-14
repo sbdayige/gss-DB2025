@@ -57,15 +57,11 @@ class Planner {
                                                const std::vector<TabCol> &select_cols,
                                                std::shared_ptr<Query> query);
 
-    bool can_push_condition_to_plan(const Condition &cond, std::shared_ptr<Plan> plan);
-
     void analyze_required_columns_for_subtree(std::shared_ptr<Plan> plan,
                                               const std::set<std::string> &all_needed,
                                               std::set<std::string> &subtree_needed);
 
     std::vector<TabCol> convert_to_tabcol(const std::set<std::string> &col_names);
-
-    bool is_select_all(std::shared_ptr<ast::SelectStmt> select_stmt);
 
     size_t estimate_join_result_size(const std::string &table1, const std::string &table2,
                                      const std::unordered_map<std::string, size_t> &cardinality_map,
@@ -115,10 +111,6 @@ class Planner {
             {ast::SV_TYPE_INT, TYPE_INT}, {ast::SV_TYPE_FLOAT, TYPE_FLOAT}, {ast::SV_TYPE_STRING, TYPE_STRING}};
         return m.at(sv_type);
     }
-
-    void extract_conditions_from_plan(std::shared_ptr<Plan> plan, std::vector<Condition> &conditions);
-
-    void clear_conditions_from_plan(std::shared_ptr<Plan> plan);
 
     void collect_join_columns_from_plan(std::shared_ptr<Plan> plan, std::set<std::string> &join_columns);
 };

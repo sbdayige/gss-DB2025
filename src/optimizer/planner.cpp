@@ -96,17 +96,8 @@ bool Planner::get_index_cols(std::string tab_name, std::vector<Condition> curr_c
 }
 
 std::shared_ptr<Query> Planner::logical_optimization(std::shared_ptr<Query> query, Context *context) {
-    // 只对SELECT语句执行逻辑优化
-    if (!std::dynamic_pointer_cast<ast::SelectStmt>(query->parse)) {
-        return query;
-    }
-
-    // 2. 投影下推 (Projection Pushdown)
-    query = projection_pushdown(query);
-
-    // 3. 连接顺序优化 (Join Order Optimization)
+    // 只保留连接顺序优化，移除重复的投影下推
     query = join_order_optimization(query);
-
     return query;
 }
 
@@ -178,7 +169,6 @@ std::shared_ptr<Plan> Planner::make_one_rel(std::shared_ptr<Query> query) {
                     // 情况2: 表.列1 = 表.列2 (同一个表的列比较)
                     curr_conds.push_back(cond);
                 }
-                // 其他情况是连接条件，不在这里处理
             }
         }
 
@@ -212,7 +202,6 @@ std::shared_ptr<Plan> Planner::make_one_rel(std::shared_ptr<Query> query) {
         if (!cond.is_rhs_val) {  // 连接条件：左右都是列
             join_conds.push_back(cond);
         }
-        // WHERE条件（is_rhs_val = true）留给apply_predicate_pushdown处理
     }
 
     auto conds = std::move(join_conds);  // 只处理连接条件
@@ -574,41 +563,6 @@ std::shared_ptr<Plan> Planner::do_planner(std::shared_ptr<Query> query, Context 
 }
 
 /**
- * @brief 投影下推优化实现
- * @param query 待优化的查询对象
- * @return 优化后的查询对象
- * @details 将SELECT列选择尽可能下推，减少不必要的列传输
- */
-std::shared_ptr<Query> Planner::projection_pushdown(std::shared_ptr<Query> query) {
-    // 投影下推优化：只传输查询真正需要的列
-    // 分析SELECT子句和WHERE子句中用到的列，
-    // 确保只从存储层读取必要的列数据
-
-    auto select_stmt = std::dynamic_pointer_cast<ast::SelectStmt>(query->parse);
-    if (!select_stmt) {
-        return query;
-    }
-
-    // 收集真正需要的列
-    std::set<std::string> needed_cols;
-
-    // 1. 添加SELECT子句中的列
-    for (const auto &col : query->cols) {
-        needed_cols.insert(col.tab_name + "." + col.col_name);
-    }
-
-    // 2. 添加WHERE条件中涉及的列
-    for (const auto &cond : query->conds) {
-        needed_cols.insert(cond.lhs_col.tab_name + "." + cond.lhs_col.col_name);
-        if (!cond.is_rhs_val) {
-            needed_cols.insert(cond.rhs_col.tab_name + "." + cond.rhs_col.col_name);
-        }
-    }
-
-    return query;
-}
-
-/**
  * @brief 连接顺序优化实现
  * @param query 待优化的查询对象
  * @return 优化后的查询对象
@@ -678,19 +632,6 @@ size_t Planner::estimate_table_cardinality(const std::string &table_name) {
 std::vector<std::string> Planner::greedy_join_order_optimization(
     const std::vector<std::pair<std::string, size_t>> &table_stats,
     const std::vector<Condition> &conditions) {
-    if (table_stats.size() <= 2) {
-        // 对于两个表或更少，直接按基数排序
-        std::vector<std::pair<std::string, size_t>> sorted_stats = table_stats;
-        std::sort(sorted_stats.begin(), sorted_stats.end(),
-                  [](const auto &a, const auto &b) { return a.second < b.second; });
-
-        std::vector<std::string> result;
-        for (const auto &stat : sorted_stats) {
-            result.push_back(stat.first);
-        }
-        return result;
-    }
-
     // 创建表名到基数的映射
     std::unordered_map<std::string, size_t> cardinality_map;
     for (const auto &stat : table_stats) {
@@ -869,12 +810,6 @@ size_t Planner::estimate_join_with_intermediate_result(size_t intermediate_size,
 std::shared_ptr<Plan> Planner::apply_projection_pushdown(std::shared_ptr<Plan> plan, std::shared_ptr<Query> query) {
     if (!plan)
         return plan;
-
-    // 获取SELECT语句
-    auto select_stmt = std::dynamic_pointer_cast<ast::SelectStmt>(query->parse);
-    if (!select_stmt)
-        return plan;
-
     // 分析查询中需要的列
     std::set<std::string> needed_columns;
 
@@ -1064,27 +999,6 @@ std::shared_ptr<Plan> Planner::insert_project_nodes(std::shared_ptr<Plan> plan,
 
     return plan;
 }
-
-/**
- * @brief 检查条件是否可以下推到指定计划
- */
-bool Planner::can_push_condition_to_plan(const Condition &cond, std::shared_ptr<Plan> plan) {
-    if (!plan)
-        return false;
-
-    // 对于扫描节点，检查条件是否涉及该表
-    if (auto scan_plan = std::dynamic_pointer_cast<ScanPlan>(plan)) {
-        return cond.lhs_col.tab_name == scan_plan->tab_name_ && cond.is_rhs_val;
-    }
-
-    // 对于连接节点，条件可能涉及两个表
-    if (auto join_plan = std::dynamic_pointer_cast<JoinPlan>(plan)) {
-        return true;  // 连接条件通常在连接节点处理
-    }
-
-    return false;
-}
-
 /**
  * @brief 分析子树需要的列
  */
@@ -1123,62 +1037,6 @@ std::vector<TabCol> Planner::convert_to_tabcol(const std::set<std::string> &col_
         }
     }
     return result;
-}
-
-/**
- * @brief 检查是否是SELECT *查询
- */
-bool Planner::is_select_all(std::shared_ptr<ast::SelectStmt> select_stmt) {
-    if (!select_stmt || select_stmt->cols.empty())
-        return false;
-
-    // 检查是否只有一个列且为*
-    if (select_stmt->cols.size() == 1) {
-        auto first_col = select_stmt->cols.front();
-        if (auto col = std::dynamic_pointer_cast<ast::Col>(first_col)) {
-            return col->col_name == "*";
-        }
-    }
-    return false;
-}
-
-/**
- * @brief 从计划树中提取条件
- * @param plan 计划节点
- * @param conditions 提取的条件列表（输出参数）
- */
-void Planner::extract_conditions_from_plan(std::shared_ptr<Plan> plan, std::vector<Condition> &conditions) {
-    if (!plan)
-        return;
-
-    if (auto scan_plan = std::dynamic_pointer_cast<ScanPlan>(plan)) {
-        // 从ScanPlan中提取条件
-        for (const auto &cond : scan_plan->conds_) {
-            conditions.push_back(cond);
-        }
-    } else if (auto join_plan = std::dynamic_pointer_cast<JoinPlan>(plan)) {
-        // 递归处理子节点
-        extract_conditions_from_plan(join_plan->left_, conditions);
-        extract_conditions_from_plan(join_plan->right_, conditions);
-    }
-}
-
-/**
- * @brief 清除计划树中的条件
- * @param plan 计划节点
- */
-void Planner::clear_conditions_from_plan(std::shared_ptr<Plan> plan) {
-    if (!plan)
-        return;
-
-    if (auto scan_plan = std::dynamic_pointer_cast<ScanPlan>(plan)) {
-        // 清除ScanPlan中的条件
-        scan_plan->conds_.clear();
-    } else if (auto join_plan = std::dynamic_pointer_cast<JoinPlan>(plan)) {
-        // 递归处理子节点
-        clear_conditions_from_plan(join_plan->left_);
-        clear_conditions_from_plan(join_plan->right_);
-    }
 }
 
 /**
