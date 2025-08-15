@@ -1,9 +1,3 @@
-/**
- * @brief 智能页面守护系统实现
- *
- * 提供高效的RAII风格页面管理和自动资源清理
- */
-
 #include "storage/page_guard.h"
 
 #include "storage/buffer_pool_manager.h"
@@ -14,9 +8,9 @@
  * @brief 移动构造函数
  */
 BasicPageGuard::BasicPageGuard(BasicPageGuard &&that) noexcept
-    : bpi_(that.bpi_), page_(that.page_), is_dirty_(that.is_dirty_) {
+    : bpm_(that.bpm_), page_(that.page_), is_dirty_(that.is_dirty_) {
     // 清空源对象资源，确保资源只被一个对象持有
-    that.bpi_ = nullptr;
+    that.bpm_ = nullptr;
     that.page_ = nullptr;
     that.is_dirty_ = false;
 }
@@ -25,12 +19,12 @@ BasicPageGuard::BasicPageGuard(BasicPageGuard &&that) noexcept
  * @brief 手动释放页面资源
  */
 void BasicPageGuard::Drop() {
-    if (page_ != nullptr && bpi_ != nullptr) {
+    if (page_ != nullptr && bpm_ != nullptr) {
         // 释放页面并根据脏位决定是否需要写回
-        bpi_->unpin_page(page_->get_page_id(), is_dirty_);
+        bpm_->unpin_page(page_->get_page_id(), is_dirty_);
 
         // 重置所有状态
-        bpi_ = nullptr;
+        bpm_ = nullptr;
         page_ = nullptr;
         is_dirty_ = false;
     }
@@ -45,12 +39,12 @@ auto BasicPageGuard::operator=(BasicPageGuard &&that) noexcept -> BasicPageGuard
         Drop();
 
         // 转移新资源
-        bpi_ = that.bpi_;
+        bpm_ = that.bpm_;
         page_ = that.page_;
         is_dirty_ = that.is_dirty_;
 
         // 清空源对象
-        that.bpi_ = nullptr;
+        that.bpm_ = nullptr;
         that.page_ = nullptr;
         that.is_dirty_ = false;
     }

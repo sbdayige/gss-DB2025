@@ -9,7 +9,7 @@
 
 #include "storage/page.h"
 
-class BufferPoolInstance;
+class BufferPoolManager;
 class ReadPageGuard;
 class WritePageGuard;
 
@@ -21,7 +21,7 @@ class WritePageGuard;
 class BasicPageGuard {
    public:
     BasicPageGuard() = default;
-    BasicPageGuard(BufferPoolInstance *bpi, Page *page) : bpi_(bpi), page_(page) {}
+    BasicPageGuard(BufferPoolManager *bpm, Page *page) : bpm_(bpm), page_(page) {}
 
     // 禁用拷贝构造和拷贝赋值
     BasicPageGuard(const BasicPageGuard &) = delete;
@@ -61,9 +61,9 @@ class BasicPageGuard {
    private:
     friend class ReadPageGuard;
     friend class WritePageGuard;
-    friend class BufferPoolInstance;
+    friend class BufferPoolManager;
 
-    [[maybe_unused]] BufferPoolInstance *bpi_{nullptr};
+    [[maybe_unused]] BufferPoolManager *bpm_{nullptr};
     Page *page_{nullptr};
     bool is_dirty_{false};
 };
@@ -71,7 +71,7 @@ class BasicPageGuard {
 class ReadPageGuard {
    public:
     ReadPageGuard() = default;
-    ReadPageGuard(BufferPoolInstance *bpi, Page *page) : guard_(bpi, page) {}
+    ReadPageGuard(BufferPoolManager *bpm, Page *page) : guard_(bpm, page) {}
 
     // 禁用拷贝构造和拷贝赋值
     ReadPageGuard(const ReadPageGuard &) = delete;
@@ -109,7 +109,7 @@ class ReadPageGuard {
 class WritePageGuard {
    public:
     WritePageGuard() = default;
-    WritePageGuard(BufferPoolInstance *bpi, Page *page) : guard_(bpi, page) {}
+    WritePageGuard(BufferPoolManager *bpm, Page *page) : guard_(bpm, page) {}
 
     // 禁用拷贝构造和拷贝赋值
     WritePageGuard(const WritePageGuard &) = delete;

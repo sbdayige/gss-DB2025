@@ -18,7 +18,7 @@ See the Mulan PSL v2 for more details. */
  * @description: 存储层每个Page的id的声明
  */
 struct PageId {
-    int fd;  //  Page所在的磁盘文件开启后的文件描述符, 来定位打开的文件在内存中的位置
+    int fd;
     page_id_t page_no = INVALID_PAGE_ID;
 
     friend bool operator==(const PageId &x, const PageId &y) { return x.fd == y.fd && x.page_no == y.page_no; }
@@ -30,16 +30,7 @@ struct PageId {
     std::string toString() {
         return "{fd: " + std::to_string(fd) + " page_no: " + std::to_string(page_no) + "}";
     }
-
-    // inline int64_t Get() const {
-    //     return (static_cast<int64_t>(fd << 16) | page_no);
-    // }
 };
-
-// PageId的自定义哈希算法, 用于构建unordered_map<PageId, frame_id_t, PageIdHash>
-// struct PageIdHash {
-//     size_t operator()(const PageId &x) const { return (x.fd << 16) | x.page_no; }
-// };
 
 template <>
 struct std::hash<PageId> {
@@ -55,8 +46,7 @@ struct std::hash<PageId> {
  * Page对象在磁盘上有文件存储, 若在Buffer中则有帧偏移, 并非特指Buffer或Disk上的数据
  */
 class Page {
-    friend class BufferPoolInstance;
-    // friend class BufferPoolManager;
+    friend class BufferPoolManager;
 
    public:
     Page() {
