@@ -12,7 +12,10 @@ See the Mulan PSL v2 for more details. */
 
 #include <cassert>
 #include <cstring>
+#include <iomanip>
+#include <iostream>
 #include <memory>
+#include <sstream>
 #include <string>
 #include <vector>
 
@@ -84,7 +87,22 @@ struct Value {
         }
     }
 
-    std::string toString() const;
+    std::string toString() const {
+        switch (type) {
+            case TYPE_INT:
+                return std::to_string(int_val);
+            case TYPE_FLOAT: {
+                // 检查是否为整数值（没有小数部分）
+                std::ostringstream oss;
+                oss << std::fixed << std::setprecision(6) << float_val;
+                return oss.str();
+            }
+            case TYPE_STRING:
+                return "'" + str_val + "'";
+            default:
+                return "unknown";
+        }
+    }
 };
 
 enum CompOp { OP_EQ,
