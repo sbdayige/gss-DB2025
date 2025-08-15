@@ -42,7 +42,7 @@ LogManager log_manager;
 RecoveryManager recovery;
 QlManager ql_manager;
 Portal portal;
-Analyze analyze(&sm_manager);
+Analyze analyze;
 BufferPoolManager buffer_pool_manager(BUFFER_POOL_SIZE);
 DiskManager disk_manager;
 RmManager rm_manager;

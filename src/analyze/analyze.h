@@ -21,6 +21,8 @@ See the Mulan PSL v2 for more details. */
 #include "parser/parser.h"
 #include "system/sm.h"
 
+extern SmManager sm_manager;
+
 class Query {
    public:
     std::shared_ptr<ast::TreeNode> parse;
@@ -50,12 +52,9 @@ class Query {
 };
 
 class Analyze {
-   private:
-    SmManager *sm_manager_;
-
    public:
-    Analyze(SmManager *sm_manager) : sm_manager_(sm_manager) {}
-    ~Analyze() {}
+    Analyze() = default;
+    ~Analyze() = default;
 
     std::shared_ptr<Query> do_analyze(std::shared_ptr<ast::TreeNode> root);
 

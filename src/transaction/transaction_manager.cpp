@@ -122,12 +122,12 @@ void TransactionManager::commit(Transaction* txn, LogManager* log_manager) {
         }
     }
 
-    std::shared_ptr<std::unordered_set<LockDataId>> lock_set = txn->get_lock_set();
+    // std::shared_ptr<std::unordered_set<LockDataId>> lock_set = txn->get_lock_set();
 
-    auto lock_set_copy = *lock_set;  // 复制锁集合以避免迭代时修改
-    for (const LockDataId& lock : lock_set_copy) {
-        lock_manager.unlock(txn, lock);
-    }
+    // auto lock_set_copy = *lock_set;  // 复制锁集合以避免迭代时修改
+    // for (const LockDataId& lock : lock_set_copy) {
+    //     lock_manager.unlock(txn, lock);
+    // }
 
     // 间隙锁释放代码已注释掉以避免并发问题
     /*
@@ -222,11 +222,11 @@ void TransactionManager::abort(Context* context, LogManager* log_manager) {
     }
 
     // 释放所有锁
-    std::shared_ptr<std::unordered_set<LockDataId>> lock_set = txn->get_lock_set();
-    auto lock_set_copy = *lock_set;  // 复制锁集合以避免迭代时修改
-    for (const LockDataId& lock : lock_set_copy) {
-        lock_manager.unlock(txn, lock);
-    }
+    // std::shared_ptr<std::unordered_set<LockDataId>> lock_set = txn->get_lock_set();
+    // auto lock_set_copy = *lock_set;  // 复制锁集合以避免迭代时修改
+    // for (const LockDataId& lock : lock_set_copy) {
+    //     lock_manager.unlock(txn, lock);
+    // }
 
     // 间隙锁释放代码已注释掉以避免并发问题
     /*
@@ -472,15 +472,6 @@ void TransactionManager::AssignReadTimestamp(Transaction* txn) {
     }
 }
 
-/** @brief MVCC: 为事务分配提交时间戳 */
-timestamp_t TransactionManager::AssignCommitTimestamp(Transaction* txn) {
-    if (concurrency_mode_ == ConcurrencyMode::MVCC) {
-        timestamp_t commit_ts = next_timestamp_.fetch_add(1);
-        return commit_ts;
-    }
-    return INVALID_TS;
-}
-
 /** @brief MVCC: 获取元组的最新版本及其事务信息 */
 std::pair<bool, txn_id_t> TransactionManager::GetLatestVersionInfo(int fd, const Rid& rid) {
     auto version_link = GetVersionLink(fd, rid);
@@ -493,33 +484,4 @@ std::pair<bool, txn_id_t> TransactionManager::GetLatestVersionInfo(int fd, const
     }
 
     return {false, INVALID_TXN_ID};  // 无冲突
-}
-
-/** @brief MVCC: 检查版本可见性 */
-bool TransactionManager::IsVersionVisible(Transaction* txn, timestamp_t version_ts, txn_id_t version_txn_id) {
-    if (concurrency_mode_ != ConcurrencyMode::MVCC) {
-        return true;  // 非MVCC模式下所有版本都可见
-    }
-
-    // 如果是同一个事务，版本可见
-    if (version_txn_id == txn->get_transaction_id()) {
-        return true;
-    }
-
-    // 检查版本事务是否已提交
-    std::unique_lock<std::mutex> lock(latch_);
-    auto it = txn_map.find(version_txn_id);
-    if (it != txn_map.end()) {
-        Transaction* version_txn = it->second;
-        lock.unlock();
-
-        // 如果版本事务未提交，版本不可见
-        if (version_txn->get_state() != TransactionState::COMMITTED) {
-            return false;
-        }
-    }
-    lock.unlock();
-
-    // 如果版本时间戳小于等于当前事务的读时间戳，版本可见
-    return version_ts <= txn->get_read_ts();
 }

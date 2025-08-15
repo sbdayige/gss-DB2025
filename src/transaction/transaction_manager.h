@@ -167,14 +167,8 @@ class TransactionManager {
     /** @brief MVCC: 为事务分配读时间戳 */
     void AssignReadTimestamp(Transaction *txn);
 
-    /** @brief MVCC: 为事务分配提交时间戳 */
-    timestamp_t AssignCommitTimestamp(Transaction *txn);
-
     /** @brief MVCC: 获取元组的最新版本及其事务信息 */
     std::pair<bool, txn_id_t> GetLatestVersionInfo(int fd, const Rid &rid);
-
-    /** @brief MVCC: 检查版本可见性 */
-    bool IsVersionVisible(Transaction *txn, timestamp_t version_ts, txn_id_t version_txn_id);
 
     // 获取全局唯一递增的时间戳（用于每次写操作）
     timestamp_t get_next_timestamp() {

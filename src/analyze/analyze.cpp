@@ -12,6 +12,8 @@ See the Mulan PSL v2 for more details. */
 
 #include <iostream>
 
+extern SmManager sm_manager;
+
 /**
  * @description: 分析器，进行语义分析和查询重写，需要检查不符合语义规定的部分
  * @param {shared_ptr<ast::TreeNode>} parse parser生成的结果集
@@ -35,7 +37,7 @@ std::shared_ptr<Query> Analyze::do_analyze(std::shared_ptr<ast::TreeNode> parse)
         std::map<std::string, std::string> alias_map;
         for (const auto &table_ref : x->table_refs) {
             // 检查表是否存在
-            if (!sm_manager_->db_.is_table(table_ref->tab_name)) {
+            if (!sm_manager.db_.is_table(table_ref->tab_name)) {
                 throw TableNotFoundError(table_ref->tab_name);
             }
 
@@ -59,7 +61,7 @@ std::shared_ptr<Query> Analyze::do_analyze(std::shared_ptr<ast::TreeNode> parse)
         for (const auto &join_expr : x->jointree) {
             auto right_ref = join_expr->right_ref;
             // 检查JOIN右表是否存在
-            if (!sm_manager_->db_.is_table(right_ref->tab_name)) {
+            if (!sm_manager.db_.is_table(right_ref->tab_name)) {
                 throw TableNotFoundError(right_ref->tab_name);
             }
 
@@ -314,7 +316,7 @@ std::shared_ptr<Query> Analyze::do_analyze(std::shared_ptr<ast::TreeNode> parse)
             // 聚合函数的列名验证将在执行阶段处理
         }
     } else if (auto x = std::dynamic_pointer_cast<ast::UpdateStmt>(parse)) {
-        if (!sm_manager_->db_.is_table(x->tab_name)) {  // 检查表是否存在
+        if (!sm_manager.db_.is_table(x->tab_name)) {  // 检查表是否存在
             throw TableNotFoundError(x->tab_name);
         }
         query->tables.push_back(x->tab_name);
@@ -357,7 +359,7 @@ std::shared_ptr<Query> Analyze::do_analyze(std::shared_ptr<ast::TreeNode> parse)
             set_clause.lhs = check_column(all_cols, set_clause.lhs);  // 检查列是否存在
 
             if (set_clause.rhs_type == SetRhsType::SET_RHS_VALUE) {
-                TabMeta &tab = sm_manager_->db_.get_table(set_clause.lhs.tab_name);
+                TabMeta &tab = sm_manager.db_.get_table(set_clause.lhs.tab_name);
                 auto col = tab.get_col(set_clause.lhs.col_name);
                 // 允许数值类型之间的转换(INT与FLOAT)
                 bool is_numeric =
@@ -371,9 +373,9 @@ std::shared_ptr<Query> Analyze::do_analyze(std::shared_ptr<ast::TreeNode> parse)
                 // 检查右侧列是否存在
                 set_clause.rhs_col = check_column(all_cols, set_clause.rhs_col);
                 // 类型兼容校验：允许 INT↔FLOAT，其他必须完全一致
-                TabMeta &lhs_tab = sm_manager_->db_.get_table(set_clause.lhs.tab_name);
+                TabMeta &lhs_tab = sm_manager.db_.get_table(set_clause.lhs.tab_name);
                 auto l_col = lhs_tab.get_col(set_clause.lhs.col_name);
-                TabMeta &rhs_tab = sm_manager_->db_.get_table(set_clause.rhs_col.tab_name);
+                TabMeta &rhs_tab = sm_manager.db_.get_table(set_clause.rhs_col.tab_name);
                 auto r_col = rhs_tab.get_col(set_clause.rhs_col.col_name);
 
                 bool is_numeric = (l_col->type == ColType::TYPE_INT || l_col->type == ColType::TYPE_FLOAT) &&
@@ -386,7 +388,7 @@ std::shared_ptr<Query> Analyze::do_analyze(std::shared_ptr<ast::TreeNode> parse)
                 validate_arith_expr(set_clause.rhs_expr, {set_clause.lhs.tab_name});
 
                 // 检查目标列类型是否支持算术表达式
-                TabMeta &tab = sm_manager_->db_.get_table(set_clause.lhs.tab_name);
+                TabMeta &tab = sm_manager.db_.get_table(set_clause.lhs.tab_name);
                 auto col = tab.get_col(set_clause.lhs.col_name);
                 if (col->type == ColType::TYPE_STRING) {
                     throw IncompatibleTypeError(coltype2str(col->type), "numeric type for arithmetic result");
@@ -396,7 +398,7 @@ std::shared_ptr<Query> Analyze::do_analyze(std::shared_ptr<ast::TreeNode> parse)
     } else if (auto x = std::dynamic_pointer_cast<ast::DeleteStmt>(parse)) {
         query->tables.push_back(x->tab_name);
 
-        if (!sm_manager_->db_.is_table(x->tab_name)) {
+        if (!sm_manager.db_.is_table(x->tab_name)) {
             throw TableNotFoundError(x->tab_name);
         }
 
@@ -542,7 +544,7 @@ TabCol Analyze::check_column_with_semi_join_preference(const std::vector<ColMeta
 void Analyze::get_all_cols(const std::vector<std::string> &tab_names, std::vector<ColMeta> &all_cols) {
     for (auto &sel_tab_name : tab_names) {
         // 这里db_不能写成get_db(), 注意要传指针
-        const auto &sel_tab_cols = sm_manager_->db_.get_table(sel_tab_name).cols;
+        const auto &sel_tab_cols = sm_manager.db_.get_table(sel_tab_name).cols;
         all_cols.insert(all_cols.end(), sel_tab_cols.begin(), sel_tab_cols.end());
     }
 }
@@ -581,7 +583,7 @@ void Analyze::check_clause(const std::vector<std::string> &tab_names, std::vecto
         if (!cond.is_rhs_val) {
             cond.rhs_col = check_column(all_cols, cond.rhs_col);
         }
-        TabMeta &lhs_tab = sm_manager_->db_.get_table(cond.lhs_col.tab_name);
+        TabMeta &lhs_tab = sm_manager.db_.get_table(cond.lhs_col.tab_name);
         auto lhs_col = lhs_tab.get_col(cond.lhs_col.col_name);
         ColType lhs_type = lhs_col->type;
         ColType rhs_type;
@@ -590,7 +592,7 @@ void Analyze::check_clause(const std::vector<std::string> &tab_names, std::vecto
             // cond.rhs_val.init_raw(lhs_col->len);
             rhs_type = cond.rhs_val.type;
         } else {
-            TabMeta &rhs_tab = sm_manager_->db_.get_table(cond.rhs_col.tab_name);
+            TabMeta &rhs_tab = sm_manager.db_.get_table(cond.rhs_col.tab_name);
             auto rhs_col = rhs_tab.get_col(cond.rhs_col.col_name);
             rhs_type = rhs_col->type;
         }
@@ -612,7 +614,7 @@ void Analyze::check_clause_with_alias(const std::vector<std::string> &tab_names,
         if (!cond.is_rhs_val) {
             cond.rhs_col = check_column_with_alias(all_cols, cond.rhs_col, alias_map);
         }
-        TabMeta &lhs_tab = sm_manager_->db_.get_table(cond.lhs_col.tab_name);
+        TabMeta &lhs_tab = sm_manager.db_.get_table(cond.lhs_col.tab_name);
         auto lhs_col = lhs_tab.get_col(cond.lhs_col.col_name);
         ColType lhs_type = lhs_col->type;
         ColType rhs_type;
@@ -621,7 +623,7 @@ void Analyze::check_clause_with_alias(const std::vector<std::string> &tab_names,
             // cond.rhs_val.init_raw(lhs_col->len);
             rhs_type = cond.rhs_val.type;
         } else {
-            TabMeta &rhs_tab = sm_manager_->db_.get_table(cond.rhs_col.tab_name);
+            TabMeta &rhs_tab = sm_manager.db_.get_table(cond.rhs_col.tab_name);
             auto rhs_col = rhs_tab.get_col(cond.rhs_col.col_name);
             rhs_type = rhs_col->type;
         }
@@ -704,7 +706,7 @@ void Analyze::validate_arith_expr(std::shared_ptr<ast::ArithExpr> arith_expr, co
         lhs_tab_col = check_column(all_cols, lhs_tab_col);
 
         // 检查列类型是否支持算术运算
-        TabMeta &tab = sm_manager_->db_.get_table(lhs_tab_col.tab_name);
+        TabMeta &tab = sm_manager.db_.get_table(lhs_tab_col.tab_name);
         auto col = tab.get_col(lhs_tab_col.col_name);
         if (col->type != TYPE_INT && col->type != TYPE_FLOAT) {
             throw IncompatibleTypeError(coltype2str(col->type), "numeric type for arithmetic operation");
@@ -728,7 +730,7 @@ void Analyze::validate_arith_expr(std::shared_ptr<ast::ArithExpr> arith_expr, co
         TabCol rhs_tab_col = {rhs_col->tab_name, rhs_col->col_name};
         rhs_tab_col = check_column(all_cols, rhs_tab_col);
 
-        TabMeta &tab = sm_manager_->db_.get_table(rhs_tab_col.tab_name);
+        TabMeta &tab = sm_manager.db_.get_table(rhs_tab_col.tab_name);
         auto col = tab.get_col(rhs_tab_col.col_name);
         if (col->type != TYPE_INT && col->type != TYPE_FLOAT) {
             throw IncompatibleTypeError(coltype2str(col->type), "numeric type for arithmetic operation");
