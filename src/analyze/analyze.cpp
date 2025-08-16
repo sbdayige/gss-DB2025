@@ -140,7 +140,7 @@ std::shared_ptr<Query> Analyze::do_analyze(std::shared_ptr<ast::TreeNode> parse)
         }
         // 处理where条件
         get_clause(x->conds, query->conds);
-        check_clause_with_alias(query->tables, query->conds, alias_map);
+        check_clause_with_alias(query->tables, query->conds, alias_map, all_cols);
 
         // 处理JOIN ON条件
         for (const auto &join_expr : x->jointree) {
@@ -151,7 +151,7 @@ std::shared_ptr<Query> Analyze::do_analyze(std::shared_ptr<ast::TreeNode> parse)
 
             std::vector<Condition> join_conds;
             get_clause(join_expr->conds, join_conds);
-            check_clause_with_alias(query->tables, join_conds, alias_map);
+            check_clause_with_alias(query->tables, join_conds, alias_map, all_cols);
 
             // 将JOIN ON条件添加到查询条件中
             query->conds.insert(query->conds.end(), join_conds.begin(), join_conds.end());
@@ -604,9 +604,7 @@ void Analyze::check_clause(const std::vector<std::string> &tab_names, std::vecto
 }
 
 // 支持别名的条件检查函数
-void Analyze::check_clause_with_alias(const std::vector<std::string> &tab_names, std::vector<Condition> &conds, const std::map<std::string, std::string> &alias_map) {
-    std::vector<ColMeta> all_cols;
-    get_all_cols(tab_names, all_cols);
+void Analyze::check_clause_with_alias(const std::vector<std::string> &tab_names, std::vector<Condition> &conds, const std::map<std::string, std::string> &alias_map, std::vector<ColMeta> all_cols) {
     // Get raw values in where clause
     for (auto &cond : conds) {
         // Infer table name from column name, 考虑别名
@@ -619,8 +617,6 @@ void Analyze::check_clause_with_alias(const std::vector<std::string> &tab_names,
         ColType lhs_type = lhs_col->type;
         ColType rhs_type;
         if (cond.is_rhs_val) {
-            // 不在这里进行init_raw，让执行器来处理
-            // cond.rhs_val.init_raw(lhs_col->len);
             rhs_type = cond.rhs_val.type;
         } else {
             TabMeta &rhs_tab = sm_manager.db_.get_table(cond.rhs_col.tab_name);
@@ -632,10 +628,7 @@ void Analyze::check_clause_with_alias(const std::vector<std::string> &tab_names,
                 if (!can_cast_type(rhs_type, lhs_type)) {
                     throw IncompatibleTypeError(coltype2str(lhs_type), coltype2str(rhs_type));
                 }
-                // 不进行实际的类型转换，只检查兼容性
-                // 保持原始值和类型不变，由执行器在运行时处理类型转换
             } else {
-                // 对于列与列的比较，也检查类型兼容性
                 if (!can_cast_type(rhs_type, lhs_type) && !can_cast_type(lhs_type, rhs_type)) {
                     throw IncompatibleTypeError(coltype2str(lhs_type), coltype2str(rhs_type));
                 }

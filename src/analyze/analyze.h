@@ -65,7 +65,7 @@ class Analyze {
     void get_all_cols(const std::vector<std::string> &tab_names, std::vector<ColMeta> &all_cols);
     void get_clause(const std::vector<std::shared_ptr<ast::BinaryExpr>> &sv_conds, std::vector<Condition> &conds);
     void check_clause(const std::vector<std::string> &tab_names, std::vector<Condition> &conds);
-    void check_clause_with_alias(const std::vector<std::string> &tab_names, std::vector<Condition> &conds, const std::map<std::string, std::string> &alias_map);
+    void Analyze::check_clause_with_alias(const std::vector<std::string> &tab_names, std::vector<Condition> &conds, const std::map<std::string, std::string> &alias_map, std::vector<ColMeta> all_cols);
     Value convert_sv_value(const std::shared_ptr<ast::Value> &sv_val);
     Value evaluate_arith_expr(const std::shared_ptr<ast::ArithExpr> &arith_expr);
     CompOp convert_sv_comp_op(ast::SvCompOp op);
