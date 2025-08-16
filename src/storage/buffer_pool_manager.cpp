@@ -347,3 +347,45 @@ auto BufferPoolManager::fetch_page_write(PageId page_id) -> WritePageGuard {
     basic_guard.page_->WLatch();  // 获取写锁
     return WritePageGuard{this, basic_guard.page_};
 }
+
+void BasicPageGuard::Drop() {
+    if (page_ != nullptr && bpm_ != nullptr) {
+        // 释放页面并根据脏位决定是否需要写回
+        bpm_->unpin_page(page_->get_page_id(), is_dirty_);
+
+        // 重置所有状态
+        bpm_ = nullptr;
+        page_ = nullptr;
+        is_dirty_ = false;
+    }
+}
+
+BasicPageGuard::~BasicPageGuard() {
+    Drop();
+}
+
+void ReadPageGuard::Drop() {
+    if (guard_.page_ != nullptr) {
+        // 释放读锁
+        guard_.page_->RUnlatch();
+        // 释放基础guard持有的资源
+        guard_.Drop();
+    }
+}
+
+ReadPageGuard::~ReadPageGuard() {
+    Drop();
+}
+
+void WritePageGuard::Drop() {
+    if (guard_.page_ != nullptr) {
+        // 释放写锁
+        guard_.page_->WUnlatch();
+        // 释放基础guard持有的资源
+        guard_.Drop();
+    }
+}
+
+WritePageGuard::~WritePageGuard() {
+    Drop();
+}

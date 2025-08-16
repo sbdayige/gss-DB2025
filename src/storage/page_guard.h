@@ -9,6 +9,7 @@
 
 #include "storage/page.h"
 
+// 前置声明
 class BufferPoolManager;
 class ReadPageGuard;
 class WritePageGuard;
@@ -27,22 +28,36 @@ class BasicPageGuard {
     BasicPageGuard(const BasicPageGuard &) = delete;
     auto operator=(const BasicPageGuard &) -> BasicPageGuard & = delete;
 
-    // 支持移动语义
-    BasicPageGuard(BasicPageGuard &&that) noexcept;
-    auto operator=(BasicPageGuard &&that) noexcept -> BasicPageGuard &;
-
-    // 生命周期管理
-    void Drop();
-    ~BasicPageGuard();
-
-    // 页面信息访问
-    auto PageId() -> PageId { return page_->get_page_id(); }
-    auto GetData() -> const char * { return page_->get_data(); }
-    auto GetDataMut() -> char * {
-        is_dirty_ = true;
-        return page_->get_data();
+    // 支持移动语义 - 内联实现
+    BasicPageGuard(BasicPageGuard &&that) noexcept
+        : bpm_(that.bpm_), page_(that.page_), is_dirty_(that.is_dirty_) {
+        // 清空源对象资源，确保资源只被一个对象持有
+        that.bpm_ = nullptr;
+        that.page_ = nullptr;
+        that.is_dirty_ = false;
     }
 
+    auto operator=(BasicPageGuard &&that) noexcept -> BasicPageGuard & {
+        if (this != &that) {
+            // 首先释放当前管理的资源
+            Drop();
+
+            // 转移新资源
+            bpm_ = that.bpm_;
+            page_ = that.page_;
+            is_dirty_ = that.is_dirty_;
+
+            // 清空源对象
+            that.bpm_ = nullptr;
+            that.page_ = nullptr;
+            that.is_dirty_ = false;
+        }
+        return *this;
+    }
+
+    // 生命周期管理 - 声明，实现在buffer_pool_manager.cpp中
+    void Drop();
+    ~BasicPageGuard();
     // 类型转换模板
     template <class T>
     auto As() -> const T * {
@@ -57,6 +72,13 @@ class BasicPageGuard {
     // 状态查询
     bool IsValid() const { return page_ != nullptr; }
     bool IsDirty() const { return is_dirty_; }
+    // 页面信息访问
+    auto PageId() -> PageId { return page_->get_page_id(); }
+    auto GetData() -> const char * { return page_->get_data(); }
+    auto GetDataMut() -> char * {
+        is_dirty_ = true;
+        return page_->get_data();
+    }
 
    private:
     friend class ReadPageGuard;
@@ -77,11 +99,23 @@ class ReadPageGuard {
     ReadPageGuard(const ReadPageGuard &) = delete;
     auto operator=(const ReadPageGuard &) -> ReadPageGuard & = delete;
 
-    // 支持移动语义
-    ReadPageGuard(ReadPageGuard &&that) noexcept;
-    auto operator=(ReadPageGuard &&that) noexcept -> ReadPageGuard &;
+    // 支持移动语义 - 内联实现
+    ReadPageGuard(ReadPageGuard &&that) noexcept : guard_(std::move(that.guard_)) {
+        // 基础 guard_ 的移动构造函数已经处理了资源转移
+    }
 
-    // 生命周期管理
+    auto operator=(ReadPageGuard &&that) noexcept -> ReadPageGuard & {
+        if (this != &that) {
+            // 先释放当前持有的资源
+            Drop();
+
+            // 转移资源
+            guard_ = std::move(that.guard_);
+        }
+        return *this;
+    }
+
+    // 生命周期管理 - 声明，实现在buffer_pool_manager.cpp中
     void Drop();
     ~ReadPageGuard();
 
@@ -115,11 +149,23 @@ class WritePageGuard {
     WritePageGuard(const WritePageGuard &) = delete;
     auto operator=(const WritePageGuard &) -> WritePageGuard & = delete;
 
-    // 支持移动语义
-    WritePageGuard(WritePageGuard &&that) noexcept;
-    auto operator=(WritePageGuard &&that) noexcept -> WritePageGuard &;
+    // 支持移动语义 - 内联实现
+    WritePageGuard(WritePageGuard &&that) noexcept : guard_(std::move(that.guard_)) {
+        // 基础 guard_ 的移动构造函数已经处理了资源转移
+    }
 
-    // 生命周期管理
+    auto operator=(WritePageGuard &&that) noexcept -> WritePageGuard & {
+        if (this != &that) {
+            // 先释放当前持有的资源
+            Drop();
+
+            // 转移资源
+            guard_ = std::move(that.guard_);
+        }
+        return *this;
+    }
+
+    // 生命周期管理 - 声明，实现在buffer_pool_manager.cpp中
     void Drop();
     ~WritePageGuard();
 
@@ -141,9 +187,6 @@ class WritePageGuard {
     // 状态查询
     bool IsValid() const { return guard_.IsValid(); }
     bool IsDirty() const { return guard_.IsDirty(); }
-
-    // 升级接口（从ReadPageGuard升级而来）
-    auto UpgradeWrite() -> WritePageGuard;
 
    private:
     BasicPageGuard guard_;
