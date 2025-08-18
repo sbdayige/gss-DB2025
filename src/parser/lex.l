@@ -88,6 +88,7 @@ value_path [\.|\/][^ \t]+\.csv
 "RIGHT" { return RIGHT; }
 "FULL" { return FULL; }
 "SEMI" { return SEMI; }
+"ANTI" {return ANTI; }
 "ON" { return ON; }
 "AS" { return AS; }
 "EXPLAIN" {return EXPLAIN; }

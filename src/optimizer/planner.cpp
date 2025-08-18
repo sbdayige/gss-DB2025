@@ -140,7 +140,6 @@ std::shared_ptr<Plan> Planner::make_one_rel(std::shared_ptr<Query> query) {
     // 将抽象语法树转换为SelectStmt类型，获取查询的具体信息
     auto x = std::dynamic_pointer_cast<ast::SelectStmt>(query->parse);
     std::vector<std::string> tables = query->tables;
-
     // 检测JOIN类型信息
     std::map<std::pair<std::string, std::string>, JoinType> join_type_map;
     if (x) {
@@ -189,7 +188,6 @@ std::shared_ptr<Plan> Planner::make_one_rel(std::shared_ptr<Query> query) {
                 std::make_shared<ScanPlan>(T_IndexScan, &sm_manager, tables[i], curr_conds, index_col_names);
         }
     }
-
     // 如果只有一个表，无需进行连接操作，直接返回该表的扫描计划
     if (tables.size() == 1) {
         return table_scan_executors[0];
@@ -221,7 +219,6 @@ std::shared_ptr<Plan> Planner::make_one_rel(std::shared_ptr<Query> query) {
         // 按照优化后的顺序逐个加入剩余的表
         for (size_t i = 1; i < tables.size(); i++) {
             std::string next_table = tables[i];
-
             // 查找与当前已连接的表集合之间的连接条件
             std::vector<Condition> applicable_conds;
             for (const auto &cond : conds) {
@@ -327,7 +324,6 @@ std::shared_ptr<Plan> Planner::generate_sort_plan(std::shared_ptr<Query> query, 
     }
     // 获取查询涉及的所有表名
     std::vector<std::string> tables = query->tables;
-
     // 创建所有列的元数据集合，用于后续的排序列查找
     std::vector<ColMeta> all_cols;
 

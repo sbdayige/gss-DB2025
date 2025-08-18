@@ -33,6 +33,7 @@ class MvccSelectExecutor : public AbstractExecutor {
     std::unique_ptr<RmRecord> current_record_;  // 当前记录
     Rid current_rid_;                           // 当前记录的RID
     bool fed_to_upper_;                         // 是否已经被上层执行器消费
+    int scanned_count = 0;
 
    public:
     MvccSelectExecutor(const std::string &tab_name, std::vector<Condition> conds,
@@ -74,7 +75,6 @@ class MvccSelectExecutor : public AbstractExecutor {
     void beginTuple() override {
         // 创建扫描迭代器
         scan_ = std::make_unique<RmScan>(fh_);
-
         // 查找第一个满足条件的记录
         FindNextValidRecord();
     }
@@ -104,7 +104,6 @@ class MvccSelectExecutor : public AbstractExecutor {
         current_record_.reset();
 
         // 扫描直到找到符合条件的记录
-        int scanned_count = 0;
         while (!scan_->is_end()) {
             current_rid_ = scan_->rid();
             scanned_count++;

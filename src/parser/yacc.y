@@ -22,7 +22,7 @@ using namespace ast;
 
 // keywords
 %token SHOW TABLES CREATE TABLE DROP DESC INSERT INTO VALUES DELETE FROM ASC ORDER BY 
-%token WHERE UPDATE SET SELECT INT CHAR FLOAT INDEX AND JOIN INNER LEFT RIGHT FULL SEMI
+%token WHERE UPDATE SET SELECT INT CHAR FLOAT INDEX AND JOIN INNER LEFT RIGHT FULL SEMI ANTI
 %token ON AS EXIT HELP TXN_BEGIN TXN_COMMIT TXN_ABORT TXN_ROLLBACK ORDER_BY 
 %token ENABLE_NESTLOOP ENABLE_SORTMERGE STATIC_CHECKPOINT CRASH
 %token GROUP HAVING LIMIT COUNT MAX MIN SUM AVG LOAD
@@ -32,7 +32,7 @@ using namespace ast;
 
 // 优先级和结合性规则
 %right JOIN  // JOIN 右结合，优先级较高
-%left INNER LEFT RIGHT FULL SEMI  // JOIN类型左结合，优先级较低
+%left INNER LEFT RIGHT FULL SEMI ANTI  // JOIN类型左结合，优先级较低
 
 // arithmetic operators
 %left '+' '-'
@@ -564,6 +564,10 @@ joinType:
     |   SEMI
     {
         $$ = SEMI_JOIN;
+    }
+    | ANTI
+    {
+         $$ = ANTI_JOIN;
     }
     ;
 

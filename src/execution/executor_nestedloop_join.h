@@ -31,7 +31,7 @@ class NestedLoopJoinExecutor : public AbstractExecutor {
 
     // 用于SEMI JOIN的去重逻辑
     std::set<std::string> matched_left_keys_;  // 已匹配的左表记录键值（用于去重）
-
+    int num = 0;
     // 存储当前匹配的记录
     std::unique_ptr<RmRecord> current_record_;
 
@@ -49,6 +49,9 @@ class NestedLoopJoinExecutor : public AbstractExecutor {
         // 根据连接类型设置输出结构
         if (join_type_ == SEMI_JOIN) {
             // SEMI JOIN只输出左表列
+            len_ = left_->tupleLen();
+            cols_ = left_->cols();
+        } else if (join_type_ == ANTI_JOIN) {
             len_ = left_->tupleLen();
             cols_ = left_->cols();
         } else {
@@ -73,11 +76,11 @@ class NestedLoopJoinExecutor : public AbstractExecutor {
         right_->beginTuple();
 
         // 对于SEMI JOIN，清空之前的匹配记录集合
-        if (join_type_ == SEMI_JOIN) {
+        if (join_type_ == SEMI_JOIN || join_type_ == ANTI_JOIN) {
             matched_left_keys_.clear();
         }
 
-        if (left_->is_end() || right_->is_end()) {
+        if (left_->is_end()) {
             is_end_ = true;
             return;
         }
@@ -96,6 +99,9 @@ class NestedLoopJoinExecutor : public AbstractExecutor {
             // SEMI JOIN：先移动到下一个左表记录，然后查找匹配
             left_->nextTuple();
             find_semi_join_record();
+        } else if (join_type_ == ANTI_JOIN) {
+            left_->nextTuple();
+            find_anti_join_record();
         } else {
             // 传统JOIN：移动到下一个组合，然后查找满足条件的记录
             right_->nextTuple();
@@ -124,7 +130,7 @@ class NestedLoopJoinExecutor : public AbstractExecutor {
             return nullptr;
         }
 
-        if (join_type_ == SEMI_JOIN) {
+        if (join_type_ == SEMI_JOIN || join_type_ == ANTI_JOIN) {
             // SEMI JOIN只返回左表记录
             auto left_record = left_->Next();
             if (!left_record) {
@@ -158,6 +164,8 @@ class NestedLoopJoinExecutor : public AbstractExecutor {
         if (join_type_ == SEMI_JOIN) {
             // SEMI JOIN逻辑：只返回左表中有匹配右表记录的行，每个左表记录最多返回一次
             find_semi_join_record();
+        } else if (join_type_ == ANTI_JOIN) {
+            find_anti_join_record();
         } else {
             // 传统JOIN逻辑
             find_regular_join_record();
@@ -165,6 +173,63 @@ class NestedLoopJoinExecutor : public AbstractExecutor {
     }
 
    private:
+    void find_anti_join_record() {
+        while (!left_->is_end()) {
+            // 获取当前左表记录
+            auto left_record = left_->Next();
+
+            // 生成左表记录的唯一键值
+            std::string record_key = generate_record_key(left_record.get(), left_->cols());
+
+            // 检查是否已经输出过这个记录
+            if (matched_left_keys_.find(record_key) != matched_left_keys_.end()) {
+                // 已经输出过，跳过这个记录
+                left_->nextTuple();
+                continue;
+            }
+
+            // 检查是否在右表中有匹配
+            bool has_match = true;
+            right_->beginTuple();
+
+            while (!right_->is_end()) {
+                auto right_record = right_->Next();
+
+                // 创建组合记录用于条件评估
+                auto combined_record = std::make_unique<RmRecord>(left_->tupleLen() + right_->tupleLen());
+                memcpy(combined_record->data, left_record->data, left_->tupleLen());
+                memcpy(combined_record->data + left_->tupleLen(), right_record->data, right_->tupleLen());
+
+                // 构建组合列元数据用于条件评估
+                std::vector<ColMeta> combined_cols = left_->cols();
+                auto right_cols = right_->cols();
+                for (auto& col : right_cols) {
+                    col.offset += left_->tupleLen();
+                }
+                combined_cols.insert(combined_cols.end(), right_cols.begin(), right_cols.end());
+
+                // 检查连接条件
+                if (fed_conds_.empty() || eval_conds(combined_cols, fed_conds_, combined_record.get())) {
+                    has_match = false;
+                    break;
+                }
+
+                right_->nextTuple();
+            }
+
+            if (has_match) {
+                // 找到匹配，记录这个键值并停在当前记录
+                matched_left_keys_.insert(record_key);
+                return;
+            }
+
+            // 没有匹配，继续下一个左表记录
+            left_->nextTuple();
+        }
+
+        // 所有左表记录都检查完毕
+        is_end_ = true;
+    }
     void find_regular_join_record() {
         int left_count = 0, right_count = 0, combination_count = 0, match_count = 0;
 

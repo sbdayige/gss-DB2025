@@ -36,7 +36,8 @@ enum JoinType {
     LEFT_JOIN,   // 左连接：返回左表所有记录和右表匹配记录
     RIGHT_JOIN,  // 右连接：返回右表所有记录和左表匹配记录
     FULL_JOIN,   // 全连接：返回两表所有记录
-    SEMI_JOIN    // 半连接：返回左表中与右表匹配的记录，但不包含右表列
+    SEMI_JOIN,   // 半连接：返回左表中与右表匹配的记录，但不包含右表列
+    ANTI_JOIN    // 反半连接：与半连接完全相反的连接
 };
 
 namespace ast {

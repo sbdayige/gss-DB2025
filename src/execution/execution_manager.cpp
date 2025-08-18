@@ -169,7 +169,6 @@ void QlManager::select_from(std::unique_ptr<AbstractExecutor> executorTreeRoot, 
         if (limit > 0 && num_rec >= static_cast<size_t>(limit)) {
             break;
         }
-
         auto Tuple = executorTreeRoot->Next();
         if (!Tuple) {
             break;

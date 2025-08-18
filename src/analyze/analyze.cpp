@@ -97,7 +97,7 @@ std::shared_ptr<Query> Analyze::do_analyze(std::shared_ptr<ast::TreeNode> parse)
             bool has_semi_join = false;
             std::string left_table_name;
             for (const auto &join_expr : x->jointree) {
-                if (join_expr->type == SEMI_JOIN) {
+                if (join_expr->type == SEMI_JOIN || join_expr->type == ANTI_JOIN) {
                     has_semi_join = true;
                     left_table_name = join_expr->left.empty() ? query->tables[0] : join_expr->left;
                     break;
@@ -123,7 +123,7 @@ std::shared_ptr<Query> Analyze::do_analyze(std::shared_ptr<ast::TreeNode> parse)
             bool has_semi_join = false;
             std::string left_table_name;
             for (const auto &join_expr : x->jointree) {
-                if (join_expr->type == SEMI_JOIN) {
+                if (join_expr->type == SEMI_JOIN || join_expr->type == ANTI_JOIN) {
                     has_semi_join = true;
                     left_table_name = join_expr->left;
                     break;
@@ -159,10 +159,9 @@ std::shared_ptr<Query> Analyze::do_analyze(std::shared_ptr<ast::TreeNode> parse)
 
         // SEMI JOIN语义检查：SELECT子句中只能选择左表的列
         for (const auto &join_expr : x->jointree) {
-            if (join_expr->type == SEMI_JOIN) {
+            if (join_expr->type == SEMI_JOIN || join_expr->type == ANTI_JOIN) {
                 std::string right_table_name = join_expr->right_ref->tab_name;
                 std::string right_table_alias = join_expr->right_ref->alias;
-
                 // 检查所有选择的列是否来自右表
                 for (const auto &sel_col : query->cols) {
                     bool is_from_right_table = false;
@@ -178,7 +177,7 @@ std::shared_ptr<Query> Analyze::do_analyze(std::shared_ptr<ast::TreeNode> parse)
                     }
 
                     if (is_from_right_table) {
-                        throw InternalError("SEMI JOIN cannot select columns from right table: " +
+                        throw InternalError("SEMI JOIN  or ANTI JOIN cannot select columns from right table: " +
                                             sel_col.tab_name + "." + sel_col.col_name);
                     }
                 }
